@@ -1,0 +1,31 @@
+{
+  "version": "0.2.0",
+  "date": "2026-11-13",
+  "browser": "Chrome via playwright-cli, isolated session lexi-review-020",
+  "storage": "In-memory GM fixture; no real user library",
+  "shadowRoot": "Opened by fixture instrumentation for Playwright locators; product remains closed",
+  "passed": [
+    "Answers hidden until reveal",
+    "Four feedback buttons display next intervals",
+    "Overdue words appear before later due words",
+    "Forgotten review word enters relearning and records a lapse",
+    "Learning and relearning cards return after advancing the browser clock",
+    "Remembered and easy words retain future review dates",
+    "Repeated review of the same word counts once today",
+    "Upcoming schedule shows previously studied words",
+    "Light and dark desktop screenshots inspected",
+    "Narrow dark feedback controls fit a 390px viewport",
+    "Actual JSON export validates as schema v2 with FSRS state",
+    "Importing older v1 backup preserves newer FSRS state and counts"
+  ],
+  "finalStats": { "due": 0, "reviewedToday": 2, "savedWords": 3 },
+  "finalBeta": { "reviews": 6, "state": 2, "lapses": 1 },
+  "pageErrors": [],
+  "reviewNetworkRequests": [],
+  "consoleNotes": ["Local fixture favicon.ico returned 404; no script exceptions"],
+  "screenshots": [
+    "01-overview-light.png", "02-answer-light.png", "03-upcoming-light.png",
+    "04-answer-dark.png", "05-answer-narrow-dark.png", "06-final-plan.png"
+  ],
+  "notVerified": ["Installation in Tampermonkey", "Real GM cross-tab simultaneous writes", "Long-term individual memory retention"]
+}

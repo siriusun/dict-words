@@ -1,5 +1,7 @@
 # Lexi：划词词典与个人复习库 · 初始设计
 
+> 复习部分已在 0.2.0 升级为成熟 FSRS 调度；当前规则、迁移与来源以 [REVIEW_DESIGN.md](REVIEW_DESIGN.md) 为准。下方固定阶梯记录的是初版设计。
+
 版本：0.1 / 2026-11-12。目标平台：桌面 Chrome、Edge、Firefox + Tampermonkey。
 
 ## 1. 产品定位与已确认决策

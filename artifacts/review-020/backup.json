@@ -1,0 +1,154 @@
+{
+  "schemaVersion": 2,
+  "exportedAt": "2026-11-13T09:16:01.424Z",
+  "words": [
+    {
+      "word": "alpha",
+      "fetchedAt": 1794560400064,
+      "phonetic": "/test/",
+      "audio": "",
+      "sourceUrl": "",
+      "license": {
+        "name": "",
+        "url": ""
+      },
+      "meanings": [
+        {
+          "partOfSpeech": "noun",
+          "definitions": [
+            {
+              "definition": "The meaning of alpha.",
+              "example": ""
+            }
+          ]
+        }
+      ],
+      "translation": "1. 名词：示例释义",
+      "translatedAt": 1794560400064,
+      "translationSource": "1. noun: The meaning of alpha."
+    },
+    {
+      "word": "beta",
+      "fetchedAt": 1794560400064,
+      "phonetic": "/test/",
+      "audio": "",
+      "sourceUrl": "",
+      "license": {
+        "name": "",
+        "url": ""
+      },
+      "meanings": [
+        {
+          "partOfSpeech": "noun",
+          "definitions": [
+            {
+              "definition": "The meaning of beta.",
+              "example": ""
+            }
+          ]
+        }
+      ],
+      "translation": "1. 名词：示例释义",
+      "translatedAt": 1794560400064,
+      "translationSource": "1. noun: The meaning of beta."
+    },
+    {
+      "word": "gamma",
+      "fetchedAt": 1794560400064,
+      "phonetic": "/test/",
+      "audio": "",
+      "sourceUrl": "",
+      "license": {
+        "name": "",
+        "url": ""
+      },
+      "meanings": [
+        {
+          "partOfSpeech": "noun",
+          "definitions": [
+            {
+              "definition": "The meaning of gamma.",
+              "example": ""
+            }
+          ]
+        }
+      ],
+      "translation": "1. 名词：示例释义",
+      "translatedAt": 1794560400064,
+      "translationSource": "1. noun: The meaning of gamma."
+    }
+  ],
+  "history": [],
+  "book": [
+    {
+      "word": "alpha",
+      "addedAt": 1794560400064,
+      "updatedAt": 1794561361222,
+      "dueAt": 1794734161222,
+      "stage": 2,
+      "reviews": 3,
+      "lastReviewedAt": 1794561361222,
+      "lastGrade": "easy",
+      "fsrs": {
+        "due": 1794734161222,
+        "stability": 2.36913529,
+        "difficulty": 3.4509278,
+        "elapsed_days": 0,
+        "scheduled_days": 2,
+        "reps": 3,
+        "lapses": 0,
+        "learning_steps": 0,
+        "state": 2,
+        "last_review": 1794561361222
+      }
+    },
+    {
+      "word": "beta",
+      "addedAt": 1793782800064,
+      "updatedAt": 1794561361010,
+      "dueAt": 1794647761010,
+      "stage": 1,
+      "reviews": 6,
+      "lastReviewedAt": 1794561361010,
+      "lastGrade": "good",
+      "fsrs": {
+        "due": 1794647761010,
+        "stability": 1.12683063,
+        "difficulty": 8.32864898,
+        "elapsed_days": 0,
+        "scheduled_days": 1,
+        "reps": 6,
+        "lapses": 1,
+        "learning_steps": 0,
+        "state": 2,
+        "last_review": 1794561361010
+      }
+    },
+    {
+      "word": "gamma",
+      "addedAt": 1794128400064,
+      "updatedAt": 1794387600064,
+      "dueAt": 1794646800064,
+      "stage": 2,
+      "reviews": 2,
+      "lastReviewedAt": 1794387600064,
+      "lastGrade": "good",
+      "fsrs": {
+        "due": 1794646800064,
+        "stability": 3,
+        "difficulty": 5,
+        "elapsed_days": 0,
+        "scheduled_days": 3,
+        "reps": 2,
+        "lapses": 0,
+        "learning_steps": 0,
+        "state": 2,
+        "last_review": 1794387600064
+      }
+    }
+  ],
+  "settings": {
+    "auto": true,
+    "context": false
+  }
+}

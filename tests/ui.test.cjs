@@ -2,12 +2,19 @@ const assert = require('node:assert/strict');
 const test = require('node:test');
 const fs = require('node:fs');
 const vm = require('node:vm');
-const { translationSource } = require('../lexi.user.js');
+const { translationSource, schedule } = require('../lexi.user.js');
 const source = fs.readFileSync(require.resolve('../lexi.user.js'), 'utf8');
 
 // Exercise the userscript's actual UI callbacks without a browser or user GM data.
 function setup(phonetic = '/test/') {
   let shadow;
+  let clockNow = Date.UTC(2026, 10, 13, 9);
+  class ClockDate extends Date {
+    constructor(...args) { super(...(args.length ? args : [clockNow])); }
+    static now() { return clockNow; }
+  }
+  const timers = new Map();
+  let timerId = 0;
   class Element {
     constructor(tag = 'div') {
       this.tag = tag; this.children = []; this.listeners = {}; this.attributes = {};
@@ -46,19 +53,22 @@ function setup(phonetic = '/test/') {
   const storage = new Map();
   const menus = new Map();
   for (const word of ['alpha', 'beta']) {
-    const entry = { word, fetchedAt: Date.now(), phonetic, audio: '', sourceUrl: '', license: { name: '', url: '' },
+    const entry = { word, fetchedAt: clockNow, phonetic, audio: '', sourceUrl: '', license: { name: '', url: '' },
       meanings: [{ partOfSpeech: 'noun', definitions: [{ definition: word, example: '' }] }], translation: '中文' };
     entry.translationSource = translationSource(entry);
     storage.set(prefix + 'word:' + word, entry);
   }
   const events = ['alpha', 'beta', 'alpha'].map((word, index) => ({ word, id: 'history-event-' + index, at: index + 1 }));
   for (const event of events) storage.set(prefix + 'event:' + event.id, event);
-  storage.set(prefix + 'study:alpha', { word: 'alpha', addedAt: 1, dueAt: 1, stage: 2, reviews: 3 });
+  storage.set(prefix + 'study:alpha', { word: 'alpha', addedAt: clockNow - 5 * 86400000,
+    updatedAt: clockNow - 3 * 86400000, dueAt: clockNow - 86400000, stage: 2, reviews: 3,
+    lastReviewedAt: clockNow - 3 * 86400000, lastGrade: 'good' });
   const context = {
-    window, document, Element, TextEncoder, URL, crypto: { randomUUID: () => 'test-revision' },
+    window, document, Element, Date: ClockDate, TextEncoder, URL, crypto: { randomUUID: () => 'test-revision' },
     GM_info: { script: { version: source.match(/^\/\/ @version\s+(\S+)/m)[1] } },
     getComputedStyle: node => ({ overflowY: 'visible', overflowX: 'visible', ...node.css }),
-    setTimeout: () => 0, clearTimeout: () => {},
+    setTimeout: (callback, delay) => { const id = ++timerId; timers.set(id, { callback, at: clockNow + delay }); return id; },
+    clearTimeout: id => timers.delete(id),
     GM_getValue: (key, fallback) => storage.has(key) ? storage.get(key) : fallback,
     GM_setValue: (key, value) => storage.set(key, value),
     GM_deleteValue: key => storage.delete(key), GM_listValues: () => [...storage.keys()],
@@ -72,8 +82,164 @@ function setup(phonetic = '/test/') {
     node.listeners.click.listener();
     await new Promise(setImmediate);
   };
-  return { shadow, storage, events, context, Element, click, prefix };
+  const advance = milliseconds => {
+    clockNow += milliseconds;
+    for (const [id, timer] of [...timers]) {
+      if (timer.at <= clockNow && timers.has(id)) { timers.delete(id); timer.callback(); }
+    }
+  };
+  return { shadow, storage, events, context, Element, click, prefix, advance, timers };
 }
+
+const findButton = (shadow, label) => shadow.querySelectorAll('button').find(node => node.textContent.startsWith(label));
+const openReview = async app => {
+  await app.click(app.shadow.querySelectorAll('.tab')[2]);
+  await app.click(findButton(app.shadow, '开始复习'));
+};
+
+test('review hides answers until recalled, previews four schedules and persists a grade only once', async () => {
+  const app = setup();
+  const { shadow, storage, prefix, context, click } = app;
+  const original = structuredClone(storage.get(prefix + 'study:alpha'));
+  await openReview(app);
+  assert.equal(shadow.querySelector('.review-answer'), null);
+  assert.equal(findButton(shadow, '记得 ·'), undefined);
+  await click(findButton(shadow, '显示释义'));
+  assert.ok(shadow.querySelector('.review-answer').querySelector('.sense'));
+  for (const [grade, label] of [['again', '忘记'], ['hard', '困难'], ['good', '记得'], ['easy', '轻松']]) {
+    const expected = schedule(original, grade, context.Date.now());
+    const action = findButton(shadow, label + ' ·');
+    assert.ok(action);
+    assert.ok(action.title.includes('下次复习：'));
+    assert.ok(expected.dueAt > context.Date.now());
+  }
+  const action = findButton(shadow, '记得 ·');
+  await Promise.all([click(action), click(action)]);
+  const saved = storage.get(prefix + 'study:alpha');
+  assert.deepEqual(JSON.parse(JSON.stringify(saved)), schedule(original, 'good', context.Date.now()));
+  assert.ok(shadow.querySelector('.review').querySelector('h2').textContent.includes('本轮已完成'));
+  await click(findButton(shadow, '返回复习概览'));
+  assert.deepEqual(shadow.querySelectorAll('.stat').map(node => node.querySelector('strong').textContent), ['0', '1', '1']);
+  assert.equal(shadow.querySelector('.review-plan').querySelector('.term').textContent, 'alpha');
+});
+
+test('each feedback button saves its displayed FSRS interval', async () => {
+  for (const [grade, label] of [['again', '忘记'], ['hard', '困难'], ['good', '记得'], ['easy', '轻松']]) {
+    const app = setup();
+    const { storage, prefix, context, shadow, click } = app;
+    const before = structuredClone(storage.get(prefix + 'study:alpha'));
+    const expected = schedule(before, grade, context.Date.now());
+    await openReview(app);
+    await click(findButton(shadow, '显示释义'));
+    const action = findButton(shadow, label + ' ·');
+    assert.equal(action.textContent, `${label} · ${expected.dueAt - context.Date.now() < 86400000
+      ? Math.ceil((expected.dueAt - context.Date.now()) / 60000) + ' 分钟'
+      : Math.round((expected.dueAt - context.Date.now()) / 86400000) + ' 天'}`);
+    await click(action);
+    assert.deepEqual(JSON.parse(JSON.stringify(storage.get(prefix + 'study:alpha'))), expected);
+  }
+});
+
+test('empty review overview lists the next review and automatically notices when it becomes due', async () => {
+  const app = setup();
+  const { shadow, storage, prefix, context, click, advance } = app;
+  const future = schedule(storage.get(prefix + 'study:alpha'), 'again', context.Date.now());
+  storage.set(prefix + 'study:alpha', future);
+  await click(shadow.querySelectorAll('.tab')[2]);
+  assert.equal(findButton(shadow, '开始复习'), undefined);
+  assert.ok(shadow.querySelector('.review').querySelector('p').textContent.startsWith('下次复习：'));
+  assert.equal(shadow.querySelector('.review-plan').querySelector('.term').textContent, 'alpha');
+  advance(future.dueAt - context.Date.now());
+  assert.ok(findButton(shadow, '开始复习'));
+  assert.equal(shadow.querySelectorAll('.stat')[0].querySelector('strong').textContent, '1');
+  await click(findButton(shadow, '开始复习'));
+  assert.equal(shadow.querySelector('.review').querySelector('.word').textContent, 'alpha');
+  assert.ok(shadow.querySelector('.review').querySelector('.muted').textContent.includes('重新学习'));
+});
+
+test('review storage failure preserves the answer and the original progress for retry', async () => {
+  const app = setup();
+  const { shadow, storage, prefix, context, click } = app;
+  const original = storage.get(prefix + 'study:alpha');
+  await openReview(app);
+  await click(findButton(shadow, '显示释义'));
+  const write = context.GM_setValue;
+  context.GM_setValue = () => { throw new Error('Storage unavailable'); };
+  await click(findButton(shadow, '记得 ·'));
+  assert.equal(storage.get(prefix + 'study:alpha'), original);
+  assert.ok(shadow.querySelector('.review-answer'));
+  assert.equal(shadow.querySelector('.toast').textContent, 'Storage unavailable');
+  context.GM_setValue = write;
+  await click(findButton(shadow, '记得 ·'));
+  assert.equal(storage.get(prefix + 'study:alpha').reviews, original.reviews + 1);
+});
+
+test('a grade cannot overwrite progress already saved in another tab or resurrect an unstarred word', async () => {
+  for (const removed of [false, true]) {
+    const app = setup();
+    const { shadow, storage, prefix, context, click } = app;
+    await openReview(app);
+    await click(findButton(shadow, '显示释义'));
+    const action = findButton(shadow, '记得 ·');
+    const updated = schedule(storage.get(prefix + 'study:alpha'), 'easy', context.Date.now());
+    if (removed) storage.delete(prefix + 'study:alpha');
+    else storage.set(prefix + 'study:alpha', updated);
+    await click(action);
+    assert.equal(storage.get(prefix + 'study:alpha'), removed ? undefined : updated);
+    assert.equal(shadow.querySelector('.toast').textContent, '该词已在其他页面更新，已跳过');
+  }
+});
+
+test('skipping a stale revealed card does not expose the next word answer', async () => {
+  const app = setup();
+  const { shadow, storage, prefix, context, click } = app;
+  storage.set(prefix + 'study:beta', { ...storage.get(prefix + 'study:alpha'), word: 'beta' });
+  await openReview(app);
+  await click(findButton(shadow, '显示释义'));
+  storage.set(prefix + 'study:alpha', schedule(storage.get(prefix + 'study:alpha'), 'good', context.Date.now()));
+  context.window.listeners.focus.listener();
+  assert.equal(shadow.querySelector('.review').querySelector('.word').textContent, 'beta');
+  assert.equal(shadow.querySelector('.review-answer'), null);
+  assert.ok(findButton(shadow, '显示释义'));
+});
+
+test('round limit keeps all remaining due words available and today counts distinct words', async () => {
+  const app = setup();
+  const { shadow, storage, prefix, click } = app;
+  for (let i = 0; i < 20; i++) {
+    const word = 'extra' + String.fromCharCode(97 + i);
+    storage.set(prefix + 'word:' + word, { ...storage.get(prefix + 'word:alpha'), word });
+    storage.set(prefix + 'study:' + word, { ...storage.get(prefix + 'study:alpha'), word });
+  }
+  await openReview(app);
+  for (let i = 0; i < 20; i++) {
+    await click(findButton(shadow, '显示释义'));
+    await click(findButton(shadow, '记得 ·'));
+  }
+  assert.ok(shadow.querySelector('.review').querySelector('p').textContent.includes('还有 1 个到期词'));
+  await click(findButton(shadow, '继续复习到期词'));
+  await click(findButton(shadow, '显示释义'));
+  await click(findButton(shadow, '记得 ·'));
+  await click(findButton(shadow, '返回复习概览'));
+  assert.deepEqual(shadow.querySelectorAll('.stat').map(node => node.querySelector('strong').textContent), ['0', '21', '21']);
+  assert.equal(shadow.querySelector('.review-plan').querySelectorAll('.setting').length, 6);
+});
+
+test('overview resets today across midnight and cancels its refresh when leaving or closing', async () => {
+  const app = setup();
+  const { shadow, storage, prefix, context, click, advance, timers } = app;
+  storage.set(prefix + 'study:alpha', schedule(storage.get(prefix + 'study:alpha'), 'easy', context.Date.now()));
+  await click(shadow.querySelectorAll('.tab')[2]);
+  assert.equal(shadow.querySelectorAll('.stat')[1].querySelector('strong').textContent, '1');
+  advance(86400000);
+  assert.equal(shadow.querySelectorAll('.stat')[1].querySelector('strong').textContent, '0');
+  await click(shadow.querySelectorAll('.tab')[1]);
+  assert.equal(timers.size, 0);
+  await click(shadow.querySelectorAll('.tab')[2]);
+  assert.equal(timers.size, 1);
+  await click(shadow.querySelectorAll('button').find(node => node.attributes['aria-label'] === '关闭学习中心'));
+  assert.equal(timers.size, 0);
+});
 
 test('deleting one repeated history event preserves other events, cache and study progress', async () => {
   const { shadow, storage, events, click, prefix } = setup();

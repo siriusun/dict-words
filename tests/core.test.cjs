@@ -1,6 +1,8 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
-const { normalize, schedule, csv, dictionary, validateBackup, mergeBackup, ordered, audioUrl, translationSource, translationChunks, youdaoPhonetic } = require('../lexi.user.js');
+const fs = require('node:fs');
+const { createHash } = require('node:crypto');
+const { normalize, schedule, migrateStudy, reviewInterval, csv, dictionary, validateBackup, mergeBackup, ordered, audioUrl, translationSource, translationChunks, youdaoPhonetic } = require('../lexi.user.js');
 const now = Date.UTC(2026, 10, 12);
 const DAY = 86400000;
 const word = dictionary([{ phonetics: [{ text: '/test/', audio: 'https://api.dictionaryapi.dev/media/test.mp3' }],
@@ -10,24 +12,127 @@ const study = { word: 'test', addedAt: now, updatedAt: now, dueAt: now, stage: 0
 const event = { word: 'test', id: '12345678-1234-4123-8123-123456789012', at: now };
 const backup = () => structuredClone({ schemaVersion: 1, words: [word], history: [event], book: [study] });
 
+test('vendored FSRS matches the pinned upstream bundle after whitespace normalization', () => {
+  const source = fs.readFileSync(require.resolve('../lexi.user.js'), 'utf8');
+  const start = source.indexOf('(function (global, factory) {');
+  const end = source.indexOf('    // END VENDORED TS-FSRS 5.4.2');
+  assert.ok(start > 0 && end > start);
+  const bundle = source.slice(start, end).replace(/\r\n/g, '\n').replace(/[\t ]+$/gm, '').trim();
+  assert.equal(createHash('sha256').update(bundle).digest('hex'),
+    'd67b02ba6a7a3d82d08885876b691cc8615d3dfdfdf4de0e6865a8d8990de09c');
+});
+
 test('only a single English word is queried; punctuation and contractions survive', () => {
   for (const [input, expected] of [['“Serendipity,”', 'serendipity'], ['DON’T', "don't"], ['mother-in-law', 'mother-in-law'], ['(hello)', 'hello'], ["'test'", 'test']]) assert.equal(normalize(input), expected);
   for (const input of ['hello world', 'abc123', '你好', '', 'a--b', '-test', 'x'.repeat(65), null, '<script>']) assert.equal(normalize(input), '');
 });
-test('review moves through intervals, caps at 60 days, and resets on forgetting', () => {
-  let state = study;
-  for (const days of [1, 3, 7, 14, 30, 60, 60]) {
-    state = schedule(state, 'good', now);
-    assert.equal(state.dueAt, now + days * DAY);
+test('FSRS uses Anki learning steps and four grades without permanently retiring a word', () => {
+  const results = ['again', 'hard', 'good', 'easy'].map(grade => schedule(study, grade, now));
+  assert.deepEqual(results.slice(0, 3).map(item => item.dueAt - now), [60000, 360000, 600000]);
+  assert.deepEqual(results.map(item => item.fsrs.state), [1, 1, 1, 2]);
+  assert.ok(results[3].dueAt > now + DAY);
+  assert.equal(results[2].fsrs.learning_steps, 1);
+  const graduate = schedule(results[2], 'good', results[2].dueAt);
+  assert.equal(graduate.fsrs.state, 2);
+  assert.ok(graduate.fsrs.scheduled_days >= 1);
+  let state = graduate;
+  for (let i = 0; i < 12; i++) {
+    const reviewedAt = state.dueAt;
+    state = schedule(state, 'good', reviewedAt);
+    assert.ok(state.dueAt > reviewedAt && state.dueAt <= reviewedAt + 365 * DAY);
   }
-  assert.equal(state.reviews, 7);
-  assert.equal(schedule(state, 'hard', now).stage, 6);
-  assert.equal(schedule(state, 'hard', now).dueAt, now + DAY);
-  const forgotten = schedule(state, 'again', now);
-  assert.equal(forgotten.stage, 0);
-  assert.equal(forgotten.dueAt, now + 600000);
-  assert.equal(schedule(forgotten, 'good', now).dueAt, now + DAY);
-  assert.throws(() => schedule(state, 'unknown', now));
+  assert.equal(state.fsrs.scheduled_days, 365);
+  for (const grade of ['hard', 'good', 'easy']) {
+    assert.equal(schedule(state, grade, state.dueAt).fsrs.scheduled_days, 365);
+  }
+  assert.equal(state.reviews, 14);
+  assert.throws(() => schedule(state, 'unknown', state.dueAt), /未知复习反馈/);
+  assert.throws(() => schedule(state, '__proto__', state.dueAt), /未知复习反馈/);
+  assert.throws(() => schedule(state, 'good', NaN));
+});
+test('FSRS adapts to recall difficulty and puts forgotten review cards into relearning', () => {
+  let state = schedule(study, 'good', now);
+  state = schedule(state, 'good', state.dueAt);
+  state = schedule(state, 'good', state.dueAt);
+  const [hard, good, easy] = ['hard', 'good', 'easy'].map(grade => schedule(state, grade, state.dueAt));
+  assert.ok(hard.dueAt < good.dueAt && good.dueAt < easy.dueAt);
+  assert.ok(hard.fsrs.difficulty > good.fsrs.difficulty && good.fsrs.difficulty > easy.fsrs.difficulty);
+  const forgotten = schedule(state, 'again', state.dueAt);
+  assert.equal(forgotten.fsrs.state, 3);
+  assert.equal(forgotten.fsrs.lapses, 1);
+  assert.equal(forgotten.dueAt, state.dueAt + 600000);
+  assert.ok(forgotten.fsrs.stability < state.fsrs.stability);
+  const relearned = schedule(forgotten, 'good', forgotten.dueAt);
+  assert.equal(relearned.fsrs.state, 2);
+  assert.ok(relearned.fsrs.scheduled_days < good.fsrs.scheduled_days);
+  assert.equal(relearned.fsrs.lapses, 1);
+  const late = schedule(state, 'good', state.dueAt + 30 * DAY);
+  assert.equal(late.fsrs.state, 2);
+  assert.ok(late.dueAt > late.lastReviewedAt);
+  assert.ok(late.fsrs.scheduled_days >= good.fsrs.scheduled_days);
+});
+test('legacy migration preserves due dates and counts and does not fabricate review history', () => {
+  for (const [index, interval] of [1, 3, 7, 14, 30, 60].entries()) {
+    const old = { ...study, stage: index + 1, reviews: index + 2, lastReviewedAt: now,
+      lastGrade: 'good', dueAt: now + interval * DAY };
+    const original = structuredClone(old);
+    const migrated = migrateStudy(old);
+    assert.deepEqual(old, original);
+    assert.equal(migrated.dueAt, old.dueAt);
+    assert.equal(migrated.updatedAt, old.updatedAt);
+    assert.equal(migrated.fsrs.stability, interval);
+    assert.equal(migrated.fsrs.difficulty, 5);
+    assert.equal(migrated.fsrs.state, 2);
+    assert.equal(migrated.fsrs.reps, old.reviews);
+    assert.equal(schedule(migrated, 'good', old.dueAt).reviews, old.reviews + 1);
+    assert.deepEqual(migrateStudy(JSON.parse(JSON.stringify(migrated))), migrated);
+  }
+  const forgotten = migrateStudy({ ...study, reviews: 3, lastReviewedAt: now, lastGrade: 'again', dueAt: now + 600000 });
+  assert.equal(forgotten.fsrs.state, 3);
+  assert.ok(forgotten.fsrs.stability > 0);
+});
+test('FSRS memory and numeric timestamps survive JSON backup, import and subsequent learning', () => {
+  const data = validateBackup(backup());
+  assert.equal(data.schemaVersion, 2);
+  let state = data.book[0];
+  for (const grade of ['good', 'good', 'hard', 'easy', 'again', 'hard', 'again', 'good', 'easy']) {
+    state = schedule(state, grade, state.dueAt);
+    data.book[0] = state;
+    const restored = validateBackup(JSON.parse(JSON.stringify(data))).book[0];
+    assert.deepEqual(restored, state);
+    assert.equal(typeof restored.fsrs.due, 'number');
+    assert.equal(typeof restored.fsrs.last_review, 'number');
+    assert.deepEqual(schedule(restored, 'good', restored.dueAt), schedule(state, 'good', state.dueAt));
+  }
+});
+test('invalid or inconsistent FSRS backups fail before import', () => {
+  const data = validateBackup(backup());
+  data.book[0] = schedule(data.book[0], 'easy', now);
+  const cases = [
+    item => { delete item.fsrs; }, item => { item.fsrs = null; },
+    item => { item.fsrs.due++; }, item => { item.fsrs.reps++; },
+    item => { item.fsrs.last_review++; }, item => { item.fsrs.state = '2'; },
+    item => { item.fsrs.state = 4; }, item => { item.fsrs.stability = NaN; },
+    item => { item.fsrs.stability = 0; }, item => { item.fsrs.difficulty = 11; },
+    item => { item.fsrs.elapsed_days = -1; }, item => { item.fsrs.scheduled_days = 36501; },
+    item => { item.fsrs.learning_steps = 3; }, item => { item.fsrs.lapses = item.reviews + 1; },
+    item => { item.lastGrade = ''; }
+  ];
+  for (const mutate of cases) {
+    const invalid = structuredClone(data);
+    mutate(invalid.book[0]);
+    assert.throws(() => validateBackup(invalid), /备份格式无效/);
+  }
+  const fresh = validateBackup(backup());
+  fresh.book[0].fsrs.state = 2;
+  assert.throws(() => validateBackup(fresh));
+});
+test('review interval labels match the persisted schedule', () => {
+  assert.equal(reviewInterval(60000), '1 分钟');
+  assert.equal(reviewInterval(360000), '6 分钟');
+  assert.equal(reviewInterval(600000), '10 分钟');
+  assert.equal(reviewInterval(DAY), '1 天');
+  assert.equal(reviewInterval(365 * DAY), '365 天');
 });
 test('dictionary normalizes missing fields and rejects malformed/no-result responses', () => {
   assert.equal(word.word, 'test');
@@ -81,12 +186,12 @@ test('backup roundtrips all persistent learning data without executing imported 
   data.words[0].translatedAt = now;
   const result = validateBackup(JSON.parse(JSON.stringify(data)));
   assert.equal(result.words[0].translation, data.words[0].translation);
-  assert.deepEqual(result.book[0], study);
+  assert.deepEqual(result.book[0], migrateStudy(study));
   assert.equal(result.history[0].word, 'test');
 });
 test('invalid versions, dangling references, duplicates and invalid progress fail before import', () => {
   const cases = [
-    data => { data.schemaVersion = 2; },
+    data => { data.schemaVersion = 3; },
     data => { data.history[0].word = 'missing'; },
     data => { data.book[0].stage = -1; },
     data => { data.book[0].reviews = '1'; },
