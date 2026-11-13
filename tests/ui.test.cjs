@@ -2,7 +2,7 @@ const assert = require('node:assert/strict');
 const test = require('node:test');
 const fs = require('node:fs');
 const vm = require('node:vm');
-const { translationSource, schedule } = require('../lexi.user.js');
+const { translationSource, schedule, scheduleAll, createStudy, migrateStudy } = require('../lexi.user.js');
 const source = fs.readFileSync(require.resolve('../lexi.user.js'), 'utf8');
 
 // Exercise the userscript's actual UI callbacks without a browser or user GM data.
@@ -33,6 +33,7 @@ function setup(phonetic = '/test/', phoneticSource = 'youdao') {
     removeAttribute(name) { delete this.attributes[name]; }
     addEventListener(type, listener, options) { this.listeners[type] = { listener, options }; }
     attachShadow() { return shadow = new Element('shadow'); }
+    get tagName() { return this.tag.toUpperCase(); }
     getClientRects() { return [{}]; }
     focus() { shadow.activeElement = this; }
     contains(node) { return node === this || this.children.some(child => child.contains(node)); }
@@ -123,7 +124,7 @@ test('review hides answers until recalled, previews four schedules and persists 
   assert.deepEqual(JSON.parse(JSON.stringify(saved)), schedule(original, 'good', context.Date.now()));
   assert.ok(shadow.querySelector('.review').querySelector('h2').textContent.includes('本轮已完成'));
   await click(findButton(shadow, '返回复习概览'));
-  assert.deepEqual(shadow.querySelectorAll('.stat').map(node => node.querySelector('strong').textContent), ['0', '1', '1']);
+  assert.deepEqual(shadow.querySelectorAll('.stat').map(node => node.querySelector('strong').textContent), ['0', '0', '1', '1']);
   assert.equal(shadow.querySelector('.review-plan').querySelector('.term').textContent, 'alpha');
 });
 
@@ -199,10 +200,12 @@ test('skipping a stale revealed card does not expose the next word answer', asyn
   const { shadow, storage, prefix, context, click } = app;
   storage.set(prefix + 'study:beta', { ...storage.get(prefix + 'study:alpha'), word: 'beta' });
   await openReview(app);
+  const first = shadow.querySelector('.review').querySelector('.word').textContent;
+  const second = first === 'alpha' ? 'beta' : 'alpha';
   await click(findButton(shadow, '显示释义'));
-  storage.set(prefix + 'study:alpha', schedule(storage.get(prefix + 'study:alpha'), 'good', context.Date.now()));
+  storage.set(prefix + 'study:' + first, schedule(storage.get(prefix + 'study:' + first), 'good', context.Date.now()));
   context.window.listeners.focus.listener();
-  assert.equal(shadow.querySelector('.review').querySelector('.word').textContent, 'beta');
+  assert.equal(shadow.querySelector('.review').querySelector('.word').textContent, second);
   assert.equal(shadow.querySelector('.review-answer'), null);
   assert.ok(findButton(shadow, '显示释义'));
 });
@@ -220,23 +223,23 @@ test('round limit keeps all remaining due words available and today counts disti
     await click(findButton(shadow, '显示释义'));
     await click(findButton(shadow, '记得 ·'));
   }
-  assert.ok(shadow.querySelector('.review').querySelector('p').textContent.includes('还有 1 个到期词'));
-  await click(findButton(shadow, '继续复习到期词'));
+  assert.ok(shadow.querySelector('.review').querySelector('p').textContent.includes('还有 1 张待学'));
+  await click(findButton(shadow, '继续下一轮'));
   await click(findButton(shadow, '显示释义'));
   await click(findButton(shadow, '记得 ·'));
   await click(findButton(shadow, '返回复习概览'));
-  assert.deepEqual(shadow.querySelectorAll('.stat').map(node => node.querySelector('strong').textContent), ['0', '21', '21']);
+  assert.deepEqual(shadow.querySelectorAll('.stat').map(node => node.querySelector('strong').textContent), ['0', '0', '21', '21']);
   assert.equal(shadow.querySelector('.review-plan').querySelectorAll('.setting').length, 6);
 });
 
-test('overview resets today across midnight and cancels its refresh when leaving or closing', async () => {
+test('overview resets today at the learning-day boundary and cancels its refresh when leaving or closing', async () => {
   const app = setup();
   const { shadow, storage, prefix, context, click, advance, timers } = app;
   storage.set(prefix + 'study:alpha', schedule(storage.get(prefix + 'study:alpha'), 'easy', context.Date.now()));
   await click(shadow.querySelectorAll('.tab')[2]);
-  assert.equal(shadow.querySelectorAll('.stat')[1].querySelector('strong').textContent, '1');
+  assert.equal(shadow.querySelectorAll('.stat')[2].querySelector('strong').textContent, '1');
   advance(86400000);
-  assert.equal(shadow.querySelectorAll('.stat')[1].querySelector('strong').textContent, '0');
+  assert.equal(shadow.querySelectorAll('.stat')[2].querySelector('strong').textContent, '0');
   await click(shadow.querySelectorAll('.tab')[1]);
   assert.equal(timers.size, 0);
   await click(shadow.querySelectorAll('.tab')[2]);
@@ -531,4 +534,228 @@ test('list star buttons toggle collection in history and vocabulary book while d
   assert.ok(shadow.querySelector('.subheading').textContent.startsWith('0 个词'));
   assert.equal(shadow.querySelector('.detail-pane').querySelector('.word'), null);
   assert.equal(shadow.activeElement.attributes['aria-label'], '筛选已保存单词');
+});
+
+const DAY = 86400000;
+const json = value => JSON.parse(JSON.stringify(value));
+const textOf = node => [node.textContent, ...node.children.map(textOf)].join('');
+const currentWord = shadow => shadow.querySelector('.review').querySelector('.word')?.textContent;
+const addWord = (app, word, study) => {
+  app.storage.set(app.prefix + 'word:' + word, { ...app.storage.get(app.prefix + 'word:alpha'), word });
+  if (study) app.storage.set(app.prefix + 'study:' + word, { ...study, word });
+};
+const useSettings = (app, value) => {
+  app.storage.set(app.prefix + 'settings', value);
+  app.context.window.listeners.focus.listener();
+};
+const press = (app, key, target = { tagName: 'DIV' }, extra = {}) => {
+  app.shadow.listeners.keydown.listener({ key, composedPath: () => [target], preventDefault() {}, stopPropagation() {}, ...extra });
+  return new Promise(setImmediate);
+};
+const answerWith = async (app, label) => {
+  await app.click(findButton(app.shadow, '显示'));
+  await app.click(findButton(app.shadow, label + ' ·'));
+};
+
+test('learning steps return within the same round, waiting for due cards before showing them early', async () => {
+  const app = setup();
+  const { shadow, storage, prefix, context, advance } = app;
+  addWord(app, 'gamma', createStudy('gamma', context.Date.now() - 1000));
+  storage.set(prefix + 'study:beta', createStudy('beta', context.Date.now() - 2000));
+  await openReview(app);
+  assert.equal(currentWord(shadow), 'alpha');
+  await answerWith(app, '记得');
+  assert.equal(currentWord(shadow), 'beta');
+  await answerWith(app, '忘记');
+  assert.equal(currentWord(shadow), 'gamma');
+  advance(60000);
+  await answerWith(app, '记得');
+  assert.equal(currentWord(shadow), 'beta');
+  assert.ok(shadow.querySelector('.review').querySelector('.muted').textContent.includes('学习中'));
+  await answerWith(app, '记得');
+  assert.equal(currentWord(shadow), 'gamma');
+  await answerWith(app, '记得');
+  assert.equal(currentWord(shadow), 'beta');
+  await answerWith(app, '记得');
+  assert.ok(shadow.querySelector('.review').querySelector('h2').textContent.includes('本轮已完成'));
+  for (const word of ['beta', 'gamma']) assert.equal(storage.get(prefix + 'study:' + word).fsrs.state, 2);
+  assert.deepEqual(json(storage.get(prefix + 'study:beta').log.map(entry => entry.rating)), [1, 3, 3]);
+});
+
+test('daily new-word limit caps rounds and explains when today\'s new words are used up', async () => {
+  const app = setup();
+  const { shadow, storage, prefix, context, click } = app;
+  addWord(app, 'gamma', createStudy('gamma', context.Date.now() - 1000));
+  storage.set(prefix + 'study:beta', createStudy('beta', context.Date.now() - 2000));
+  useSettings(app, { newPerDay: 1 });
+  await click(shadow.querySelectorAll('.tab')[2]);
+  const stats = () => shadow.querySelectorAll('.stat').map(node => node.querySelector('strong').textContent);
+  assert.deepEqual(stats(), ['1', '1', '0', '3']);
+  assert.ok(textOf(shadow.querySelector('.review')).includes('本轮 2 张：复习 1 · 新词 1'));
+  await click(findButton(shadow, '开始复习'));
+  await answerWith(app, '记得');
+  assert.equal(currentWord(shadow), 'beta');
+  await answerWith(app, '轻松');
+  assert.ok(textOf(shadow.querySelector('.review')).includes('本轮已完成'));
+  await click(findButton(shadow, '返回复习概览'));
+  assert.deepEqual(stats(), ['0', '0', '2', '3']);
+  assert.ok(textOf(shadow.querySelector('.review')).includes('今日新词上限 1 个已用完，还有 1 个新词'));
+  assert.equal(findButton(shadow, '开始复习'), undefined);
+});
+
+test('overview reports true recent retention and flags leeches on the overview and the card', async () => {
+  const app = setup();
+  const { shadow, storage, prefix, click } = app;
+  const alpha = migrateStudy(storage.get(prefix + 'study:alpha'));
+  storage.set(prefix + 'study:alpha', { ...alpha, reviews: 9, fsrs: { ...alpha.fsrs, reps: 9, lapses: 8 } });
+  await click(shadow.querySelectorAll('.tab')[2]);
+  const insight = () => textOf(shadow.querySelector('.review-insight'));
+  assert.ok(insight().includes('这里会显示近 30 天的真实记得率'));
+  assert.ok(insight().includes('难记词 1 个') && insight().includes('alpha'));
+  await click(findButton(shadow, '开始复习'));
+  assert.ok(textOf(shadow.querySelector('.review')).includes('难记词：已忘记 8 次'));
+  await answerWith(app, '记得');
+  await click(findButton(shadow, '返回复习概览'));
+  assert.ok(insight().includes('近 30 天长期复习记得率 100%（1 次），目标 90%'));
+  assert.ok(app.storage.get(prefix + 'study:alpha').log[0].state === 2);
+});
+
+test('saving uses the displayed preview, and a preview older than 10 minutes is recomputed first', async () => {
+  for (const wait of [30000, 11 * 60000]) {
+    const app = setup();
+    const { shadow, storage, prefix, context, click, advance } = app;
+    const original = structuredClone(storage.get(prefix + 'study:alpha'));
+    await openReview(app);
+    const shownAt = context.Date.now();
+    await click(findButton(shadow, '显示释义'));
+    advance(wait);
+    await click(findButton(shadow, '记得 ·'));
+    if (wait < 600000) {
+      assert.deepEqual(json(storage.get(prefix + 'study:alpha')), scheduleAll(original, shownAt).good);
+      continue;
+    }
+    assert.deepEqual(storage.get(prefix + 'study:alpha'), original);
+    assert.ok(shadow.querySelector('.toast').textContent.includes('超过 10 分钟'));
+    await click(findButton(shadow, '记得 ·'));
+    assert.deepEqual(json(storage.get(prefix + 'study:alpha')), schedule(original, 'good', shownAt + wait));
+  }
+});
+
+test('saved reading context appears on the card with the word highlighted', async () => {
+  const app = setup();
+  const { shadow, storage, prefix } = app;
+  storage.set(prefix + 'event:context-event-1', { word: 'alpha', id: 'context-event-1', at: 10,
+    context: 'We met. The Alpha wolf led the pack. Then', title: '', sourceUrl: '' });
+  await openReview(app);
+  const line = shadow.querySelector('.context-line');
+  assert.equal(textOf(line), 'The Alpha wolf led the pack.');
+  assert.equal(line.querySelector('mark').textContent, 'Alpha');
+});
+
+test('keyboard reveals and grades the focused card, and undo restores progress and the card', async () => {
+  const app = setup();
+  const { shadow, storage, prefix, context, click } = app;
+  storage.set(prefix + 'study:beta', { ...storage.get(prefix + 'study:alpha'), word: 'beta' });
+  await openReview(app);
+  const first = currentWord(shadow);
+  const before = json(storage.get(prefix + 'study:' + first));
+  assert.equal(shadow.activeElement, findButton(shadow, '显示释义'));
+  await press(app, ' ');
+  assert.ok(shadow.querySelector('.review-answer'));
+  assert.equal(shadow.activeElement, findButton(shadow, '记得 ·'));
+  await press(app, 'r');
+  assert.equal(shadow.querySelector('.toast').textContent, '当前浏览器没有可用的朗读功能');
+  await press(app, '1', { tagName: 'INPUT' });
+  assert.equal(storage.get(prefix + 'study:' + first).lastGrade, 'good');
+  await press(app, '2');
+  assert.equal(storage.get(prefix + 'study:' + first).lastGrade, 'hard');
+  assert.notEqual(currentWord(shadow), first);
+  await press(app, 'z', undefined, { ctrlKey: true });
+  assert.deepEqual(json(storage.get(prefix + 'study:' + first)), before);
+  assert.equal(currentWord(shadow), first);
+  assert.equal(shadow.querySelector('.review-answer'), null);
+  assert.equal(shadow.querySelector('.toast').textContent, `已撤销 ${first} 的评分`);
+  await press(app, 'Enter');
+  await press(app, '3');
+  storage.set(prefix + 'study:' + first, schedule(storage.get(prefix + 'study:' + first), 'easy', context.Date.now() + 1000));
+  const elsewhere = storage.get(prefix + 'study:' + first);
+  await click(findButton(shadow, '撤销上一次'));
+  assert.equal(storage.get(prefix + 'study:' + first), elsewhere);
+  assert.equal(shadow.querySelector('.toast').textContent, '该词已在其他页面更新，无法撤销');
+});
+
+test('the answer side fills a missing Chinese translation', async () => {
+  const app = setup();
+  const { shadow, storage, prefix, context, click } = app;
+  const requests = [];
+  context.GM_xmlhttpRequest = request => { requests.push(request); return { abort() {} }; };
+  const { translation, translationSource: source, ...entry } = storage.get(prefix + 'word:alpha');
+  storage.set(prefix + 'word:alpha', entry);
+  await openReview(app);
+  assert.equal(requests.length, 0);
+  await click(findButton(shadow, '显示释义'));
+  assert.equal(requests.length, 1);
+  assert.ok(requests[0].url.startsWith('https://api.mymemory.translated.net/'));
+  requests[0].onload({ status: 200, responseText: JSON.stringify({ responseStatus: 200, responseData: { translatedText: '阿尔法' } }) });
+  await new Promise(setImmediate);
+  assert.equal(storage.get(prefix + 'word:alpha').translation, '阿尔法');
+  assert.ok(textOf(shadow.querySelector('.review-answer')).includes('阿尔法'));
+});
+
+test('optional reverse cards start after the meaning card graduates and keep separate progress', async () => {
+  const app = setup();
+  const { shadow, storage, prefix, context, click } = app;
+  storage.set(prefix + 'study:alpha', schedule(storage.get(prefix + 'study:alpha'), 'easy', context.Date.now() - DAY));
+  const meaning = storage.get(prefix + 'study:alpha');
+  await click(shadow.querySelectorAll('.tab')[2]);
+  assert.equal(findButton(shadow, '开始复习'), undefined);
+  useSettings(app, { reverse: true });
+  assert.equal(shadow.querySelectorAll('.stat')[1].querySelector('strong').textContent, '1');
+  await click(findButton(shadow, '开始复习'));
+  const card = shadow.querySelector('.review');
+  assert.equal(currentWord(shadow), undefined);
+  assert.ok(card.querySelector('.muted').textContent.includes('反向'));
+  assert.equal(card.querySelector('.recall-prompt').querySelector('.translation-copy').textContent, '中文');
+  const spelling = card.querySelector('.spelling');
+  assert.equal(shadow.activeElement, spelling);
+  spelling.value = 'Alpha';
+  spelling.listeners.input.listener();
+  spelling.listeners.keydown.listener({ key: 'Enter', preventDefault() {} });
+  await new Promise(setImmediate);
+  assert.ok(textOf(shadow.querySelector('.review')).includes('✓ 拼写正确'));
+  assert.equal(currentWord(shadow), 'alpha');
+  await click(findButton(shadow, '记得 ·'));
+  assert.equal(storage.get(prefix + 'recall:alpha').fsrs.state, 1);
+  assert.equal(storage.get(prefix + 'study:alpha'), meaning);
+  await answerWith(app, '记得');
+  assert.equal(storage.get(prefix + 'recall:alpha').fsrs.state, 2);
+  await click(shadow.querySelectorAll('.tab')[1]);
+  await click(shadow.querySelector('.list-star'));
+  assert.equal(storage.has(prefix + 'study:alpha'), false);
+  assert.equal(storage.has(prefix + 'recall:alpha'), false);
+});
+
+test('review settings validate and persist the new-word limit and target retention used by previews', async () => {
+  const app = setup();
+  const { shadow, storage, prefix, context, click } = app;
+  await click(shadow.querySelectorAll('.tab')[3]);
+  const limit = shadow.querySelector('.number');
+  limit.value = '500';
+  limit.listeners.change.listener();
+  assert.equal(storage.get(prefix + 'settings'), undefined);
+  assert.equal(limit.value, '20');
+  limit.value = '5';
+  limit.listeners.change.listener();
+  const select = shadow.querySelectorAll('select')[0];
+  select.value = '0.95';
+  select.listeners.change.listener();
+  assert.equal(storage.get(prefix + 'settings').newPerDay, 5);
+  assert.equal(storage.get(prefix + 'settings').retention, 0.95);
+  const original = structuredClone(storage.get(prefix + 'study:alpha'));
+  await openReview(app);
+  await click(findButton(shadow, '显示释义'));
+  await click(findButton(shadow, '记得 ·'));
+  const saved = json(storage.get(prefix + 'study:alpha'));
+  assert.deepEqual(saved, schedule(original, 'good', context.Date.now(), 0.95));
+  assert.ok(saved.dueAt < schedule(original, 'good', context.Date.now()).dueAt);
 });

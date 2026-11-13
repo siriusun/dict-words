@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Lexi · 划词词典与复习
 // @namespace    lexi-local
-// @version      0.2.3
+// @version      0.3.0
 // @description  英文划词、发音、跨网站历史、生词复习与本地备份。无需账号。
 // @match        http://*/*
 // @match        https://*/*
@@ -2071,13 +2071,25 @@ SOFTWARE.
   const DAY = 86400000;
   const PREFIX = 'lexi:v1:';
   const MAX_REVIEW_DAYS = 365;
-  const scheduler = memory.fsrs({
-    request_retention: 0.9, maximum_interval: MAX_REVIEW_DAYS, enable_fuzz: false,
-    learning_steps: ['1m', '10m'], relearning_steps: ['10m']
-  });
+  const RETENTIONS = [0.85, 0.88, 0.9, 0.92, 0.95];
+  const schedulers = new Map();
+  const schedulerFor = (retention = 0.9) => {
+    if (!RETENTIONS.includes(retention)) retention = 0.9;
+    if (!schedulers.has(retention)) schedulers.set(retention, memory.fsrs({
+      request_retention: retention, maximum_interval: MAX_REVIEW_DAYS, enable_fuzz: false,
+      learning_steps: ['1m', '10m'], relearning_steps: ['10m']
+    }));
+    return schedulers.get(retention);
+  };
   const GRADES = { again: 1, hard: 2, good: 3, easy: 4 };
   const STUDY_STATES = ['新词', '学习中', '间隔复习', '重新学习'];
-  const DEFAULTS = { auto: true, autoBook: false, context: false };
+  const DEFAULTS = { auto: true, autoBook: false, context: false, newPerDay: 20, retention: 0.9, reverse: false };
+  const cleanSettings = raw => {
+    const value = { ...DEFAULTS, ...(raw && typeof raw === 'object' ? raw : {}) };
+    if (!Number.isInteger(value.newPerDay) || value.newPerDay < 0 || value.newPerDay > 200) value.newPerDay = DEFAULTS.newPerDay;
+    if (!RETENTIONS.includes(value.retention)) value.retention = DEFAULTS.retention;
+    return value;
+  };
   const normalize = value => {
     if (typeof value !== 'string') return '';
     const word = value.trim().replace(/[‘’]/g, "'")
@@ -2119,10 +2131,25 @@ SOFTWARE.
     ...(card.last_review ? { last_review: card.last_review.getTime() } : {})
   });
   const migrateStudy = record => ({ ...record, fsrs: storedCard(memoryCard(record)) });
-  function schedule(record, grade, now) {
-    if (!Object.hasOwn(GRADES, grade)) throw new Error('未知复习反馈');
+  const createStudy = (word, now = Date.now()) => migrateStudy({
+    word, addedAt: now, updatedAt: now,
+    stage: 0, dueAt: now, reviews: 0, lastReviewedAt: 0, lastGrade: ''
+  });
+  function reviewTime(now) {
     if (!Number.isSafeInteger(now) || now <= 0 || now > 8640000000000000) throw new Error('复习时间无效');
-    const card = scheduler.next(memoryCard(record), now, GRADES[grade]).card;
+  }
+  // 上游按 UTC 日历日计算间隔天数；平移到“本地凌晨 4:00 为日界”的时钟后再交给 FSRS，
+  // 使提前到 4:00 复习的卡片按学习日计算已过天数。结果按相对时长换算回真实时间。
+  const learningClock = time => time - new Date(time).getTimezoneOffset() * 60000 - DAY_START_HOUR * 3600000;
+  function fsrsInput(record, now) {
+    const prior = memoryCard(record);
+    const card = { ...prior, due: new Date(learningClock(prior.due.getTime())) };
+    if (prior.last_review) card.last_review = new Date(learningClock(prior.last_review.getTime()));
+    return { prior, card, at: learningClock(now) };
+  }
+  function finish(record, grade, card, prior, now, at) {
+    card.due = new Date(now + card.due.getTime() - at);
+    if (card.last_review) card.last_review = new Date(now);
     // 上游为区分反馈可能超出最大间隔 1–2 天，在存储和预览前统一限制为一年。
     if (card.scheduled_days > MAX_REVIEW_DAYS) {
       card.scheduled_days = MAX_REVIEW_DAYS;
@@ -2131,11 +2158,111 @@ SOFTWARE.
     const stage = grade === 'again' ? 0 : grade === 'hard' ? record.stage : Math.min(record.stage + 1, 6);
     return {
       ...record, stage, fsrs: storedCard(card), dueAt: card.due.getTime(), updatedAt: now,
-      lastReviewedAt: now, reviews: card.reps, lastGrade: grade
+      lastReviewedAt: now, reviews: card.reps, lastGrade: grade,
+      log: [...(record.log || []), { at: now, rating: GRADES[grade], state: prior.state }]
     };
   }
+  function schedule(record, grade, now, retention) {
+    if (!Object.hasOwn(GRADES, grade)) throw new Error('未知复习反馈');
+    reviewTime(now);
+    const { prior, card, at } = fsrsInput(record, now);
+    return finish(record, grade, schedulerFor(retention).next(card, at, GRADES[grade]).card, prior, now, at);
+  }
+  function scheduleAll(record, now, retention) {
+    reviewTime(now);
+    const { prior, card, at } = fsrsInput(record, now);
+    const preview = schedulerFor(retention).repeat(card, at);
+    return Object.fromEntries(Object.entries(GRADES).map(([grade, rating]) =>
+      [grade, finish(record, grade, preview[rating].card, prior, now, at)]));
+  }
+  const retrievability = (record, now, retention) => {
+    const { card, at } = fsrsInput(record, now);
+    return schedulerFor(retention).get_retrievability(card, at, false);
+  };
   const reviewInterval = delay => delay < DAY ? `${Math.max(1, Math.ceil(delay / 60000))} 分钟`
     : `${Math.round(delay / DAY)} 天`;
+  const LEARN_AHEAD = 20 * 60000;
+  const DAY_START_HOUR = 4;
+  const ROUND_SIZE = 20;
+  const LEECH_LAPSES = 8;
+  function dayStart(now) {
+    const day = new Date(now);
+    if (day.getHours() < DAY_START_HOUR) day.setDate(day.getDate() - 1);
+    day.setHours(DAY_START_HOUR, 0, 0, 0);
+    return day.getTime();
+  }
+  function nextDayStart(now) {
+    const day = new Date(dayStart(now));
+    day.setDate(day.getDate() + 1);
+    return day.getTime();
+  }
+  const stateOf = record => record.fsrs ? record.fsrs.state : memoryCard(record).state;
+  // 长期复习卡按学习日到期；学习／重学卡仍按精确时间。
+  const availableAt = record => stateOf(record) === memory.State.Review ? dayStart(record.dueAt) : record.dueAt;
+  const isLeech = record => (record.fsrs?.lapses || 0) >= LEECH_LAPSES;
+  function shuffleKey(value) {
+    let hash = 2166136261;
+    for (const char of value) hash = Math.imul(hash ^ char.codePointAt(0), 16777619);
+    return hash >>> 0;
+  }
+  // cards: [{ kind, word, record, order?, sibling? }]，sibling 为同一词另一方向的记录。
+  function planReview(cards, now, { newPerDay = 20, retention, size = ROUND_SIZE } = {}) {
+    const start = dayStart(now);
+    const end = nextDayStart(now);
+    const items = cards.map(card => {
+      const state = stateOf(card.record);
+      const buried = state !== 1 && state !== 3 && card.sibling?.lastReviewedAt >= start;
+      const at = buried ? Math.max(availableAt(card.record), end) : availableAt(card.record);
+      return { ...card, state, buried, at };
+    });
+    const learning = items.filter(item => (item.state === 1 || item.state === 3) && item.record.dueAt <= now)
+      .sort((a, b) => a.record.dueAt - b.record.dueAt);
+    const reviews = items.filter(item => item.state === 2 && item.at <= now);
+    const backlog = reviews.length > size;
+    for (const item of reviews) item.rank = backlog ? retrievability(item.record, now, retention) : item.at;
+    reviews.sort((a, b) => a.rank - b.rank || shuffleKey(start + a.kind + a.word) - shuffleKey(start + b.kind + b.word));
+    const fresh = items.filter(item => item.state === 0 && !item.buried).sort((a, b) =>
+      (a.order ?? a.record.addedAt) - (b.order ?? b.record.addedAt) || a.word.localeCompare(b.word));
+    const introduced = cards.filter(card => card.record.log?.[0]?.state === 0 && card.record.log[0].at >= start).length;
+    const newLeft = Math.max(0, newPerDay - introduced);
+    const round = [];
+    const words = new Set();
+    for (const item of [...learning, ...reviews, ...fresh.slice(0, newLeft)]) {
+      if (round.length >= size) break;
+      if (words.has(item.word)) continue;
+      words.add(item.word);
+      round.push(item);
+    }
+    const upcoming = items.filter(item => item.state !== 0 && item.at > now)
+      .sort((a, b) => a.at - b.at || a.word.localeCompare(b.word));
+    return { learning, reviews, fresh, newLeft, newToday: Math.min(fresh.length, newLeft), round, upcoming, backlog, start, end };
+  }
+  function retentionStats(records, now, days = 30) {
+    let total = 0;
+    let passed = 0;
+    for (const record of records) {
+      for (const entry of record.log || []) {
+        if (entry.state !== memory.State.Review || entry.at <= now - days * DAY || entry.at > now) continue;
+        total++;
+        if (entry.rating > 1) passed++;
+      }
+    }
+    return { total, passed };
+  }
+  function contextParts(raw, word) {
+    if (typeof raw !== 'string' || !word) return null;
+    const found = new RegExp(`(^|[^a-z'’-])(${word.replace(/'/g, "['’]")})(?![a-z'’-])`, 'i').exec(raw);
+    if (!found) return null;
+    const index = found.index + found[1].length;
+    const before = raw.slice(0, index);
+    const after = raw.slice(index + found[2].length);
+    let head = before.slice(Math.max(...['.', '!', '?', '。', '！', '？'].map(mark => before.lastIndexOf(mark))) + 1).trimStart();
+    const stop = after.search(/[.!?。！？]/);
+    let tail = (stop < 0 ? after : after.slice(0, stop + 1)).trimEnd();
+    if (head.length > 120) head = '…' + head.slice(-120).replace(/^\S*\s/, '');
+    if (tail.length > 120) tail = tail.slice(0, 120).replace(/\s\S*$/, '') + '…';
+    return { before: head, match: found[2], after: tail };
+  }
   const csvCell = value => {
     let cell = String(value ?? '');
     if (/^[\s\uFEFF]*[=+\-@]/.test(cell) || /^[\t\r\n]/.test(cell)) cell = "'" + cell;
@@ -2200,11 +2327,13 @@ SOFTWARE.
     const timestamp = value => Number.isSafeInteger(value) && value > 0 && value <= 8640000000000000;
     const validWord = value => typeof value === 'string' && normalize(value) === value && value !== '';
     const string = (value, max) => typeof value === 'string' && value.length <= max;
-    if (!object(raw) || ![1, 2].includes(raw.schemaVersion) || !['words', 'history', 'book'].every(key => Array.isArray(raw[key]))) fail();
-    if (raw.words.length > 10000 || raw.history.length > 30000 || raw.book.length > 10000) fail();
+    if (!object(raw) || ![1, 2, 3].includes(raw.schemaVersion) || !['words', 'history', 'book'].every(key => Array.isArray(raw[key]))) fail();
+    if (raw.schemaVersion === 3 ? !Array.isArray(raw.recall) : raw.recall !== undefined) fail();
+    const recall = raw.recall || [];
+    if (raw.words.length > 10000 || raw.history.length > 30000 || raw.book.length > 10000 || recall.length > 10000) fail();
     const unique = (items, key) => new Set(items.map(item => item[key])).size === items.length;
-    if (![...raw.words, ...raw.history, ...raw.book].every(object)) fail();
-    if (!unique(raw.words, 'word') || !unique(raw.book, 'word') || !unique(raw.history, 'id')) fail();
+    if (![...raw.words, ...raw.history, ...raw.book, ...recall].every(object)) fail();
+    if (!unique(raw.words, 'word') || !unique(raw.book, 'word') || !unique(recall, 'word') || !unique(raw.history, 'id')) fail();
     const words = raw.words.map(item => {
       if (!validWord(item.word) || !timestamp(item.fetchedAt) || !string(item.phonetic, 150) ||
         !Array.isArray(item.meanings) || !item.meanings.length || item.meanings.length > 5) fail();
@@ -2241,18 +2370,29 @@ SOFTWARE.
         context: text(item.context, 300), title: text(item.title, 120), sourceUrl: safeUrl(item.sourceUrl)
       };
     });
-    const book = raw.book.map(item => {
+    const progress = item => {
       if (!validWord(item.word) || !wordSet.has(item.word) || !timestamp(item.addedAt) || !timestamp(item.updatedAt) ||
         !timestamp(item.dueAt) || !Number.isInteger(item.stage) || item.stage < 0 || item.stage > 6 ||
         !Number.isSafeInteger(item.reviews) || item.reviews < 0 ||
         (item.lastReviewedAt !== 0 && !timestamp(item.lastReviewedAt)) ||
-        !['', 'again', 'hard', 'good', ...(raw.schemaVersion === 2 ? ['easy'] : [])].includes(item.lastGrade)) fail();
+        !['', 'again', 'hard', 'good', ...(raw.schemaVersion >= 2 ? ['easy'] : [])].includes(item.lastGrade)) fail();
       const record = {
         word: item.word, addedAt: item.addedAt, updatedAt: item.updatedAt, dueAt: item.dueAt,
         stage: item.stage, reviews: item.reviews, lastReviewedAt: item.lastReviewedAt, lastGrade: item.lastGrade
       };
+      if (item.log !== undefined) {
+        if (raw.schemaVersion < 3 || !Array.isArray(item.log) || !item.log.length || item.log.length > item.reviews) fail();
+        record.log = item.log.map((entry, index) => {
+          if (!object(entry) || !timestamp(entry.at) || !Number.isInteger(entry.rating) || entry.rating < 1 || entry.rating > 4 ||
+            !Number.isInteger(entry.state) || entry.state < 0 || entry.state > 3 ||
+            (index && entry.at < item.log[index - 1].at)) fail();
+          return { at: entry.at, rating: entry.rating, state: entry.state };
+        });
+        const last = record.log.at(-1);
+        if (last.at !== item.lastReviewedAt || last.rating !== GRADES[item.lastGrade]) fail();
+      }
       if (item.fsrs === undefined) {
-        if (raw.schemaVersion === 2) fail();
+        if (raw.schemaVersion >= 2) fail();
         return migrateStudy(record);
       }
       const card = item.fsrs;
@@ -2278,10 +2418,16 @@ SOFTWARE.
           ...(card.last_review !== undefined ? { last_review: card.last_review } : {})
         }
       };
+    };
+    const book = raw.book.map(progress);
+    const bookWords = new Set(book.map(item => item.word));
+    const recallBook = recall.map(item => {
+      if (!bookWords.has(item.word)) fail();
+      return progress(item);
     });
-    return { schemaVersion: 2, words, history, book };
+    return { schemaVersion: 3, words, history, book, recall: recallBook };
   }
-  function mergeBackup(current, incoming) {
+  function mergeBackup(current, incoming, retention) {
     const words = new Map(current.words.map(item => [item.word, item]));
     for (const item of incoming.words) {
       const old = words.get(item.word);
@@ -2312,15 +2458,33 @@ SOFTWARE.
       if (!old) history.set(item.id, item);
     }
     const book = new Map(current.book.map(item => [item.word, item]));
-    for (const item of incoming.book) {
-      if (!book.has(item.word) || item.updatedAt > book.get(item.word).updatedAt) book.set(item.word, item);
-    }
-    return { words: [...words.values()], history: [...history.values()], book: [...book.values()] };
+    for (const item of incoming.book) book.set(item.word, mergeProgress(book.get(item.word), item, retention));
+    const recall = new Map((current.recall || []).map(item => [item.word, item]));
+    for (const item of incoming.recall || []) recall.set(item.word, mergeProgress(recall.get(item.word), item, retention));
+    return { words: [...words.values()], history: [...history.values()], book: [...book.values()], recall: [...recall.values()] };
+  }
+  const logKey = entry => entry.at + ':' + entry.rating;
+  function mergeProgress(current, incoming, retention) {
+    if (!current) return incoming;
+    const newer = incoming.updatedAt > current.updatedAt ? incoming : current;
+    const other = newer === incoming ? current : incoming;
+    const known = new Set((newer.log || []).map(logKey));
+    const extra = (other.log || []).filter(entry => !known.has(logKey(entry)));
+    if (!extra.length) return newer;
+    const complete = record => (record.log || []).length === record.reviews;
+    const log = [...(newer.log || []), ...extra].sort((a, b) => a.at - b.at || a.rating - b.rating);
+    // 只有两端都保留从新词开始的完整日志时才能重放；否则保留较新的整条记录。
+    if (!complete(newer) || !complete(other) || log[0].state !== memory.State.New) return newer;
+    const grades = Object.keys(GRADES);
+    let state = createStudy(newer.word, Math.min(newer.addedAt, other.addedAt));
+    for (const entry of log) state = schedule(state, grades[entry.rating - 1], entry.at, retention);
+    return state;
   }
   const ordered = (events, oldest = false) => [...events].sort((a, b) =>
     (oldest ? 1 : -1) * (a.at - b.at || a.id.localeCompare(b.id)));
   if (typeof window === 'undefined') {
-    module.exports = { normalize, schedule, migrateStudy, reviewInterval, csv, dictionary, validateBackup, mergeBackup, ordered, audioUrl, translationSource, translationChunks, youdaoPhonetic };
+    module.exports = { normalize, schedule, scheduleAll, migrateStudy, createStudy, reviewInterval, csv, dictionary, validateBackup, mergeBackup, ordered, audioUrl, translationSource, translationChunks, youdaoPhonetic,
+      dayStart, nextDayStart, availableAt, planReview, retentionStats, contextParts, isLeech };
     return;
   }
 
@@ -2330,13 +2494,14 @@ SOFTWARE.
   const notify = () => put('revision', crypto.randomUUID());
   const all = type => GM_listValues().filter(key => key.startsWith(PREFIX + type + ':')).map(key => GM_getValue(key)).filter(Boolean);
   const snapshot = () => ({
-    schemaVersion: 2, exportedAt: new Date().toISOString(),
+    schemaVersion: 3, exportedAt: new Date().toISOString(),
     words: all('word'), history: ordered(all('event'), true), book: all('study').map(migrateStudy),
-    settings: { ...DEFAULTS, ...get('settings', {}) }
+    recall: all('recall').map(migrateStudy), settings: cleanSettings(get('settings', {}))
   });
   const date = value => new Date(value).toLocaleString('zh-CN', { hour12: false });
-  const today = value => new Date(value).toLocaleDateString() === new Date().toLocaleDateString();
-  let settings = { ...DEFAULTS, ...get('settings', {}) };
+  const when = (record, at = availableAt(record)) => stateOf(record) === memory.State.Review
+    ? new Date(at).toLocaleDateString('zh-CN') : date(at);
+  let settings = cleanSettings(get('settings', {}));
   let queryEpoch = 0;
   let activeRequest;
   let activeAudio;
@@ -2347,9 +2512,8 @@ SOFTWARE.
   let screen = 'history';
   let filter = '';
   let oldest = false;
-  let queue = null;
-  let reviewIndex = 0;
-  let revealed = false;
+  let round = null;
+  let answer = null;
   let reviewTimer;
   let returnFocus;
   const host = document.createElement('div');
@@ -2432,6 +2596,15 @@ SOFTWARE.
     .history-delete:hover{background:color-mix(in srgb,var(--error) 12%,transparent)}
     @media(hover:none){.history-delete{opacity:1;pointer-events:auto}}
     @media(max-width:760px){.studio{grid-template-rows:auto minmax(0,1fr)}.library .split{grid-template-rows:minmax(0,2fr) minmax(0,3fr);gap:16px}}
+    .stats{flex-wrap:wrap}.stat{min-width:110px}
+    .context-line{margin:14px auto 4px;max-width:480px;color:var(--muted);font:15px/1.7 Georgia,"Times New Roman",serif;overflow-wrap:anywhere}
+    .context-line mark{background:color-mix(in srgb,var(--accent) 18%,transparent);color:var(--ink);border-radius:4px;padding:0 3px}
+    .context-line .cloze{color:var(--accent);font-weight:650;letter-spacing:1px}
+    .recall-prompt{text-align:left;background:var(--tint);border-radius:12px;padding:16px;margin:25px 0 6px}.recall-prompt .definition{margin:0 0 6px}
+    .spelling{display:block;width:min(320px,100%);margin:6px auto 14px;text-align:center;font:20px Georgia,serif;background:var(--surface);border:1px solid var(--line)}
+    .spell{font-weight:650}.spell.ok{color:var(--accent)}.spell.bad,.leech{color:var(--error)}
+    .review-actions{justify-content:center;margin-top:14px}.review .actions{justify-content:center}
+    .setting input.number{width:80px;height:auto;text-align:right;border:1px solid var(--line)}
   `;
   const launcher = button('L', () => openStudio(), 'launcher', '打开 Lexi 学习中心');
   const popover = el('section', 'popover');
@@ -2499,7 +2672,7 @@ SOFTWARE.
     if (nextScreen) screen = nextScreen;
     overlay.hidden = false;
     render();
-    input.focus();
+    if (!studio.contains(shadow.activeElement)) input.focus();
   }
   function closeStudio() {
     overlay.hidden = true;
@@ -2528,6 +2701,11 @@ SOFTWARE.
   popover.addEventListener('wheel', containWheel, { passive: false });
   shadow.addEventListener('keydown', event => {
     if (event.key === 'Escape') { event.stopPropagation(); overlay.hidden ? closePopover() : closeStudio(); }
+    if (!overlay.hidden && screen === 'review' && round && !event.altKey && !event.repeat) {
+      let handled = false;
+      try { handled = reviewKey(event); } catch (error) { handled = true; showError(error); }
+      if (handled) { event.preventDefault(); event.stopPropagation(); return; }
+    }
     if (event.key !== 'Tab' || overlay.hidden) return;
     const focusable = [...studio.querySelectorAll('button,a,input,select,[tabindex="0"]')].filter(node => !node.disabled && node.getClientRects().length);
     const first = focusable[0], last = focusable.at(-1);
@@ -2619,7 +2797,7 @@ SOFTWARE.
       const now = Date.now();
       const event = { id: crypto.randomUUID(), word, at: now, ...(context || {}) };
       put('event:' + event.id, event);
-      settings = { ...DEFAULTS, ...get('settings', {}) };
+      settings = cleanSettings(get('settings', {}));
       if (settings.autoBook && !get('study:' + word)) put('study:' + word, createStudy(word, now));
       selectedWord = word;
       selectedEvent = event;
@@ -2713,15 +2891,12 @@ SOFTWARE.
       el('div', 'meta', entry.translationSource ? '多条释义 · MyMemory 机器翻译' : 'MyMemory 机器翻译'));
     return node;
   }
-  const createStudy = (word, now = Date.now()) => migrateStudy({
-    word, addedAt: now, updatedAt: now,
-    stage: 0, dueAt: now, reviews: 0, lastReviewedAt: 0, lastGrade: ''
-  });
   function toggleStar(word, rerender = true) {
     const existing = get('study:' + word);
     if (existing) {
       if (!confirm(`将 ${word} 移出生词本？该词的复习进度也会删除，查词历史保留。`)) return false;
       remove('study:' + word);
+      if (get('recall:' + word)) remove('recall:' + word);
     } else {
       put('study:' + word, createStudy(word));
     }
@@ -2879,7 +3054,7 @@ SOFTWARE.
           drawList(); drawDetail(); detail.scrollTop = 0;
         }, 'item');
         row.classList.toggle('active', isBook ? selectedWord === item.word : selectedEvent?.id === item.id);
-        row.append(el('div', 'term', item.word), el('div', 'meta', isBook ? (item.dueAt <= Date.now() ? '待复习' : '下次 ' + date(item.dueAt)) : date(item.at)));
+        row.append(el('div', 'term', item.word), el('div', 'meta', isBook ? bookMeta(item) : date(item.at)));
         const starred = Boolean(get('study:' + item.word));
         const wrapper = el('div', isBook ? 'library-row' : 'library-row history-row');
         const actions = el('div', 'row-actions');
@@ -2931,86 +3106,301 @@ SOFTWARE.
     search.addEventListener('input', () => { filter = search.value; drawList(); });
     drawList(); drawDetail();
   }
+  function bookMeta(item) {
+    const label = stateOf(item) === memory.State.New ? '新词 · 待学习'
+      : availableAt(item) <= Date.now() ? '待复习' : '下次 ' + when(item);
+    return isLeech(item) ? label + ' · 难记词' : label;
+  }
+  const PREVIEW_LIMIT = 10 * 60000;
+  const cardKey = entry => (entry.kind === 'recall' ? 'recall:' : 'study:') + entry.word;
+  function reviewCards(now) {
+    const book = all('study');
+    const recalls = new Map(all('recall').map(item => [item.word, item]));
+    const cards = book.map(record => ({
+      kind: 'meaning', word: record.word, record, sibling: settings.reverse ? recalls.get(record.word) : undefined
+    }));
+    if (settings.reverse) {
+      for (const meaning of book) {
+        const record = recalls.get(meaning.word);
+        if (record) cards.push({ kind: 'recall', word: meaning.word, record, sibling: meaning });
+        else if (stateOf(meaning) === memory.State.Review) {
+          cards.push({ kind: 'recall', word: meaning.word, record: createStudy(meaning.word, now), virtual: true, order: meaning.addedAt, sibling: meaning });
+        }
+      }
+    }
+    return { book, recalls: [...recalls.values()], cards };
+  }
+  const entryOf = item => ({
+    kind: item.kind, word: item.word, version: item.virtual ? 0 : item.record.updatedAt, dueAt: item.record.dueAt,
+    ...(item.virtual ? { virtual: true, record: item.record } : {})
+  });
+  function entryValid(entry) {
+    if (!get('word:' + entry.word) || !get('study:' + entry.word)) return false;
+    const stored = get(cardKey(entry));
+    return entry.virtual ? !stored : stored?.updatedAt === entry.version;
+  }
+  const entryRecord = entry => entry.virtual ? entry.record : get(cardKey(entry));
+  function savedContexts() {
+    const contexts = new Map();
+    for (const event of ordered(all('event'))) {
+      if (!event.context || contexts.has(event.word)) continue;
+      const parts = contextParts(event.context, event.word);
+      if (parts) contexts.set(event.word, parts);
+    }
+    return contexts;
+  }
+  function startRound() {
+    const now = Date.now();
+    const plan = planReview(reviewCards(now).cards, now, settings);
+    round = { pending: plan.round.map(entryOf), learning: [], current: null, done: 0, history: [], contexts: savedContexts(), typed: '' };
+    answer = null;
+    render();
+  }
+  function currentEntry(now) {
+    while (round) {
+      if (!round.current) {
+        const learning = [...round.learning].sort((a, b) => a.dueAt - b.dueAt)[0];
+        // 已到期的学习卡优先；没有其他卡片时提前显示（学习步骤均不超过 20 分钟）。
+        const next = learning && (learning.dueAt <= now || !round.pending.length) ? learning : round.pending.shift();
+        if (!next) return null;
+        if (next === learning) round.learning.splice(round.learning.indexOf(learning), 1);
+        round.current = next;
+        round.typed = '';
+        answer = null;
+      }
+      if (entryValid(round.current)) return round.current;
+      round.current = null;
+    }
+    return null;
+  }
+  function showAnswer(entry) {
+    if (round?.current !== entry || answer) return;
+    const now = Date.now();
+    answer = { entry, now, typed: round.typed, results: scheduleAll(entryRecord(entry), now, settings.retention) };
+    render();
+  }
+  function gradeCard(entry, grade) {
+    if (round?.current !== entry || answer?.entry !== entry) return;
+    if (!entryValid(entry)) {
+      round.current = null; answer = null; render(); message('该词已在其他页面更新，已跳过'); return;
+    }
+    const now = Date.now();
+    if (now - answer.now > PREVIEW_LIMIT) {
+      answer = { ...answer, now, results: scheduleAll(entryRecord(entry), now, settings.retention) };
+      render(); message('显示答案已超过 10 分钟，间隔已按当前时间更新，请重新选择'); return;
+    }
+    const key = cardKey(entry);
+    const next = answer.results[grade];
+    const state = JSON.parse(JSON.stringify({ pending: round.pending, learning: round.learning, current: round.current, done: round.done }));
+    const before = get(key) ?? null;
+    put(key, next);
+    round.history.push({ key, word: entry.word, before, after: next.updatedAt, state });
+    round.done++;
+    round.current = null;
+    answer = null;
+    if ((next.fsrs.state === memory.State.Learning || next.fsrs.state === memory.State.Relearning) && next.dueAt - now <= LEARN_AHEAD) {
+      round.learning.push({ kind: entry.kind, word: entry.word, version: next.updatedAt, dueAt: next.dueAt });
+    }
+    stopAudio(); render();
+    notify();
+  }
+  function undo() {
+    const last = round?.history.at(-1);
+    if (!last) return;
+    if (get(last.key)?.updatedAt !== last.after) {
+      round.history = []; render(); message('该词已在其他页面更新，无法撤销'); return;
+    }
+    if (last.before) put(last.key, last.before); else remove(last.key);
+    round.history.pop();
+    Object.assign(round, last.state, { typed: '' });
+    answer = null;
+    stopAudio(); render();
+    notify();
+    message(`已撤销 ${last.word} 的评分`);
+  }
+  function reviewKey(event) {
+    const tag = event.composedPath()[0]?.tagName || '';
+    const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(tag);
+    const entry = round.current;
+    if ((event.ctrlKey || event.metaKey) && !event.shiftKey && event.key.toLowerCase() === 'z') {
+      if (typing || !round.history.length) return false;
+      undo(); return true;
+    }
+    if (event.ctrlKey || event.metaKey || typing || !entry) return false;
+    if (answer && /^[1-4]$/.test(event.key)) { gradeCard(entry, Object.keys(GRADES)[event.key - 1]); return true; }
+    if (!answer && (event.key === ' ' || event.key === 'Enter') && !/^(BUTTON|A)$/.test(tag)) { showAnswer(entry); return true; }
+    if (event.key.toLowerCase() === 'r' && (entry.kind === 'meaning' || answer)) { speak(get('word:' + entry.word)); return true; }
+    return false;
+  }
+  const maskWord = (value, word) => value.replace(new RegExp(`(^|[^a-z'’-])${word.replace(/'/g, "['’]")}(?![a-z'’-])`, 'gi'), '$1＿＿');
+  function contextLine(parts, cloze) {
+    const node = el('p', 'context-line');
+    node.title = '阅读时保存的原句';
+    node.append(document.createTextNode(parts.before), cloze ? el('span', 'cloze', '＿＿＿') : el('mark', '', parts.match),
+      document.createTextNode(parts.after));
+    return node;
+  }
+  function refreshLater(now, plan) {
+    const delay = Math.min(60000, plan.end - now, ...(plan.upcoming.length ? [plan.upcoming[0].at - now] : []));
+    reviewTimer = setTimeout(() => {
+      if (!overlay.hidden && screen === 'review') render();
+    }, Math.max(1, delay));
+  }
   function renderReview() {
     const now = Date.now();
-    const book = all('study').sort((a, b) => a.dueAt - b.dueAt || a.word.localeCompare(b.word));
-    const due = book.filter(item => item.dueAt <= now);
-    const upcoming = book.filter(item => item.dueAt > now);
-    const startRound = () => { queue = due.slice(0, 20).map(item => item.word); reviewIndex = 0; revealed = false; render(); };
-    // Skip cards removed or already reviewed in another tab.
-    while (queue && reviewIndex < queue.length) {
-      const current = get('study:' + queue[reviewIndex]);
-      if (current && current.dueAt <= now && get('word:' + queue[reviewIndex])) break;
-      reviewIndex++; revealed = false;
-    }
-    if (!queue || reviewIndex >= queue.length) {
-      reviewTimer = setTimeout(() => {
-        if (!overlay.hidden && screen === 'review') render();
-      }, Math.min(60000, upcoming.length ? upcoming[0].dueAt - now : 60000));
-    }
     view.append(el('h1', 'heading', '让单词留下来'), el('p', 'subheading', '短时复习，长期积累'));
-    if (!queue) {
-      const stats = el('div', 'stats');
-      for (const [value, label] of [[due.length, '到期待复习'], [book.filter(item => today(item.lastReviewedAt)).length, '今日已复习词数'], [book.length, '收藏词数']]) {
-        const stat = el('div', 'stat'); stat.append(el('strong', '', String(value)), el('span', 'muted', label)); stats.append(stat);
-      }
-      const landing = el('div', 'review');
-      landing.append(el('h2', '', due.length ? '从一个词开始' : '今天的节奏刚刚好'),
-        el('p', 'muted', due.length ? '每轮最多 20 词，先回忆，再看释义。' : upcoming.length
-          ? '下次复习：' + date(upcoming[0].dueAt) : '先收藏几个想学的词，它们会出现在这里。'));
-      if (due.length) landing.append(button('开始复习', startRound, 'button primary'));
-      view.append(stats, landing);
-      if (upcoming.length) {
-        const plan = el('section', 'section review-plan');
-        plan.append(el('h3', '', '接下来的复习'), el('p', 'notice', '记住后仍会定期强化，间隔随每次反馈调整。'));
-        for (const item of upcoming.slice(0, 6)) {
-          const row = el('div', 'setting');
-          row.append(el('span', 'term', item.word), el('span', 'meta', date(item.dueAt)));
-          plan.append(row);
-        }
-        if (upcoming.length > 6) plan.append(el('p', 'notice', `最近 6 / ${upcoming.length} 个安排，全部时间可在生词本查看。`));
-        view.append(plan);
-      }
-      return;
+    const entry = round && currentEntry(now);
+    if (entry) renderCard(entry);
+    else if (round) renderRoundDone(now);
+    else renderOverview(now);
+  }
+  function renderOverview(now) {
+    const { book, recalls, cards } = reviewCards(now);
+    const plan = planReview(cards, now, settings);
+    refreshLater(now, plan);
+    const reviewedToday = new Set([...book, ...recalls].filter(item => item.lastReviewedAt >= plan.start).map(item => item.word)).size;
+    const stats = el('div', 'stats');
+    for (const [value, label] of [[plan.learning.length + plan.reviews.length, '到期复习'], [plan.newToday, '今日新词'],
+      [reviewedToday, '今日已复习词数'], [book.length, '收藏词数']]) {
+      const stat = el('div', 'stat'); stat.append(el('strong', '', String(value)), el('span', 'muted', label)); stats.append(stat);
     }
+    const landing = el('div', 'review');
+    const limited = plan.fresh.length > 0 && plan.newLeft === 0;
+    if (plan.round.length) {
+      const fresh = plan.round.filter(item => item.state === memory.State.New).length;
+      landing.append(el('h2', '', '从一个词开始'),
+        el('p', 'muted', `本轮 ${plan.round.length} 张：复习 ${plan.round.length - fresh} · 新词 ${fresh}。先回忆，再看答案。`),
+        button('开始复习', startRound, 'button primary'));
+    } else {
+      landing.append(el('h2', '', limited ? '今日新词已学完' : '今天的节奏刚刚好'),
+        el('p', 'muted', plan.upcoming.length ? '下次复习：' + when(plan.upcoming[0].record, plan.upcoming[0].at)
+          : book.length ? '暂无已安排的复习。' : '先收藏几个想学的词，它们会出现在这里。'));
+    }
+    if (limited) landing.append(el('p', 'notice', `今日新词上限 ${settings.newPerDay} 个已用完，还有 ${plan.fresh.length} 个新词，凌晨 4:00 后继续。可在设置中调整上限。`));
+    view.append(stats, landing);
+    if (book.length) {
+      const insight = el('section', 'section review-insight');
+      const retention = retentionStats([...book, ...recalls], now);
+      insight.append(el('h3', '', '学习情况'), el('p', 'notice', retention.total
+        ? `近 30 天长期复习记得率 ${Math.round(retention.passed / retention.total * 100)}%（${retention.total} 次），目标 ${Math.round(settings.retention * 100)}%。`
+        : '完成长期复习后，这里会显示近 30 天的真实记得率。'));
+      if (plan.backlog) insight.append(el('p', 'notice', '到期复习较多，本轮优先安排最可能遗忘的词。'));
+      const leeches = [...new Set([...book, ...(settings.reverse ? recalls : [])].filter(isLeech).map(item => item.word))];
+      if (leeches.length) {
+        insight.append(el('p', 'notice leech', `难记词 ${leeches.length} 个（忘记 ≥ ${LEECH_LAPSES} 次）：${leeches.slice(0, 8).join('、')}${leeches.length > 8 ? ' 等' : ''}。建议结合原句、词根或自己造句来记。`));
+      }
+      view.append(insight);
+    }
+    if (plan.upcoming.length) {
+      const list = el('section', 'section review-plan');
+      list.append(el('h3', '', '接下来的复习'), el('p', 'notice', '记住后仍会定期强化，间隔随每次反馈调整；长期复习从到期日凌晨 4:00 起可复习。'));
+      for (const item of plan.upcoming.slice(0, 6)) {
+        const row = el('div', 'setting');
+        row.append(el('span', 'term', item.word), el('span', 'meta', (item.kind === 'recall' ? '反向 · ' : '') + when(item.record, item.at)));
+        list.append(row);
+      }
+      if (plan.upcoming.length > 6) list.append(el('p', 'notice', `最近 6 / ${plan.upcoming.length} 个安排，全部时间可在生词本查看。`));
+      view.append(list);
+    }
+  }
+  function undoButton() {
+    return button('撤销上一次', undo, 'button', `撤销 ${round.history.at(-1).word} 的评分（Ctrl/⌘+Z）`);
+  }
+  function renderRoundDone(now) {
+    const plan = planReview(reviewCards(now).cards, now, settings);
+    refreshLater(now, plan);
     const card = el('div', 'review');
-    if (reviewIndex >= queue.length) {
-      card.append(el('h2', '', '本轮已完成'), el('p', 'muted', due.length ? `进度已保存，还有 ${due.length} 个到期词。`
-        : upcoming.length ? '进度已保存。下次复习：' + date(upcoming[0].dueAt) : '进度已保存。'),
-        button('返回复习概览', () => { queue = null; render(); }, 'button primary'));
-      if (due.length) card.append(button('继续复习到期词', startRound));
-      view.append(card); return;
-    }
-    const word = queue[reviewIndex];
-    const entry = get('word:' + word);
-    const progress = get('study:' + word);
-    card.append(el('div', 'muted', `${reviewIndex + 1} / ${queue.length} · ${STUDY_STATES[memoryCard(progress).state]}`), el('h2', 'word', word));
-    card.append(phoneticBlock(entry));
-    if (!revealed) card.append(el('p', 'muted', '先回忆这个词的含义'), button('显示释义', () => { revealed = true; render(); }, 'button primary'));
-    else {
-      const answer = el('div', 'review-answer');
-      answer.append(senses(entry));
-      if (entry.translation) answer.append(translationBlock(entry));
-      const actions = el('div', 'actions');
-      for (const [grade, label, hint] of [['again', '忘记', '没想起来，或答案不正确'], ['hard', '困难', '想对了，但回忆很吃力'],
-      ['good', '记得', '能够正确回忆'], ['easy', '轻松', '无需费力就想起来了']]) {
-        const next = schedule(progress, grade, now);
-        const caption = `${label} · ${reviewInterval(next.dueAt - now)}`;
-        actions.append(button(caption, () => {
-          if (queue?.[reviewIndex] !== word || !revealed) return;
-          const current = get('study:' + word);
-          if (!current || current.dueAt > Date.now()) {
-            reviewIndex++; revealed = false; render(); message('该词已在其他页面更新，已跳过'); return;
-          }
-          put('study:' + word, schedule(current, grade, Date.now()));
-          reviewIndex++; revealed = false; stopAudio(); render();
-          notify();
-        }, grade === 'good' ? 'button primary' : 'button', `${caption}；${hint}；下次复习：${date(next.dueAt)}`));
-      }
-      card.append(answer, actions);
-    }
-    card.append(el('p', 'notice', '关闭或离开后，已完成的复习仍会保留。'));
+    const available = plan.learning.length + plan.reviews.length + plan.newToday;
+    card.append(el('h2', '', '本轮已完成'), el('p', 'muted', available ? `进度已保存，还有 ${available} 张待学。`
+      : plan.upcoming.length ? '进度已保存。下次复习：' + when(plan.upcoming[0].record, plan.upcoming[0].at) : '进度已保存。'));
+    const actions = el('div', 'actions review-actions');
+    const back = button('返回复习概览', () => { round = null; answer = null; render(); }, 'button primary');
+    actions.append(back);
+    if (plan.round.length) actions.append(button('继续下一轮', startRound));
+    if (round.history.length) actions.append(undoButton());
+    card.append(actions);
     view.append(card);
+    back.focus({ preventScroll: true });
+  }
+  function renderCard(entry) {
+    const word = entry.word;
+    const wordEntry = get('word:' + word);
+    const record = entryRecord(entry);
+    const recall = entry.kind === 'recall';
+    const card = el('div', 'review');
+    card.append(el('div', 'muted', `${recall ? '反向 · 看中文想英文' : '看英文想含义'} · ${STUDY_STATES[stateOf(record)]} · 本轮剩余 ${round.pending.length + round.learning.length + 1}`));
+    if (isLeech(record)) card.append(el('p', 'notice leech', `难记词：已忘记 ${record.fsrs.lapses} 次。试试结合原句、词根或自己造句。`));
+    const context = round.contexts.get(word);
+    let focusTarget;
+    if (recall) {
+      const prompt = el('div', 'recall-prompt');
+      if (wordEntry.translation) prompt.append(el('div', 'translation-copy', maskWord(wordEntry.translation, word)));
+      else {
+        for (const def of wordEntry.meanings.flatMap(meaning => meaning.definitions).slice(0, 3)) {
+          prompt.append(el('p', 'definition', maskWord(def.definition, word)));
+        }
+      }
+      card.append(prompt);
+      if (context) card.append(contextLine(context, !answer));
+      if (answer) card.append(el('h2', 'word', word), phoneticBlock(wordEntry));
+    } else {
+      card.append(el('h2', 'word', word), phoneticBlock(wordEntry));
+      if (context) card.append(contextLine(context, false));
+    }
+    if (!answer) {
+      const reveal = button(recall ? '显示单词' : '显示释义', () => showAnswer(entry), 'button primary');
+      card.append(el('p', 'muted', recall ? '先回想这个英文单词，可在下方拼写' : '先回忆这个词的含义'));
+      if (recall) {
+        const spelling = el('input', 'spelling');
+        spelling.placeholder = '拼写（可选），Enter 显示答案';
+        spelling.setAttribute('aria-label', '拼写英文单词（可选）');
+        spelling.autocomplete = 'off';
+        spelling.spellcheck = false;
+        spelling.maxLength = 64;
+        spelling.value = round.typed;
+        spelling.addEventListener('input', () => { round.typed = spelling.value; });
+        spelling.addEventListener('keydown', event => {
+          if (event.key === 'Enter') { event.preventDefault(); Promise.resolve().then(() => showAnswer(entry)).catch(showError); }
+        });
+        card.append(spelling);
+        focusTarget = spelling;
+      }
+      card.append(reveal);
+      focusTarget ||= reveal;
+    } else {
+      const typed = normalize(answer.typed);
+      if (recall && answer.typed.trim()) {
+        card.append(el('p', typed === word ? 'spell ok' : 'spell bad', typed === word ? '✓ 拼写正确'
+          : `✗ 你写的是“${answer.typed.trim()}”，答错请选“忘记”`));
+      }
+      const back = el('div', 'review-answer');
+      back.append(senses(wordEntry));
+      if (!recall) {
+        const chinese = el('div');
+        back.append(chinese);
+        if (wordEntry.translation && wordEntry.translationSource === translationSource(wordEntry)) chinese.append(translationBlock(wordEntry));
+        else translate(wordEntry, chinese);
+      }
+      const actions = el('div', 'actions');
+      for (const [index, [grade, label, hint]] of [['again', '忘记', '没想起来，或答案不正确'], ['hard', '困难', '想对了，但回忆很吃力'],
+      ['good', '记得', '能够正确回忆'], ['easy', '轻松', '无需费力就想起来了']].entries()) {
+        const next = answer.results[grade];
+        const caption = `${label} · ${reviewInterval(next.dueAt - answer.now)}`;
+        const action = button(caption, () => gradeCard(entry, grade), grade === 'good' ? 'button primary' : 'button',
+          `${caption}；${hint}；快捷键 ${index + 1}；下次复习：${when(next)}`);
+        if (grade === 'good') focusTarget = action;
+        actions.append(action);
+      }
+      card.append(back, actions);
+    }
+    if (round.history.length) {
+      const extra = el('div', 'actions review-actions');
+      extra.append(undoButton());
+      card.append(extra);
+    }
+    card.append(el('p', 'notice', '快捷键：空格显示答案，1–4 评分，R 发音，Ctrl/⌘+Z 撤销。关闭或离开后，已完成的复习仍会保留。'));
+    view.append(card);
+    focusTarget.focus({ preventScroll: true });
   }
   function download(name, body, type) {
     const url = URL.createObjectURL(new Blob([body], { type }));
@@ -3024,11 +3414,15 @@ SOFTWARE.
     const data = snapshot();
     const words = new Map(data.words.map(item => [item.word, item]));
     const records = isBook ? data.book : data.history;
-    const rows = [isBook ? ['单词', '英文释义', '中文辅助', '学习状态', '下次复习'] : ['查询时间', '单词', '英文释义', '中文辅助', '阅读上下文', '来源']];
+    const recalls = new Map(data.recall.map(item => [item.word, item]));
+    const rows = [isBook ? ['单词', '英文释义', '中文辅助', '学习状态', '下次复习', '复习次数', '遗忘次数', '反向学习状态', '反向下次复习']
+      : ['查询时间', '单词', '英文释义', '中文辅助', '阅读上下文', '来源']];
     for (const item of records) {
       const entry = words.get(item.word);
       const definition = entry?.meanings[0]?.definitions[0]?.definition || '';
-      rows.push(isBook ? [item.word, definition, entry?.translation, STUDY_STATES[item.fsrs.state], new Date(item.dueAt).toISOString()]
+      const reverse = recalls.get(item.word);
+      rows.push(isBook ? [item.word, definition, entry?.translation, STUDY_STATES[item.fsrs.state], new Date(item.dueAt).toISOString(),
+        item.reviews, item.fsrs.lapses, reverse ? STUDY_STATES[reverse.fsrs.state] : '', reverse ? new Date(reverse.dueAt).toISOString() : '']
         : [new Date(item.at).toISOString(), item.word, definition, entry?.translation, item.context, item.sourceUrl]);
     }
     download(`lexi-${isBook ? 'book' : 'history'}-${new Date().toISOString().slice(0, 10)}.csv`, csv(rows), 'text/csv;charset=utf-8');
@@ -3040,14 +3434,16 @@ SOFTWARE.
     try { parsed = JSON.parse(await file.text()); } catch { throw new Error('无法读取 JSON 备份，未导入数据'); }
     const incoming = validateBackup(parsed);
     // Validate conflicts before requesting confirmation or making any writes.
-    mergeBackup(snapshot(), incoming);
-    if (!confirm(`合并 ${incoming.words.length} 个词条、${incoming.history.length} 条历史、${incoming.book.length} 个生词进度？\n重复历史不会增加，设置保持当前值。建议先导出当前备份。`)) return;
-    const merged = mergeBackup(snapshot(), incoming);
+    mergeBackup(snapshot(), incoming, settings.retention);
+    const reverseCount = incoming.recall.length ? `（含 ${incoming.recall.length} 个反向卡进度）` : '';
+    if (!confirm(`合并 ${incoming.words.length} 个词条、${incoming.history.length} 条历史、${incoming.book.length} 个生词进度${reverseCount}？\n重复历史不会增加，两端复习记录会合并，设置保持当前值。建议先导出当前备份。`)) return;
+    const merged = mergeBackup(snapshot(), incoming, settings.retention);
     try {
       for (const item of merged.words) put('word:' + item.word, item);
       for (const item of merged.history) put('event:' + item.id, item);
       for (const item of merged.book) put('study:' + item.word, item);
-      notify(); queue = null; render(); message('合并完成，重复历史已去重');
+      for (const item of merged.recall) put('recall:' + item.word, item);
+      notify(); round = null; answer = null; render(); message('合并完成，重复历史已去重');
     } catch { throw new Error('写入中断，部分记录可能已导入；原记录未主动删除，可再次导入继续合并'); }
   }
   function renderSettings() {
@@ -3059,13 +3455,46 @@ SOFTWARE.
       const toggle = el('input'); toggle.type = 'checkbox'; toggle.checked = Boolean(settings[key]);
       toggle.addEventListener('change', () => {
         try {
-          settings = { ...DEFAULTS, ...get('settings', {}), [key]: toggle.checked };
+          settings = cleanSettings({ ...get('settings', {}), [key]: toggle.checked });
           put('settings', settings); notify();
         } catch (error) { toggle.checked = !toggle.checked; showError(error); }
       });
       row.append(el('span', '', label), toggle); preferences.append(row);
     }
     preferences.append(el('p', 'notice', '外观自动跟随系统深浅色。发音仅在点击后播放。'));
+    const study = el('section', 'section');
+    study.append(el('h3', '', '复习'));
+    const save = (key, value, revert) => {
+      try {
+        settings = cleanSettings({ ...get('settings', {}), [key]: value });
+        put('settings', settings); notify(); round = null; answer = null;
+      } catch (error) { revert(); showError(error); }
+    };
+    const limitRow = el('label', 'setting');
+    const limit = el('input', 'number');
+    Object.assign(limit, { type: 'number', min: '0', max: '200', step: '1', value: String(settings.newPerDay) });
+    limit.addEventListener('change', () => {
+      const value = Number(limit.value);
+      if (!Number.isInteger(value) || value < 0 || value > 200) { limit.value = String(settings.newPerDay); message('每日新词上限需为 0–200 的整数'); return; }
+      save('newPerDay', value, () => { limit.value = String(settings.newPerDay); });
+    });
+    limitRow.append(el('span', '', '每日新词上限'), limit);
+    const retentionRow = el('label', 'setting');
+    const retention = el('select');
+    for (const value of RETENTIONS) {
+      const option = el('option', '', `${Math.round(value * 100)}%${value === 0.9 ? '（推荐）' : ''}`);
+      option.value = String(value);
+      retention.append(option);
+    }
+    retention.value = String(settings.retention);
+    retention.addEventListener('change', () => save('retention', Number(retention.value), () => { retention.value = String(settings.retention); }));
+    retentionRow.append(el('span', '', '目标记得率'), retention);
+    const reverseRow = el('label', 'setting');
+    const reverse = el('input'); reverse.type = 'checkbox'; reverse.checked = settings.reverse;
+    reverse.addEventListener('change', () => save('reverse', reverse.checked, () => { reverse.checked = settings.reverse; }));
+    reverseRow.append(el('span', '', '加入反向卡（看中文想英文）'), reverse);
+    study.append(limitRow, retentionRow, reverseRow, el('p', 'notice',
+      '每天凌晨 4:00 开始新的学习日。记得率越高，间隔越短、复习越多，只影响之后的安排。反向卡在该词进入长期复习后加入，计入新词上限，进度独立保存；关闭后暂停反向卡，进度保留。'));
     const data = el('section', 'section');
     data.append(el('h3', '', '备份与迁移'));
     const actions = el('div', 'actions');
@@ -3091,11 +3520,11 @@ SOFTWARE.
       if (prompt('此操作不可撤销，请先导出备份。输入“删除全部”以删除全部 Lexi 历史、词条和复习进度：') !== '删除全部') return;
       stopQuery(); stopAudio();
       for (const key of GM_listValues().filter(key => key.startsWith(PREFIX))) GM_deleteValue(key);
-      settings = { ...DEFAULTS }; selectedWord = ''; selectedEvent = null; queue = null;
+      settings = { ...DEFAULTS }; selectedWord = ''; selectedEvent = null; round = null; answer = null;
       notify(); render(); message('Lexi 数据已删除');
     }, 'button danger'));
     cleanup.append(cleanActions);
-    view.append(preferences, data, privacy, cleanup);
+    view.append(preferences, study, data, privacy, cleanup);
   }
 
   let selectionTimer;
@@ -3135,16 +3564,16 @@ SOFTWARE.
   });
   GM_addValueChangeListener(PREFIX + 'revision', (_name, _old, _next, remote) => {
     if (!remote) return;
-    settings = { ...DEFAULTS, ...get('settings', {}) };
+    settings = cleanSettings(get('settings', {}));
     if (!overlay.hidden && !studio.contains(shadow.activeElement)) render();
   });
   window.addEventListener('focus', () => {
-    settings = { ...DEFAULTS, ...get('settings', {}) };
+    settings = cleanSettings(get('settings', {}));
     if (!overlay.hidden) render();
   });
   GM_registerMenuCommand('打开 Lexi 学习中心', () => openStudio());
   GM_registerMenuCommand('暂停 / 开启自动划词', () => {
-    settings = { ...DEFAULTS, ...get('settings', {}), auto: !settings.auto };
+    settings = cleanSettings({ ...get('settings', {}), auto: !settings.auto });
     put('settings', settings); notify(); message(settings.auto ? '自动划词已开启' : '自动划词已暂停');
   });
 })();

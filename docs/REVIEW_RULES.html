@@ -1,0 +1,291 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Lexi 0.3.0 · 复习规则</title>
+<style>
+  :root{--paper:#fafaf7;--surface:#fff;--ink:#1e302b;--muted:#64726b;--line:#e4e9e2;--accent:#23634c;--tint:#edf4ed;--warn:#a33c36;--warn-tint:#fbefee}
+  @media(prefers-color-scheme:dark){:root{--paper:#15201d;--surface:#1b2823;--ink:#e4ede5;--muted:#9aada1;--line:#304238;--accent:#9fd2b1;--tint:#263c30;--warn:#f1a19b;--warn-tint:#3a2624}}
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth;scroll-padding-top:20px}
+  @media(prefers-reduced-motion:reduce){html{scroll-behavior:auto}}
+  body{margin:0;background:var(--paper);color:var(--ink);font:15px/1.75 -apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif}
+  a{color:var(--accent)}a:focus-visible{outline:3px solid #75ac8c;outline-offset:2px}
+  code{font:13px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace;background:var(--tint);border-radius:5px;padding:1px 5px}
+  .layout{display:grid;grid-template-columns:220px minmax(0,1fr);gap:40px;max-width:1120px;margin:0 auto;padding:40px 28px 80px}
+  nav{position:sticky;top:24px;align-self:start;font-size:13px}
+  nav .brand{font:italic 30px Georgia,serif;margin:0}nav .brand small{font:12px -apple-system,sans-serif;color:var(--muted);margin-left:6px}
+  nav ol{list-style:none;padding:0;margin:18px 0 0;border-left:1px solid var(--line)}
+  nav li a{display:block;padding:4px 0 4px 14px;color:var(--muted);text-decoration:none}nav li a:hover{color:var(--accent)}
+  header.hero h1{font-size:34px;line-height:1.25;margin:0 0 8px;letter-spacing:-.5px}
+  .lead{color:var(--muted);margin:0 0 22px;max-width:720px}
+  section{margin-top:46px}
+  h2{font-size:22px;margin:0 0 6px;padding-top:8px}
+  h2 .num{color:var(--accent);font:italic 22px Georgia,serif;margin-right:8px}
+  h3{font-size:16px;margin:24px 0 8px}
+  .sub{color:var(--muted);margin:0 0 18px}
+  .card{background:var(--surface);border:1px solid var(--line);border-radius:16px;padding:20px 22px;margin:14px 0}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:12px}
+  .grid .card{margin:0}.card h3{margin-top:0}
+  .principles .card strong{display:block;font-size:15px;margin-bottom:4px}
+  .principles .card p{margin:0;color:var(--muted);font-size:14px}
+  table{width:100%;border-collapse:collapse;font-size:14px}
+  th,td{text-align:left;vertical-align:top;padding:10px 12px;border-bottom:1px solid var(--line)}
+  th{color:var(--muted);font-weight:600;font-size:13px;white-space:nowrap}
+  tr:last-child td{border-bottom:0}
+  td:first-child{white-space:nowrap}
+  .table{background:var(--surface);border:1px solid var(--line);border-radius:16px;overflow-x:auto;margin:14px 0}
+  .grade{display:inline-block;min-width:48px;text-align:center;border:1px solid var(--line);border-radius:8px;padding:1px 8px;font-weight:650;white-space:nowrap}
+  .grade.good{background:var(--accent);border-color:var(--accent);color:var(--surface)}
+  kbd{display:inline-block;min-width:22px;text-align:center;font:12px/1.6 ui-monospace,Consolas,monospace;border:1px solid var(--line);border-bottom-width:2px;border-radius:6px;padding:0 6px;background:var(--surface)}
+  .flow{display:flex;flex-wrap:wrap;align-items:stretch;gap:8px;margin:14px 0;padding:0;list-style:none;counter-reset:step}
+  .flow li{flex:1 1 150px;background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:14px 16px;position:relative;counter-increment:step;font-size:14px}
+  .flow li::before{content:counter(step);display:inline-grid;place-items:center;width:22px;height:22px;border-radius:50%;background:var(--tint);color:var(--accent);font-weight:700;font-size:12px;margin-right:8px}
+  .flow li strong{font-size:15px}.flow li p{margin:6px 0 0;color:var(--muted)}
+  .lanes{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin:14px 0}
+  .lane{border-radius:14px;padding:14px 16px;background:var(--tint)}
+  .lane b{display:block;color:var(--accent);font-size:12px;letter-spacing:1px}
+  .lane strong{display:block;font-size:16px;margin:2px 0 4px}.lane span{font-size:13px;color:var(--muted)}
+  .timeline{position:relative;height:84px;margin:18px 4px 6px;border-bottom:2px solid var(--line)}
+  .timeline .day{position:absolute;bottom:-26px;font-size:12px;color:var(--muted);transform:translateX(-50%);white-space:nowrap}
+  .timeline .day.start{transform:none}.timeline .day.end{transform:translateX(-100%)}
+  .timeline .tick{position:absolute;bottom:-7px;width:2px;height:12px;background:var(--muted)}
+  .timeline .open{position:absolute;bottom:2px;height:34px;border-radius:8px 8px 0 0;background:color-mix(in srgb,var(--accent) 22%,transparent);border:1px solid color-mix(in srgb,var(--accent) 45%,transparent);border-bottom:0;font-size:12px;padding:6px 10px;color:var(--ink);overflow:hidden;white-space:nowrap}
+  .timeline .due{position:absolute;bottom:40px;font-size:12px;transform:translateX(-50%);white-space:nowrap;color:var(--warn)}
+  .timeline .due::after{content:"";position:absolute;left:50%;top:22px;width:1px;height:22px;background:var(--warn)}
+  .timeline .done{color:var(--accent)}.timeline .done::after{background:var(--accent);height:42px}
+  .note{border-left:3px solid var(--accent);background:var(--tint);border-radius:0 12px 12px 0;padding:12px 16px;margin:14px 0;font-size:14px}
+  .note.warn{border-color:var(--warn);background:var(--warn-tint)}
+  .note p{margin:0}.note p+p{margin-top:6px}
+  ul.tight{margin:8px 0;padding-left:20px}ul.tight li{margin:4px 0}
+  .muted{color:var(--muted)}
+  footer{margin-top:56px;padding-top:18px;border-top:1px solid var(--line);font-size:13px;color:var(--muted)}
+  @media(max-width:860px){.layout{grid-template-columns:1fr;gap:0;padding:24px 18px 60px}nav{position:static;margin-bottom:22px}nav ol{display:flex;flex-wrap:wrap;gap:4px 14px;border:0}nav li a{padding:2px 0}.lanes{grid-template-columns:1fr}header.hero h1{font-size:28px}th,td{padding:8px 9px}}
+  @media print{body{background:#fff;color:#000;font-size:12px}.layout{display:block;padding:0}nav{display:none}.card,.table,.flow li,.lane,.note{break-inside:avoid}section{margin-top:26px}a{color:inherit}}
+</style>
+</head>
+<body>
+<div class="layout">
+<nav aria-label="目录">
+  <p class="brand">Lexi<small>0.3.0</small></p>
+  <ol>
+    <li><a href="#principles">核心原则</a></li>
+    <li><a href="#flow">一张卡的流程</a></li>
+    <li><a href="#grades">四档反馈</a></li>
+    <li><a href="#day">学习日</a></li>
+    <li><a href="#queue">每轮如何组卡</a></li>
+    <li><a href="#steps">同轮学习步骤</a></li>
+    <li><a href="#overview">概览与统计</a></li>
+    <li><a href="#keys">键盘与撤销</a></li>
+    <li><a href="#reverse">反向卡</a></li>
+    <li><a href="#params">参数一览</a></li>
+    <li><a href="#data">数据、备份与合并</a></li>
+    <li><a href="#kept">保持现状的决定</a></li>
+    <li><a href="#sources">依据与实现</a></li>
+  </ol>
+</nav>
+
+<main>
+<header class="hero">
+  <h1>Lexi 复习规则</h1>
+  <p class="lead">Lexi 0.3.0 的生词复习如何安排、如何评分、何时出现。规则参考 Anki 的默认做法，调度由内嵌的 TS-FSRS 5.4.2（FSRS-6）计算，不使用固定天数表。本页与 <a href="REVIEW_DESIGN.md">复习设计</a> 一致，后者包含实现与数据细节。</p>
+</header>
+
+<section id="principles" class="principles">
+  <h2><span class="num">01</span>核心原则</h2>
+  <p class="sub">五条规则覆盖了绝大多数情况。</p>
+  <div class="grid">
+    <div class="card"><strong>只复习收藏词</strong><p>查询历史不会自动变成学习任务。收藏后成为新词，按每日上限引入。</p></div>
+    <div class="card"><strong>先回忆，再看答案</strong><p>正面只给英文（和原句），回忆后再揭示释义并自评。</p></div>
+    <div class="card"><strong>由记忆模型排期</strong><p>FSRS 根据稳定性、难度、实际间隔与反馈计算下次时间，目标记得率默认 90%。</p></div>
+    <div class="card"><strong>永不“毕业”</strong><p>记住的词仍会定期强化，最长间隔 365 天，不会被永久移出。</p></div>
+    <div class="card"><strong>逾期不惩罚</strong><p>错过的复习保留，按实际复习时间安排下一次，不需要补完错过的每一天。</p></div>
+  </div>
+</section>
+
+<section id="flow">
+  <h2><span class="num">02</span>一张卡的流程</h2>
+  <ol class="flow">
+    <li><strong>看正面</strong><p>英文、音标、发音按钮；保存过阅读上下文时，显示该词所在的原句并高亮单词。</p></li>
+    <li><strong>回忆含义</strong><p>在心里说出意思，原句帮助确定要回忆的是哪个词义。</p></li>
+    <li><strong>显示释义</strong><p>英文释义与中文辅助；缺少或过期的中文会自动补全，失败可重试。</p></li>
+    <li><strong>诚实评分</strong><p>四个按钮显示各自的下次间隔，点哪个就保存哪个。</p></li>
+    <li><strong>继续或回到本轮</strong><p>仍在学习中的卡片会在 20 分钟内回到本轮再练。</p></li>
+  </ol>
+  <div class="note"><p>显示答案时一次算出四档间隔并缓存，按钮上看到的就是保存的结果。显示答案超过 <strong>10 分钟</strong>才点击，会按当前时间重算并请你重新选择。调度不加随机抖动（fuzz）。</p></div>
+</section>
+
+<section id="grades">
+  <h2><span class="num">03</span>四档反馈</h2>
+  <p class="sub">评分描述的是“这次回忆的过程”，不是对单词难度的主观印象。</p>
+  <div class="table"><table>
+    <thead><tr><th>按钮</th><th>快捷键</th><th>什么时候选</th><th>之后会怎样</th></tr></thead>
+    <tbody>
+      <tr><td><span class="grade">忘记</span></td><td><kbd>1</kbd></td><td>想不起来，或想到的意思不对</td><td>新词回到第一个学习步骤（1 分钟）；已学词计 1 次遗忘，进入 10 分钟重学</td></tr>
+      <tr><td><span class="grade">困难</span></td><td><kbd>2</kbd></td><td>答对了，但回忆很吃力</td><td>告诉模型这次较难，间隔增长较慢；学习中则重复当前步骤</td></tr>
+      <tr><td><span class="grade good">记得</span></td><td><kbd>3</kbd></td><td>能正确回忆（最常用）</td><td>进入下一个学习步骤，或按更新后的记忆稳定性安排长期复习</td></tr>
+      <tr><td><span class="grade">轻松</span></td><td><kbd>4</kbd></td><td>不费力就想起来</td><td>可跳过剩余学习步骤，安排更长的间隔</td></tr>
+    </tbody>
+  </table></div>
+  <div class="note warn"><p>答错必须选“忘记”。把答错的词选成“困难”会让模型高估记忆强度，之后的间隔会越拉越长，反而更容易忘。</p></div>
+</section>
+
+<section id="day">
+  <h2><span class="num">04</span>学习日：从凌晨 4:00 开始</h2>
+  <p class="sub">“今天”指本地时间凌晨 4:00 到次日 4:00，避免午夜前后的复习被拆成两天。</p>
+  <div class="card">
+    <h3>长期复习卡：到期日 4:00 起可复习</h3>
+    <p>例如第 1 天 23:00 复习、间隔 1 天的词，到期时间是第 2 天 23:00，但第 2 天 4:00 起就会出现在队列里，不必等到晚上。</p>
+    <div class="timeline" role="img" aria-label="时间轴：第 1 天 23:00 复习，到期时间为第 2 天 23:00，该卡从第 2 天 4:00 起可复习">
+      <span class="tick" style="left:0"></span><span class="day start" style="left:0">第 1 天 4:00</span>
+      <span class="tick" style="left:50%"></span><span class="day" style="left:50%">第 2 天 4:00</span>
+      <span class="tick" style="left:100%"></span><span class="day end" style="left:100%">第 3 天 4:00</span>
+      <span class="due done" style="left:40%">复习 23:00</span>
+      <span class="open" style="left:50%;width:50%">第 2 天整天可复习</span>
+      <span class="due" style="left:90%">到期 23:00</span>
+    </div>
+    <p class="muted" style="margin-top:36px">学习中和重学中的卡片不受此规则影响，仍按精确时间（分钟级）到期。</p>
+  </div>
+  <ul class="tight">
+    <li>“今日已复习词数”、今日新词计数和概览刷新都按同一个学习日统计。</li>
+    <li>已保存的到期时间不会被改写，只在排队和显示时换算。</li>
+    <li>调度时同样按学习日计算已过天数：4:00 后提前复习的卡片记为“隔天复习”，不会被误算为同一天。</li>
+  </ul>
+</section>
+
+<section id="queue">
+  <h2><span class="num">05</span>每轮如何组卡</h2>
+  <p class="sub">每轮最多 20 张，按下面的优先级依次收集，额满为止；做完可以继续下一轮。</p>
+  <div class="lanes">
+    <div class="lane"><b>第一优先</b><strong>已到期的学习卡</strong><span>刚学或刚忘、步骤已到时间的卡片，按到期时间先后。</span></div>
+    <div class="lane"><b>第二优先</b><strong>到期的长期复习</strong><span>没有积压时按到期日，再按每天固定的随机顺序；积压时最可能忘的先复习。</span></div>
+    <div class="lane"><b>最后</b><strong>新词</strong><span>按收藏顺序，受每日新词上限约束（默认 20 个）。</span></div>
+  </div>
+  <h3>排序细节</h3>
+  <ul class="tight">
+    <li><strong>积压</strong>：到期的长期复习超过一轮（20 张）时，按 FSRS 可提取性升序排列，先救最可能遗忘的词；概览会提示正在处理积压。</li>
+    <li><strong>不按字母序</strong>：同一天到期的词用当天固定的随机顺序，避免靠位置猜答案；同一天内顺序稳定，第二天重新打乱。</li>
+    <li><strong>新词上限</strong>：今天第一次复习的新词（含反向卡）计入上限。用完后概览显示剩余新词数，凌晨 4:00 后恢复。上限可设为 0–200，设为 0 即只复习不学新词。</li>
+    <li><strong>一词一卡</strong>：同一轮不会同时出现同一个词的两个方向。某个方向今天已复习过时，另一个方向的新卡和长期复习卡延后到下一个学习日；学习中的卡片不受影响。</li>
+  </ul>
+</section>
+
+<section id="steps">
+  <h2><span class="num">06</span>同轮完成学习步骤</h2>
+  <p class="sub">新词的 <code>1 分钟 → 10 分钟</code> 步骤和遗忘后的 <code>10 分钟</code> 重学，都在同一次学习中完成。</p>
+  <div class="card">
+    <ul class="tight">
+      <li>评分后仍处于学习或重学、且 <strong>20 分钟内</strong>到期的卡片，回到本轮队列。</li>
+      <li>它到期时优先出现；还没到期就先做其他卡片。</li>
+      <li>本轮只剩这些学习卡时，提前显示最早到期的一张（不超过 20 分钟，Anki 称为 learn ahead）。</li>
+      <li>所有学习步骤完成、进入长期复习后，本轮才算结束。</li>
+    </ul>
+  </div>
+  <div class="note"><p>这样做的原因：如果新词选“记得”后关掉页面，10 分钟的步骤会拖到下次打开，变成一次跨日回忆，模型会据此给出过长的间隔。同轮完成能让每个新词得到合适的初始记忆强度。</p></div>
+</section>
+
+<section id="overview">
+  <h2><span class="num">07</span>概览与统计</h2>
+  <div class="grid">
+    <div class="card"><h3>四个数字</h3><p class="muted">到期复习（含已到期学习卡）、今日新词（今天还能学的数量）、今日已复习词数（按词去重）、收藏词数。</p></div>
+    <div class="card"><h3>真实记得率</h3><p class="muted">近 30 天长期复习中回答不是“忘记”的比例，与目标记得率对照。只统计复习前处于长期复习状态的回答。</p></div>
+    <div class="card"><h3>难记词</h3><p class="muted">遗忘 ≥ 8 次的词（Anki 称为 leech），在概览、卡片和生词本中标出，建议改用原句、词根或自己造句来记。</p></div>
+    <div class="card"><h3>接下来的复习</h3><p class="muted">最近 6 个安排：长期复习显示可复习日期，学习卡显示具体时间。全部安排可在生词本查看。</p></div>
+  </div>
+  <p class="muted">页面开着时，概览和完成页最多每分钟刷新一次，到下一个到期时间或学习日边界会提前刷新；切换页面或关闭学习中心即停止。脚本不运行时不计算提醒，也不弹系统通知。</p>
+</section>
+
+<section id="keys">
+  <h2><span class="num">08</span>键盘与撤销</h2>
+  <div class="table"><table>
+    <thead><tr><th>按键</th><th>作用</th></tr></thead>
+    <tbody>
+      <tr><td><kbd>空格</kbd> / <kbd>Enter</kbd></td><td>显示答案；答案显示后焦点落在“记得”，再按一次即选“记得”</td></tr>
+      <tr><td><kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd> <kbd>4</kbd></td><td>忘记 / 困难 / 记得 / 轻松</td></tr>
+      <tr><td><kbd>R</kbd></td><td>播放发音（反向卡在显示答案后才可用）</td></tr>
+      <tr><td><kbd>Ctrl</kbd>/<kbd>⌘</kbd> + <kbd>Z</kbd></td><td>撤销本轮最近一次评分，可连续撤销，恢复原进度并回到该卡正面</td></tr>
+    </tbody>
+  </table></div>
+  <ul class="tight">
+    <li>在输入框（包括反向卡的拼写框）中按键不会触发快捷键。</li>
+    <li>如果该词已在其他标签页更新，撤销会被拒绝，避免覆盖更新的进度。</li>
+  </ul>
+</section>
+
+<section id="reverse">
+  <h2><span class="num">09</span>可选反向卡：看中文想英文</h2>
+  <p class="sub">默认关闭，在“设置 → 复习”中开启。用于把认识的词变成会用的词。</p>
+  <div class="grid">
+    <div class="card"><h3>何时出现</h3><p class="muted">正向卡进入长期复习之后才加入，作为新词计入每日上限，并遵守“一词一卡、兄弟卡延后”的规则。</p></div>
+    <div class="card"><h3>正面</h3><p class="muted">中文释义（没有时用英文释义），其中的英文单词被隐去；有原句时以挖空形式显示。</p></div>
+    <div class="card"><h3>拼写核对</h3><p class="muted">可选输入拼写后按 Enter 显示答案：拼对显示 ✓；拼错会提示选择“忘记”。</p></div>
+    <div class="card"><h3>独立进度</h3><p class="muted">反向卡有自己的 FSRS 进度和复习记录。关闭设置只暂停、不删除；取消收藏会同时删除两个方向的进度。</p></div>
+  </div>
+</section>
+
+<section id="params">
+  <h2><span class="num">10</span>参数一览</h2>
+  <div class="table"><table>
+    <thead><tr><th>项目</th><th>取值</th><th>可调</th><th>依据</th></tr></thead>
+    <tbody>
+      <tr><td>调度模型</td><td>TS-FSRS 5.4.2，FSRS-6 默认权重</td><td>否</td><td>不另写记忆公式；暂不训练个人参数</td></tr>
+      <tr><td>目标记得率</td><td>90%</td><td>85% / 88% / 90% / 92% / 95%</td><td>Anki FSRS 默认；越高间隔越短、复习越多，只影响之后的安排</td></tr>
+      <tr><td>学习步骤</td><td>1 分钟、10 分钟</td><td>否</td><td>Anki 默认</td></tr>
+      <tr><td>重学步骤</td><td>10 分钟</td><td>否</td><td>Anki 默认</td></tr>
+      <tr><td>提前学习上限</td><td>20 分钟</td><td>否</td><td>Anki learn ahead limit 默认</td></tr>
+      <tr><td>学习日起点</td><td>本地 4:00</td><td>否</td><td>Anki next day starts at 默认</td></tr>
+      <tr><td>每轮卡片数</td><td>20</td><td>否</td><td>做完可继续下一轮</td></tr>
+      <tr><td>每日新词上限</td><td>20</td><td>0–200</td><td>Anki New cards/day 默认</td></tr>
+      <tr><td>难记词阈值</td><td>遗忘 8 次</td><td>否</td><td>Anki leech threshold 默认（只标记，不暂停）</td></tr>
+      <tr><td>最长间隔</td><td>365 天</td><td>否</td><td>保证每年至少强化一次</td></tr>
+      <tr><td>预览有效期</td><td>10 分钟</td><td>否</td><td>超过后按当前时间重算</td></tr>
+      <tr><td>记得率统计窗口</td><td>近 30 天</td><td>否</td><td>只计长期复习</td></tr>
+      <tr><td>反向卡</td><td>关闭</td><td>开 / 关</td><td>正向卡进入长期复习后加入</td></tr>
+    </tbody>
+  </table></div>
+</section>
+
+<section id="data">
+  <h2><span class="num">11</span>数据、备份与合并</h2>
+  <div class="card">
+    <h3>每次评分都留记录</h3>
+    <p>每条进度保存 FSRS 记忆状态，以及逐次复习记录 <code>log: [{ at, rating, state }]</code>（时间、1–4 反馈、复习前的学习状态）。这些记录是真实记得率、难记词和日后训练个人参数的基础。反向卡使用独立的 <code>recall:&lt;单词&gt;</code> 记录，结构相同。</p>
+  </div>
+  <div class="grid">
+    <div class="card"><h3>备份 v3</h3><p class="muted">JSON 备份包含复习记录和反向卡进度。v1 / v2 仍可导入；v3 需要 0.3.0 或更新版本恢复。导入会校验记录按时间递增、与进度一致，无效数据整体拒绝。</p></div>
+    <div class="card"><h3>两台设备的合并</h3><p class="muted">两边都复习过同一个词、且都保留从新词开始的完整记录时，合并两边记录并从头重放 FSRS；否则保留更新时间较新的整条进度。</p></div>
+    <div class="card"><h3>旧版进度</h3><p class="muted">没有逐次记录的旧进度，以原间隔估计稳定性、难度从 5 开始；到期时间和累计次数不变，不编造历史。</p></div>
+    <div class="card"><h3>出错与多标签页</h3><p class="muted">保存失败不前进，保留答案可重试；重复点击不重复计数；其他标签页已更新或取消收藏的词会被跳过。</p></div>
+  </div>
+  <p class="muted">取消收藏会删除该词的全部复习进度（经确认）；删除单条查询历史不影响复习。</p>
+</section>
+
+<section id="kept">
+  <h2><span class="num">12</span>评估后保持现状的决定</h2>
+  <div class="card">
+    <ul class="tight">
+      <li><strong>365 天最长间隔</strong>：外语单词受阅读量波动影响，一年至少强化一次可以防止遗忘，代价只是成熟词每年多复习一次。</li>
+      <li><strong>旧进度迁移方式</strong>：没有逐次记录就无法精确还原记忆状态；用旧间隔估计、从默认难度开始，是不编造历史前提下的合理近似，之后由真实反馈持续校准。</li>
+    </ul>
+  </div>
+</section>
+
+<section id="sources">
+  <h2><span class="num">13</span>依据与实现</h2>
+  <ul class="tight">
+    <li><a href="https://docs.ankiweb.net/manual/studying.md">Anki Manual · Studying</a>：先回忆再看答案、四档反馈、按钮显示间隔。</li>
+    <li><a href="https://github.com/ankitects/anki-manual/blob/main/src/deck-options.md">Anki Manual · Deck Options</a>：目标记得率、学习与重学步骤、每日新词、组卡顺序、积压排序、兄弟卡延后、leech。</li>
+    <li><a href="https://github.com/ankitects/anki-manual/blob/main/src/preferences.md">Anki Manual · Preferences</a>：凌晨 4:00 换日、learn ahead limit。</li>
+    <li><a href="https://github.com/open-spaced-repetition/ts-fsrs">TS-FSRS</a>：内嵌 5.4.2 UMD 包与 MIT 许可证，算法未改动，不远程加载，复习数据不发送给第三方。</li>
+    <li><a href="https://super-memory.com/english/ol/sm2.htm">SuperMemo · SM-2</a>：作为对照核对，最终采用 FSRS。</li>
+  </ul>
+  <p class="muted">实现细节、数据结构和校验规则见 <a href="REVIEW_DESIGN.md">REVIEW_DESIGN.md</a>；本版改动清单见 <a href="REVIEW_OPTIMIZATION_TASKS.md">REVIEW_OPTIMIZATION_TASKS.md</a>。</p>
+</section>
+
+<footer>Lexi 0.3.0 · 复习规则 · 2026-11-13</footer>
+</main>
+</div>
+</body>
+</html>

@@ -1,8 +1,10 @@
+process.env.TZ = 'Asia/Shanghai';
 const assert = require('node:assert/strict');
 const test = require('node:test');
 const fs = require('node:fs');
 const { createHash } = require('node:crypto');
-const { normalize, schedule, migrateStudy, reviewInterval, csv, dictionary, validateBackup, mergeBackup, ordered, audioUrl, translationSource, translationChunks, youdaoPhonetic } = require('../lexi.user.js');
+const { normalize, schedule, scheduleAll, migrateStudy, createStudy, reviewInterval, csv, dictionary, validateBackup, mergeBackup, ordered, audioUrl, translationSource, translationChunks, youdaoPhonetic,
+  dayStart, nextDayStart, availableAt, planReview, retentionStats, contextParts, isLeech } = require('../lexi.user.js');
 const now = Date.UTC(2026, 10, 12);
 const DAY = 86400000;
 const word = dictionary([{ phonetics: [{ text: '/test/', audio: 'https://api.dictionaryapi.dev/media/test.mp3' }],
@@ -93,7 +95,7 @@ test('legacy migration preserves due dates and counts and does not fabricate rev
 });
 test('FSRS memory and numeric timestamps survive JSON backup, import and subsequent learning', () => {
   const data = validateBackup(backup());
-  assert.equal(data.schemaVersion, 2);
+  assert.equal(data.schemaVersion, 3);
   let state = data.book[0];
   for (const grade of ['good', 'good', 'hard', 'easy', 'again', 'hard', 'again', 'good', 'easy']) {
     state = schedule(state, grade, state.dueAt);
@@ -191,7 +193,7 @@ test('backup roundtrips all persistent learning data without executing imported 
 });
 test('invalid versions, dangling references, duplicates and invalid progress fail before import', () => {
   const cases = [
-    data => { data.schemaVersion = 3; },
+    data => { data.schemaVersion = 4; },
     data => { data.history[0].word = 'missing'; },
     data => { data.book[0].stage = -1; },
     data => { data.book[0].reviews = '1'; },
@@ -271,4 +273,133 @@ test('rich translations survive backups and invalidate when a later definition c
   assert.equal(mergeBackup(current, incoming).words[0].translation, undefined);
   data.words[0].translationSource = 123;
   assert.throws(() => validateBackup(data));
+});
+
+const reviewRecord = (word, lastReview, stability, due, lapses = 0) => ({ word, addedAt: lastReview - DAY, updatedAt: lastReview,
+  dueAt: due, stage: 3, reviews: Math.max(3, lapses + 1), lastReviewedAt: lastReview, lastGrade: 'good',
+  fsrs: { due, stability, difficulty: 5, elapsed_days: 0, scheduled_days: Math.round((due - lastReview) / DAY), learning_steps: 0,
+    reps: Math.max(3, lapses + 1), lapses, state: 2, last_review: lastReview } });
+const meaning = record => ({ kind: 'meaning', word: record.word, record });
+
+test('one preview computes all four grades exactly as saving would, and every review is logged', () => {
+  const graduated = schedule(schedule(study, 'good', now), 'good', now + 600000);
+  for (const record of [study, graduated]) {
+    const reviewedAt = record.dueAt + DAY;
+    const previews = scheduleAll(record, reviewedAt);
+    for (const grade of ['again', 'hard', 'good', 'easy']) assert.deepEqual(previews[grade], schedule(record, grade, reviewedAt));
+  }
+  assert.deepEqual(graduated.log, [{ at: now, rating: 3, state: 0 }, { at: now + 600000, rating: 3, state: 1 }]);
+  assert.equal(scheduleAll(graduated, graduated.dueAt).again.log.at(-1).state, 2);
+  assert.throws(() => scheduleAll(graduated, NaN));
+});
+test('long-term reviews open at 4:00 on their due learning day while learning steps keep exact times', () => {
+  const evening = new Date(2026, 10, 20, 23).getTime();
+  assert.equal(dayStart(evening), new Date(2026, 10, 20, 4).getTime());
+  assert.equal(dayStart(new Date(2026, 10, 21, 3, 59).getTime()), new Date(2026, 10, 20, 4).getTime());
+  assert.equal(nextDayStart(evening), new Date(2026, 10, 21, 4).getTime());
+  const tonight = reviewRecord('tonight', evening - 10 * DAY, 10, evening);
+  const tomorrow = reviewRecord('tomorrow', evening - 10 * DAY, 10, new Date(2026, 10, 21, 23).getTime());
+  assert.equal(availableAt(tonight), new Date(2026, 10, 20, 4).getTime());
+  const learning = schedule(study, 'again', now);
+  assert.equal(availableAt(learning), learning.dueAt);
+  const morning = new Date(2026, 10, 20, 8).getTime();
+  const plan = planReview([meaning(tonight), meaning(tomorrow), meaning(learning)], morning);
+  assert.deepEqual(plan.round.map(item => item.word), ['test', 'tonight']);
+  assert.deepEqual(plan.upcoming.map(item => [item.word, item.at]), [['tomorrow', new Date(2026, 10, 21, 4).getTime()]]);
+});
+test('rounds gather learning, due reviews, then new words in added order within the daily new limit', () => {
+  const t = new Date(2026, 10, 20, 9).getTime();
+  const fresh = Array.from({ length: 8 }, (_, i) => meaning(createStudy('fresh' + String.fromCharCode(104 - i), t - DAY + i)));
+  const learning = meaning(schedule(createStudy('learning', t - DAY), 'again', t - DAY));
+  const introduced = meaning(schedule(createStudy('introduced', t - 7200000), 'good', t - 7200000 + 1));
+  introduced.record = schedule(introduced.record, 'good', introduced.record.dueAt);
+  const due = meaning(reviewRecord('due', t - 12 * DAY, 10, t - DAY));
+  const plan = planReview([...fresh, due, introduced, learning], t, { newPerDay: 4 });
+  assert.equal(plan.newLeft, 3);
+  assert.equal(plan.newToday, 3);
+  assert.deepEqual(plan.round.map(item => item.word), ['learning', 'due', 'freshh', 'freshg', 'freshf']);
+  assert.equal(planReview([...fresh, due], t, { newPerDay: 0 }).round.length, 1);
+  const sibling = { kind: 'recall', word: 'due', record: createStudy('due', t), sibling: due.record };
+  assert.deepEqual(planReview([due, sibling], t).round.map(item => item.kind), ['meaning']);
+  const buried = { kind: 'recall', word: 'other', record: createStudy('other', t), sibling: { lastReviewedAt: t - 1000 } };
+  assert.equal(planReview([buried], t).round.length, 0);
+  assert.equal(planReview([{ ...buried, sibling: { lastReviewedAt: t - DAY } }], t).round.length, 1);
+});
+test('a review backlog shows the least retrievable cards first; otherwise due date then a daily shuffle', () => {
+  const t = new Date(2026, 10, 20, 9).getTime();
+  const stable = meaning(reviewRecord('stable', t - 105 * DAY, 100, t - 5 * DAY));
+  const fragile = meaning(reviewRecord('fragile', t - 3 * DAY, 2, t - DAY));
+  assert.deepEqual(planReview([stable, fragile], t).round.map(item => item.word), ['stable', 'fragile']);
+  const backlog = planReview([stable, fragile], t, { size: 1 });
+  assert.equal(backlog.backlog, true);
+  assert.deepEqual(backlog.round.map(item => item.word), ['fragile']);
+  const tied = 'abcdefghij'.split('').map(letter => meaning(reviewRecord('word' + letter, t - 12 * DAY, 10, t - DAY)));
+  const order = planReview(tied, t).round.map(item => item.word);
+  assert.deepEqual(planReview([...tied].reverse(), t).round.map(item => item.word), order);
+  assert.notDeepEqual(order, [...order].sort());
+});
+test('review logs survive backup v3, reject inconsistent history and merge diverged devices by replay', () => {
+  const s1 = schedule(study, 'good', now);
+  const s2 = schedule(s1, 'good', s1.dueAt);
+  const base = validateBackup(backup());
+  base.book[0] = s2;
+  assert.deepEqual(validateBackup(JSON.parse(JSON.stringify(base))).book[0], s2);
+  const cases = [
+    data => { data.book[0].log[0].rating = 5; }, data => { data.book[0].log[1].at = data.book[0].log[0].at - 1; },
+    data => { data.book[0].log[1].at++; }, data => { data.book[0].log.push(data.book[0].log[1]); },
+    data => { data.book[0].log = []; }, data => { delete data.recall; },
+    data => { data.recall = [{ ...createStudy('missing', now) }]; },
+    data => { data.schemaVersion = 2; delete data.recall; }
+  ];
+  for (const mutate of cases) {
+    const invalid = JSON.parse(JSON.stringify(base));
+    mutate(invalid);
+    assert.throws(() => validateBackup(invalid), /备份格式无效/);
+  }
+  const withRecall = JSON.parse(JSON.stringify(base));
+  withRecall.recall = [schedule(createStudy('test', now + DAY), 'easy', now + DAY)];
+  assert.equal(validateBackup(withRecall).recall[0].fsrs.state, 2);
+  const deviceA = schedule(s2, 'good', s2.dueAt);
+  const deviceB = schedule(s2, 'again', s2.dueAt + DAY);
+  const merged = mergeBackup({ ...base, book: [deviceA] }, { ...base, book: [deviceB] }).book[0];
+  assert.deepEqual(merged, schedule(deviceA, 'again', s2.dueAt + DAY));
+  assert.deepEqual(merged.log.map(entry => entry.rating), [3, 3, 3, 1]);
+  assert.deepEqual(mergeBackup({ ...base, book: [merged] }, { ...base, book: [deviceB] }).book[0], merged);
+  assert.deepEqual(mergeBackup({ ...base, book: [deviceA] }, { ...base, book: [s2] }).book[0], deviceA);
+  const legacy = { ...deviceB, log: deviceB.log.slice(-1) };
+  assert.deepEqual(mergeBackup({ ...base, book: [deviceA] }, { ...base, book: [legacy] }).book[0], legacy);
+});
+test('true retention counts recent long-term reviews only, and leeches start at eight lapses', () => {
+  const log = [{ at: now - 40 * DAY, rating: 1, state: 2 }, { at: now - 2 * DAY, rating: 3, state: 2 },
+    { at: now - DAY, rating: 1, state: 2 }, { at: now - DAY, rating: 3, state: 1 }, { at: now - DAY, rating: 2, state: 0 }];
+  assert.deepEqual(retentionStats([{ log }, study], now), { total: 2, passed: 1 });
+  assert.equal(isLeech(reviewRecord('hard', now, 1, now + DAY, 8)), true);
+  assert.equal(isLeech(reviewRecord('hard', now, 1, now + DAY, 7)), false);
+  assert.equal(isLeech(study), false);
+});
+test('saved reading context is cut to the sentence containing the exact word', () => {
+  assert.deepEqual(contextParts('He said hello. The Serendipity of it all was striking! Next one.', 'serendipity'),
+    { before: 'The ', match: 'Serendipity', after: ' of it all was striking!' });
+  assert.deepEqual(contextParts('I don’t know', "don't"), { before: 'I ', match: 'don’t', after: ' know' });
+  assert.equal(contextParts('Please start now.', 'art'), null);
+  assert.equal(contextParts(undefined, 'art'), null);
+  const long = contextParts('word '.repeat(60) + 'target ' + 'tail '.repeat(60), 'target');
+  assert.ok(long.before.startsWith('…') && long.before.length <= 122 && long.after.endsWith('…'));
+});
+test('a higher target retention schedules sooner and unknown targets fall back to 90%', () => {
+  const graduated = schedule(schedule(study, 'good', now), 'good', now + 600000);
+  const at = graduated.dueAt;
+  assert.ok(schedule(graduated, 'good', at, 0.95).dueAt < schedule(graduated, 'good', at).dueAt);
+  assert.ok(schedule(graduated, 'good', at, 0.85).dueAt > schedule(graduated, 'good', at).dueAt);
+  assert.deepEqual(schedule(graduated, 'good', at, 0.5), schedule(graduated, 'good', at));
+});test('a review opened early at the 4:00 day start counts learning days, not UTC dates', () => {
+  const last = new Date(2026, 10, 1, 10, 12).getTime();
+  const card = reviewRecord('young', last, 0.126, last + DAY);
+  const early = schedule(card, 'good', new Date(2026, 10, 2, 6).getTime());
+  const onTime = schedule(card, 'good', last + DAY);
+  assert.equal(early.fsrs.stability, onTime.fsrs.stability);
+  assert.ok(early.fsrs.stability > 0.5);
+  const sameDay = schedule(card, 'good', new Date(2026, 10, 2, 3).getTime());
+  assert.ok(sameDay.fsrs.stability < 0.2);
+  assert.deepEqual(scheduleAll(card, new Date(2026, 10, 2, 6).getTime()).good, early);
 });
