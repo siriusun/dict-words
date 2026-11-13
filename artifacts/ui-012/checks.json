@@ -1,0 +1,62 @@
+{
+  "metrics": [
+    {
+      "label": "查询英文单词",
+      "fontSize": "18px",
+      "border": "0px",
+      "outline": "none",
+      "height": 43
+    },
+    {
+      "label": "筛选已保存单词",
+      "fontSize": "14px",
+      "border": "0px",
+      "outline": "none",
+      "height": 40.390625
+    },
+    {
+      "label": "历史排序",
+      "fontSize": "14px",
+      "border": "0px",
+      "outline": "none",
+      "height": 39
+    },
+    {
+      "label": "item active",
+      "fontSize": "14px",
+      "border": "0px",
+      "outline": "none",
+      "height": 54.578125
+    },
+    {
+      "label": "item",
+      "fontSize": "14px",
+      "border": "0px",
+      "outline": "none",
+      "height": 54.578125
+    },
+    {
+      "label": "item",
+      "fontSize": "14px",
+      "border": "0px",
+      "outline": "none",
+      "height": 54.578125
+    },
+    {
+      "label": "item",
+      "fontSize": "14px",
+      "border": "0px",
+      "outline": "none",
+      "height": 54.578125
+    },
+    {
+      "label": "item",
+      "fontSize": "14px",
+      "border": "0px",
+      "outline": "none",
+      "height": 54.578125
+    }
+  ],
+  "translatedAt": 1794488918100,
+  "refreshCache": true
+}

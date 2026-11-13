@@ -1,0 +1,169 @@
+{
+  "schemaVersion": 1,
+  "exportedAt": "2026-11-12T12:48:36.286Z",
+  "words": [
+    {
+      "word": "curiosity",
+      "fetchedAt": 1794487170442,
+      "phonetic": "/ˌkjʊəɹɪˈɒsɪti/",
+      "audio": "https://api.dictionaryapi.dev/media/pronunciations/en/curiosity-us.mp3",
+      "meanings": [
+        {
+          "partOfSpeech": "noun",
+          "definitions": [
+            {
+              "definition": "(uncountable) Inquisitiveness; the tendency to ask and learn about things by asking questions, investigating, or exploring.",
+              "example": ""
+            },
+            {
+              "definition": "A unique or extraordinary object which arouses interest.",
+              "example": "He put the strangely shaped rock in his curiosity cabinet."
+            },
+            {
+              "definition": "Careful, delicate construction; fine workmanship, delicacy of building.",
+              "example": ""
+            }
+          ]
+        }
+      ],
+      "sourceUrl": "https://en.wiktionary.org/wiki/curiosity",
+      "license": {
+        "name": "CC BY-SA 3.0",
+        "url": "https://creativecommons.org/licenses/by-sa/3.0"
+      }
+    },
+    {
+      "word": "practice",
+      "fetchedAt": 1794487171235,
+      "phonetic": "/ˈpɹæktɪs/",
+      "audio": "https://api.dictionaryapi.dev/media/pronunciations/en/practice-us.mp3",
+      "meanings": [
+        {
+          "partOfSpeech": "noun",
+          "definitions": [
+            {
+              "definition": "Repetition of an activity to improve a skill.",
+              "example": "He will need lots of practice with the lines before he performs them."
+            },
+            {
+              "definition": "An organized event for the purpose of performing such repetition.",
+              "example": "Being on a team is hard: you're always having to go to practice while everyone else is taking it easy."
+            },
+            {
+              "definition": "The ongoing pursuit of a craft or profession, particularly in medicine or the fine arts.",
+              "example": ""
+            }
+          ]
+        },
+        {
+          "partOfSpeech": "verb",
+          "definitions": [
+            {
+              "definition": "To repeat (an activity) as a way of improving one's skill in that activity.",
+              "example": "You should practise playing piano every day."
+            },
+            {
+              "definition": "To repeat an activity in this way.",
+              "example": "If you want to speak French well, you need to practise."
+            },
+            {
+              "definition": "To perform or observe in a habitual fashion.",
+              "example": "They gather to practise religion every Saturday."
+            }
+          ]
+        }
+      ],
+      "sourceUrl": "https://en.wiktionary.org/wiki/practice",
+      "license": {
+        "name": "CC BY-SA 3.0",
+        "url": "https://creativecommons.org/licenses/by-sa/3.0"
+      }
+    },
+    {
+      "word": "serendipity",
+      "fetchedAt": 1794486835611,
+      "phonetic": "/ˌsɛ.ɹən.ˈdɪ.pɪ.ti/",
+      "audio": "https://api.dictionaryapi.dev/media/pronunciations/en/serendipity-au.mp3",
+      "meanings": [
+        {
+          "partOfSpeech": "noun",
+          "definitions": [
+            {
+              "definition": "A combination of events which have come together by chance to make a surprisingly good or wonderful outcome.",
+              "example": ""
+            },
+            {
+              "definition": "An unsought, unintended, and/or unexpected, but fortunate, discovery and/or learning experience that happens by accident.",
+              "example": ""
+            }
+          ]
+        }
+      ],
+      "sourceUrl": "https://en.wiktionary.org/wiki/serendipity",
+      "license": {
+        "name": "CC BY-SA 3.0",
+        "url": "https://creativecommons.org/licenses/by-sa/3.0"
+      },
+      "translation": "一系列偶然发生的事件结合在一起，产生了出乎意料的好结果或美妙的结果。",
+      "translatedAt": 1794486897898
+    }
+  ],
+  "history": [
+    {
+      "id": "7e0204ae-7c17-4b73-a974-6797b22d3436",
+      "word": "serendipity",
+      "at": 1794486835611
+    },
+    {
+      "id": "c70564db-e68e-4ddd-86d1-ea9d0188bdf4",
+      "word": "serendipity",
+      "at": 1794487078145
+    },
+    {
+      "id": "7549f3b4-c12e-497c-bae4-4a0418c73caa",
+      "word": "curiosity",
+      "at": 1794487170443
+    },
+    {
+      "id": "fd1a131d-5731-4369-a1c1-50c2bd649cf4",
+      "word": "practice",
+      "at": 1794487171235
+    }
+  ],
+  "book": [
+    {
+      "word": "curiosity",
+      "addedAt": 1794487170584,
+      "updatedAt": 1794487287301,
+      "stage": 0,
+      "dueAt": 1794487887301,
+      "reviews": 1,
+      "lastReviewedAt": 1794487287301,
+      "lastGrade": "again"
+    },
+    {
+      "word": "practice",
+      "addedAt": 1794487171517,
+      "updatedAt": 1794487335819,
+      "stage": 0,
+      "dueAt": 1794573735819,
+      "reviews": 1,
+      "lastReviewedAt": 1794487335819,
+      "lastGrade": "hard"
+    },
+    {
+      "word": "serendipity",
+      "addedAt": 1794486896022,
+      "updatedAt": 1794487287069,
+      "stage": 1,
+      "dueAt": 1794573687069,
+      "reviews": 1,
+      "lastReviewedAt": 1794487287069,
+      "lastGrade": "good"
+    }
+  ],
+  "settings": {
+    "auto": true,
+    "context": false
+  }
+}
