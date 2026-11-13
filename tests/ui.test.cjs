@@ -47,6 +47,7 @@ function setup(phonetic = '/test/') {
   const document = new Element('document');
   document.documentElement = new Element('html');
   document.createElement = tag => new Element(tag);
+  document.createTextNode = text => { const node = new Element('#text'); node.textContent = text; return node; };
   document.activeElement = new Element('button');
   const window = new Element('window');
   const prefix = 'lexi:v1:';
@@ -63,8 +64,10 @@ function setup(phonetic = '/test/') {
   storage.set(prefix + 'study:alpha', { word: 'alpha', addedAt: clockNow - 5 * 86400000,
     updatedAt: clockNow - 3 * 86400000, dueAt: clockNow - 86400000, stage: 2, reviews: 3,
     lastReviewedAt: clockNow - 3 * 86400000, lastGrade: 'good' });
+  let uuid = 0;
   const context = {
-    window, document, Element, Date: ClockDate, TextEncoder, URL, crypto: { randomUUID: () => 'test-revision' },
+    window, document, Element, Date: ClockDate, TextEncoder, URL, crypto: { randomUUID: () => 'test-uuid-' + ++uuid },
+    confirm: () => true,
     GM_info: { script: { version: source.match(/^\/\/ @version\s+(\S+)/m)[1] } },
     getComputedStyle: node => ({ overflowY: 'visible', overflowX: 'visible', ...node.css }),
     setTimeout: (callback, delay) => { const id = ++timerId; timers.set(id, { callback, at: clockNow + delay }); return id; },
@@ -390,4 +393,84 @@ test('modal and lookup card contain wheel events, while internal scrolling and z
     pane.css = { overflowY: 'visible', overflowX: 'visible' };
     assert.equal(fire(-100), true, 'non-scroll regions cannot scroll the page');
   }
+});
+
+test('auto-book setting controls whether looked-up words enter vocabulary book without resetting existing progress', async () => {
+  const { shadow, storage, prefix, context, click } = setup();
+  const alphaProgress = structuredClone(storage.get(prefix + 'study:alpha'));
+  for (const word of ['gamma', 'delta']) {
+    const entry = { ...storage.get(prefix + 'word:alpha'), word,
+      meanings: [{ partOfSpeech: 'noun', definitions: [{ definition: word, example: '' }] }] };
+    entry.translationSource = translationSource(entry);
+    storage.set(prefix + 'word:' + word, entry);
+  }
+  await click(shadow.querySelectorAll('.tab')[3]);
+  const settingRow = shadow.querySelectorAll('.setting').find(row => row.querySelector('span')?.textContent === '查词直接进入生词本');
+  assert.ok(settingRow);
+  const checkbox = settingRow.querySelector('input');
+  assert.equal(checkbox.checked, false);
+
+  const query = shadow.querySelector('.search');
+  query.querySelector('input').value = 'gamma';
+  await click(query.querySelector('button'));
+  assert.equal(storage.has(prefix + 'study:gamma'), false);
+  assert.equal(shadow.querySelector('.list-star').textContent, '☆');
+  assert.equal(shadow.querySelector('.list-star').attributes['aria-pressed'], 'false');
+
+  await click(shadow.querySelectorAll('.tab')[3]);
+  const toggle = shadow.querySelectorAll('.setting').find(row => row.querySelector('span')?.textContent === '查词直接进入生词本').querySelector('input');
+  toggle.checked = true;
+  toggle.listeners.change.listener();
+  assert.equal(storage.get(prefix + 'settings').autoBook, true);
+
+  query.querySelector('input').value = 'delta';
+  await click(query.querySelector('button'));
+  assert.equal(storage.get(prefix + 'study:delta')?.fsrs.state, 0);
+  assert.equal(shadow.querySelector('.list-star').textContent, '★');
+  assert.equal(shadow.querySelector('.list-star').attributes['aria-pressed'], 'true');
+
+  query.querySelector('input').value = 'alpha';
+  await click(query.querySelector('button'));
+  assert.deepEqual(storage.get(prefix + 'study:alpha'), alphaProgress);
+});
+
+test('list star buttons toggle collection in history and vocabulary book while detail pane omits star button', async () => {
+  const { shadow, storage, prefix, context, click } = setup();
+  await click(shadow.querySelector('.item'));
+  assert.equal(shadow.querySelector('.detail-pane').querySelectorAll('button')
+    .some(node => node.textContent.includes('收藏')), false);
+  assert.deepEqual(shadow.querySelectorAll('.list-star').map(node => node.textContent), ['★', '☆', '★']);
+
+  shadow.querySelector('.list').scrollTop = 50;
+  shadow.querySelector('.detail-pane').scrollTop = 90;
+  await click(shadow.querySelectorAll('.list-star')[1]);
+  assert.equal(storage.has(prefix + 'study:beta'), true);
+  assert.deepEqual(shadow.querySelectorAll('.list-star').map(node => node.textContent), ['★', '★', '★']);
+  assert.equal(shadow.querySelector('.detail-pane').querySelector('.word').textContent, 'alpha');
+  assert.equal(shadow.querySelector('.list').scrollTop, 50);
+  assert.equal(shadow.querySelector('.detail-pane').scrollTop, 90);
+
+  context.confirm = () => false;
+  await click(shadow.querySelectorAll('.list-star')[0]);
+  assert.equal(storage.has(prefix + 'study:alpha'), true);
+
+  context.confirm = () => true;
+  await click(shadow.querySelectorAll('.list-star')[0]);
+  assert.equal(storage.has(prefix + 'study:alpha'), false);
+  assert.deepEqual(shadow.querySelectorAll('.list-star').map(node => node.textContent), ['☆', '★', '☆']);
+  assert.equal(shadow.querySelector('.detail-pane').querySelector('.word').textContent, 'alpha');
+
+  await click(shadow.querySelectorAll('.tab')[1]);
+  assert.ok(shadow.querySelector('.subheading').textContent.startsWith('1 个词'));
+  assert.equal(shadow.querySelector('.detail-pane').querySelector('.word'), null);
+  assert.deepEqual(shadow.querySelectorAll('.list-star').map(node => node.textContent), ['★']);
+  await click(shadow.querySelector('.item'));
+  assert.equal(shadow.querySelector('.detail-pane').querySelector('.word').textContent, 'beta');
+  assert.equal(shadow.querySelector('.detail-pane').querySelectorAll('button')
+    .some(node => node.textContent.includes('收藏')), false);
+  await click(shadow.querySelector('.list-star'));
+  assert.equal(storage.has(prefix + 'study:beta'), false);
+  assert.ok(shadow.querySelector('.subheading').textContent.startsWith('0 个词'));
+  assert.equal(shadow.querySelector('.detail-pane').querySelector('.word'), null);
+  assert.equal(shadow.activeElement.attributes['aria-label'], '筛选已保存单词');
 });

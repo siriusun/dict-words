@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Lexi · 划词词典与复习
 // @namespace    lexi-local
-// @version      0.2.0
+// @version      0.2.1
 // @description  英文划词、发音、跨网站历史、生词复习与本地备份。无需账号。
 // @match        http://*/*
 // @match        https://*/*
@@ -2075,7 +2075,7 @@ SOFTWARE.
     learning_steps: ['1m', '10m'], relearning_steps: ['10m'] });
   const GRADES = { again: 1, hard: 2, good: 3, easy: 4 };
   const STUDY_STATES = ['新词', '学习中', '间隔复习', '重新学习'];
-  const DEFAULTS = { auto: true, context: false };
+  const DEFAULTS = { auto: true, autoBook: false, context: false };
   const normalize = value => {
     if (typeof value !== 'string') return '';
     const word = value.trim().replace(/[‘’]/g, "'")
@@ -2302,7 +2302,8 @@ SOFTWARE.
   const notify = () => put('revision', crypto.randomUUID());
   const all = type => GM_listValues().filter(key => key.startsWith(PREFIX + type + ':')).map(key => GM_getValue(key)).filter(Boolean);
   const snapshot = () => ({ schemaVersion: 2, exportedAt: new Date().toISOString(),
-    words: all('word'), history: ordered(all('event'), true), book: all('study').map(migrateStudy), settings: get('settings', DEFAULTS) });
+    words: all('word'), history: ordered(all('event'), true), book: all('study').map(migrateStudy),
+    settings: { ...DEFAULTS, ...get('settings', {}) } });
   const date = value => new Date(value).toLocaleString('zh-CN', { hour12: false });
   const today = value => new Date(value).toLocaleDateString() === new Date().toLocaleDateString();
   let settings = { ...DEFAULTS, ...get('settings', {}) };
@@ -2373,7 +2374,7 @@ SOFTWARE.
     .search input{font-size:18px;line-height:1.5;padding:8px 12px}
     .list{gap:2px;margin-top:8px;padding:2px}
     .item{padding:6px 10px;border:0;border-radius:9px}
-    .item .term{font-size:21px;line-height:1.2}
+    .item .term{font-size:21px;line-height:1.2;overflow-wrap:anywhere}
     .item .meta{margin-top:2px;font-size:11px;line-height:1.4}
     .translation-copy{white-space:pre-line;line-height:1.85}
     .logo .version{font:11px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:var(--muted);margin-left:6px;white-space:nowrap}
@@ -2389,8 +2390,16 @@ SOFTWARE.
     .library .split{flex:1;min-height:0;grid-template-rows:minmax(0,1fr)}.library-list{display:flex;flex-direction:column;min-width:0;min-height:0}.library-list>.row{flex-shrink:0}
     .library .list{flex:1;min-height:0;max-height:none}.detail-pane{overflow:auto;min-height:0;padding:3px 8px 3px 3px}
     .list:focus-visible,.detail-pane:focus-visible{outline:2px solid #75ac8c;outline-offset:-2px}
-    .history-row{position:relative;flex-shrink:0}.history-row>.item{padding-right:40px}.history-delete{position:absolute;right:5px;top:50%;transform:translateY(-50%);border:0;background:transparent;opacity:0;pointer-events:none}
-    .history-row:hover>.history-delete,.history-row:focus-within>.history-delete{opacity:1;pointer-events:auto}
+    .library-row{position:relative;flex-shrink:0}.library-row>.item{padding-right:42px}.history-row>.item{padding-right:70px}
+    .library-row:hover>.item{background:var(--surface)}.library-row:hover>.item.active{background:var(--tint)}
+    .row-actions{position:absolute;right:5px;top:50%;transform:translateY(-50%);display:flex;align-items:center;gap:2px}
+    .list-star,.history-delete{border:0;background:transparent;padding:4px 7px;line-height:1;border-radius:8px}
+    .list-star:focus-visible,.history-delete:focus-visible{outline-offset:0}
+    .list-star{color:var(--muted);font-size:17px}.list-star.starred{color:var(--accent)}
+    .list-star:hover{color:var(--accent);background:color-mix(in srgb,var(--accent) 12%,transparent)}
+    .history-delete{opacity:0;pointer-events:none}
+    .history-row:hover .history-delete,.history-row:focus-within .history-delete{opacity:1;pointer-events:auto}
+    .history-delete:hover{background:color-mix(in srgb,var(--error) 12%,transparent)}
     @media(hover:none){.history-delete{opacity:1;pointer-events:auto}}
     @media(max-width:760px){.studio{grid-template-rows:auto minmax(0,1fr)}.library .split{grid-template-rows:minmax(0,2fr) minmax(0,3fr);gap:16px}}
   `;
@@ -2574,8 +2583,11 @@ SOFTWARE.
       }
       if (epoch !== queryEpoch) return;
       put('word:' + word, entry);
-      const event = { id: crypto.randomUUID(), word, at: Date.now(), ...(context || {}) };
+      const now = Date.now();
+      const event = { id: crypto.randomUUID(), word, at: now, ...(context || {}) };
       put('event:' + event.id, event);
+      settings = { ...DEFAULTS, ...get('settings', {}) };
+      if (settings.autoBook && !get('study:' + word)) put('study:' + word, createStudy(word, now));
       selectedWord = word;
       selectedEvent = event;
       notify();
@@ -2668,18 +2680,18 @@ SOFTWARE.
       el('div', 'meta', entry.translationSource ? '多条释义 · MyMemory 机器翻译' : 'MyMemory 机器翻译'));
     return node;
   }
-  function toggleStar(word) {
+  const createStudy = (word, now = Date.now()) => migrateStudy({ word, addedAt: now, updatedAt: now,
+    stage: 0, dueAt: now, reviews: 0, lastReviewedAt: 0, lastGrade: '' });
+  function toggleStar(word, rerender = true) {
     const existing = get('study:' + word);
     if (existing) {
       if (!confirm(`将 ${word} 移出生词本？该词的复习进度也会删除，查词历史保留。`)) return false;
       remove('study:' + word);
     } else {
-      const now = Date.now();
-      put('study:' + word, migrateStudy({ word, addedAt: now, updatedAt: now, stage: 0, dueAt: now,
-        reviews: 0, lastReviewedAt: 0, lastGrade: '' }));
+      put('study:' + word, createStudy(word));
     }
     notify();
-    if (!overlay.hidden) render();
+    if (rerender && !overlay.hidden) render();
     return true;
   }
   function senses(entry) {
@@ -2815,8 +2827,8 @@ SOFTWARE.
     split.append(left, detail);
     view.append(split);
     function drawDetail() {
-      const entry = selectedWord ? get('word:' + selectedWord) : null;
-      detail.replaceChildren(entry ? wordDetail(entry, selectedEvent) : el('div', 'empty', '选择一个单词，或在上方开始查询'));
+      const entry = selectedWord && (!isBook || get('study:' + selectedWord)) ? get('word:' + selectedWord) : null;
+      detail.replaceChildren(entry ? wordDetail(entry, isBook ? null : selectedEvent, false) : el('div', 'empty', '选择一个单词，或在上方开始查询'));
     }
     function drawList() {
       list.replaceChildren();
@@ -2831,10 +2843,11 @@ SOFTWARE.
         }, 'item');
         row.classList.toggle('active', isBook ? selectedWord === item.word : selectedEvent?.id === item.id);
         row.append(el('div', 'term', item.word), el('div', 'meta', isBook ? (item.dueAt <= Date.now() ? '待复习' : '下次 ' + date(item.dueAt)) : date(item.at)));
-        if (isBook) list.append(row);
-        else {
-          const wrapper = el('div', 'history-row');
-          wrapper.append(row, button('×', () => {
+        const starred = Boolean(get('study:' + item.word));
+        const wrapper = el('div', isBook ? 'library-row' : 'library-row history-row');
+        const actions = el('div', 'row-actions');
+        if (!isBook) {
+          actions.append(button('×', () => {
             const scrollTop = list.scrollTop;
             const detailTop = detail.scrollTop;
             remove('event:' + item.id);
@@ -2849,8 +2862,32 @@ SOFTWARE.
             const deletes = view.querySelectorAll('.history-delete');
             (deletes[index] || deletes[index - 1] || view.querySelector('input')).focus({ preventScroll: true });
           }, 'icon danger history-delete', `删除 ${item.word} 的这条查询记录`));
-          list.append(wrapper);
         }
+        const star = button(starred ? '★' : '☆', () => {
+          const scrollTop = list.scrollTop;
+          const detailTop = detail.scrollTop;
+          if (!toggleStar(item.word, false)) { star.focus({ preventScroll: true }); return; }
+          if (isBook) {
+            const deletingSelected = selectedWord === item.word;
+            if (deletingSelected) {
+              selectedWord = (matches[index + 1] || matches[index - 1])?.word || '';
+              selectedEvent = null;
+            }
+            render();
+            view.querySelector('.list').scrollTop = scrollTop;
+            if (!deletingSelected) view.querySelector('.detail-pane').scrollTop = detailTop;
+            const stars = view.querySelectorAll('.list-star');
+            (stars[index] || stars[index - 1] || view.querySelector('input')).focus({ preventScroll: true });
+          } else {
+            drawList();
+            list.scrollTop = scrollTop;
+            list.querySelectorAll('.list-star')[index]?.focus({ preventScroll: true });
+          }
+        }, starred ? 'icon list-star starred' : 'icon list-star', starred ? `取消收藏 ${item.word}` : `收藏 ${item.word}`);
+        star.setAttribute('aria-pressed', String(starred));
+        actions.append(star);
+        wrapper.append(row, actions);
+        list.append(wrapper);
       }
       if (matches.length > 300) list.append(el('p', 'notice', `显示前 300 / ${matches.length} 条，可继续筛选或导出全量`));
     }
@@ -2981,9 +3018,9 @@ SOFTWARE.
     view.append(el('h1', 'heading', '设置与数据'), el('p', 'subheading', '跨网站共用，数据保存在本机油猴存储'));
     const preferences = el('section', 'section');
     preferences.append(el('h3', '', '阅读偏好'));
-    for (const [key, label] of [['auto', '自动划词查询'], ['context', '保存阅读上下文与来源（仅本地）']]) {
+    for (const [key, label] of [['auto', '自动划词查询'], ['autoBook', '查词直接进入生词本'], ['context', '保存阅读上下文与来源（仅本地）']]) {
       const row = el('label', 'setting');
-      const toggle = el('input'); toggle.type = 'checkbox'; toggle.checked = settings[key];
+      const toggle = el('input'); toggle.type = 'checkbox'; toggle.checked = Boolean(settings[key]);
       toggle.addEventListener('change', () => {
         try {
           settings = { ...DEFAULTS, ...get('settings', {}), [key]: toggle.checked };
