@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Lexi · 划词词典与复习
 // @namespace    lexi-local
-// @version      0.2.1
+// @version      0.2.2
 // @description  英文划词、发音、跨网站历史、生词复习与本地备份。无需账号。
 // @match        http://*/*
 // @match        https://*/*
@@ -2071,8 +2071,10 @@ SOFTWARE.
   const DAY = 86400000;
   const PREFIX = 'lexi:v1:';
   const MAX_REVIEW_DAYS = 365;
-  const scheduler = memory.fsrs({ request_retention: 0.9, maximum_interval: MAX_REVIEW_DAYS, enable_fuzz: false,
-    learning_steps: ['1m', '10m'], relearning_steps: ['10m'] });
+  const scheduler = memory.fsrs({
+    request_retention: 0.9, maximum_interval: MAX_REVIEW_DAYS, enable_fuzz: false,
+    learning_steps: ['1m', '10m'], relearning_steps: ['10m']
+  });
   const GRADES = { again: 1, hard: 2, good: 3, easy: 4 };
   const STUDY_STATES = ['新词', '学习中', '间隔复习', '重新学习'];
   const DEFAULTS = { auto: true, autoBook: false, context: false };
@@ -2103,15 +2105,19 @@ SOFTWARE.
       // shortcut: 旧版没有逐次反馈日志，以旧间隔估计稳定性，今后的真实反馈继续校准。
       const oldInterval = record.lastReviewedAt ? (record.dueAt - record.lastReviewedAt) / DAY
         : [1, 1, 3, 7, 14, 30, 60][record.stage];
-      Object.assign(card, { stability: Math.max(0.1, Math.min(36500, oldInterval)), difficulty: 5,
+      Object.assign(card, {
+        stability: Math.max(0.1, Math.min(36500, oldInterval)), difficulty: 5,
         scheduled_days: Math.max(0, Math.min(36500, Math.round(oldInterval))), reps: record.reviews,
         state: record.lastGrade === 'again' ? memory.State.Relearning : memory.State.Review,
-        last_review: new Date(record.lastReviewedAt || record.addedAt) });
+        last_review: new Date(record.lastReviewedAt || record.addedAt)
+      });
     }
     return card;
   }
-  const storedCard = card => ({ ...card, due: card.due.getTime(),
-    ...(card.last_review ? { last_review: card.last_review.getTime() } : {}) });
+  const storedCard = card => ({
+    ...card, due: card.due.getTime(),
+    ...(card.last_review ? { last_review: card.last_review.getTime() } : {})
+  });
   const migrateStudy = record => ({ ...record, fsrs: storedCard(memoryCard(record)) });
   function schedule(record, grade, now) {
     if (!Object.hasOwn(GRADES, grade)) throw new Error('未知复习反馈');
@@ -2123,8 +2129,10 @@ SOFTWARE.
       card.due = new Date(now + MAX_REVIEW_DAYS * DAY);
     }
     const stage = grade === 'again' ? 0 : grade === 'hard' ? record.stage : Math.min(record.stage + 1, 6);
-    return { ...record, stage, fsrs: storedCard(card), dueAt: card.due.getTime(), updatedAt: now,
-      lastReviewedAt: now, reviews: card.reps, lastGrade: grade };
+    return {
+      ...record, stage, fsrs: storedCard(card), dueAt: card.due.getTime(), updatedAt: now,
+      lastReviewedAt: now, reviews: card.reps, lastGrade: grade
+    };
   }
   const reviewInterval = delay => delay < DAY ? `${Math.max(1, Math.ceil(delay / 60000))} 分钟`
     : `${Math.round(delay / DAY)} 天`;
@@ -2179,10 +2187,12 @@ SOFTWARE.
     const first = entries[0];
     const phonetic = [...phonetics.map(item => item.text), ...entries.map(item => item.phonetic)]
       .find(value => typeof value === 'string' && value.trim());
-    return { word, fetchedAt: now, phonetic: text(phonetic, 150).trim(),
+    return {
+      word, fetchedAt: now, phonetic: text(phonetic, 150).trim(),
       audio: phonetics.map(item => audioUrl(item.audio)).find(Boolean) || '', meanings,
       sourceUrl: safeUrl(first?.sourceUrls?.[0]),
-      license: { name: text(first?.license?.name, 120), url: safeUrl(first?.license?.url) } };
+      license: { name: text(first?.license?.name, 120), url: safeUrl(first?.license?.url) }
+    };
   }
   function validateBackup(raw) {
     const fail = () => { throw new Error('备份格式无效或版本不兼容，未导入数据'); };
@@ -2197,40 +2207,50 @@ SOFTWARE.
     if (!unique(raw.words, 'word') || !unique(raw.book, 'word') || !unique(raw.history, 'id')) fail();
     const words = raw.words.map(item => {
       if (!validWord(item.word) || !timestamp(item.fetchedAt) || !string(item.phonetic, 150) ||
-          !Array.isArray(item.meanings) || !item.meanings.length || item.meanings.length > 5) fail();
+        !Array.isArray(item.meanings) || !item.meanings.length || item.meanings.length > 5) fail();
       const meanings = item.meanings.map(meaning => {
         if (!object(meaning) || !string(meaning.partOfSpeech, 50) || !Array.isArray(meaning.definitions) ||
-            !meaning.definitions.length || meaning.definitions.length > 3) fail();
-        return { partOfSpeech: meaning.partOfSpeech, definitions: meaning.definitions.map(def => {
-          if (!object(def) || !string(def.definition, 1200) || !def.definition.trim() || !string(def.example, 600)) fail();
-          return { definition: def.definition, example: def.example };
-        }) };
+          !meaning.definitions.length || meaning.definitions.length > 3) fail();
+        return {
+          partOfSpeech: meaning.partOfSpeech, definitions: meaning.definitions.map(def => {
+            if (!object(def) || !string(def.definition, 1200) || !def.definition.trim() || !string(def.example, 600)) fail();
+            return { definition: def.definition, example: def.example };
+          })
+        };
       });
       if (item.translation !== undefined && (!string(item.translation, 16000) || !timestamp(item.translatedAt))) fail();
       if (item.translationSource !== undefined && (!item.translation || !string(item.translationSource, 8000))) fail();
       if (item.phoneticSource !== undefined && (item.phoneticSource !== 'youdao' || !item.phonetic.trim())) fail();
-      return { word: item.word, fetchedAt: item.fetchedAt, phonetic: item.phonetic.trim(), meanings,
+      return {
+        word: item.word, fetchedAt: item.fetchedAt, phonetic: item.phonetic.trim(), meanings,
         ...(item.phoneticSource ? { phoneticSource: item.phoneticSource } : {}),
         audio: audioUrl(item.audio), sourceUrl: safeUrl(item.sourceUrl),
         license: { name: text(item.license?.name, 120), url: safeUrl(item.license?.url) },
-        ...(item.translation ? { translation: item.translation, translatedAt: item.translatedAt,
-          ...(item.translationSource ? { translationSource: item.translationSource } : {}) } : {}) };
+        ...(item.translation ? {
+          translation: item.translation, translatedAt: item.translatedAt,
+          ...(item.translationSource ? { translationSource: item.translationSource } : {})
+        } : {})
+      };
     });
     const wordSet = new Set(words.map(item => item.word));
     const history = raw.history.map(item => {
       if (!validWord(item.word) || !wordSet.has(item.word) || !timestamp(item.at) ||
-          typeof item.id !== 'string' || !/^[a-zA-Z0-9-]{10,80}$/.test(item.id)) fail();
-      return { id: item.id, word: item.word, at: item.at,
-        context: text(item.context, 300), title: text(item.title, 120), sourceUrl: safeUrl(item.sourceUrl) };
+        typeof item.id !== 'string' || !/^[a-zA-Z0-9-]{10,80}$/.test(item.id)) fail();
+      return {
+        id: item.id, word: item.word, at: item.at,
+        context: text(item.context, 300), title: text(item.title, 120), sourceUrl: safeUrl(item.sourceUrl)
+      };
     });
     const book = raw.book.map(item => {
       if (!validWord(item.word) || !wordSet.has(item.word) || !timestamp(item.addedAt) || !timestamp(item.updatedAt) ||
-          !timestamp(item.dueAt) || !Number.isInteger(item.stage) || item.stage < 0 || item.stage > 6 ||
-          !Number.isSafeInteger(item.reviews) || item.reviews < 0 ||
-          (item.lastReviewedAt !== 0 && !timestamp(item.lastReviewedAt)) ||
-          !['', 'again', 'hard', 'good', ...(raw.schemaVersion === 2 ? ['easy'] : [])].includes(item.lastGrade)) fail();
-      const record = { word: item.word, addedAt: item.addedAt, updatedAt: item.updatedAt, dueAt: item.dueAt,
-        stage: item.stage, reviews: item.reviews, lastReviewedAt: item.lastReviewedAt, lastGrade: item.lastGrade };
+        !timestamp(item.dueAt) || !Number.isInteger(item.stage) || item.stage < 0 || item.stage > 6 ||
+        !Number.isSafeInteger(item.reviews) || item.reviews < 0 ||
+        (item.lastReviewedAt !== 0 && !timestamp(item.lastReviewedAt)) ||
+        !['', 'again', 'hard', 'good', ...(raw.schemaVersion === 2 ? ['easy'] : [])].includes(item.lastGrade)) fail();
+      const record = {
+        word: item.word, addedAt: item.addedAt, updatedAt: item.updatedAt, dueAt: item.dueAt,
+        stage: item.stage, reviews: item.reviews, lastReviewedAt: item.lastReviewedAt, lastGrade: item.lastGrade
+      };
       if (item.fsrs === undefined) {
         if (raw.schemaVersion === 2) fail();
         return migrateStudy(record);
@@ -2238,22 +2258,26 @@ SOFTWARE.
       const card = item.fsrs;
       const finite = (value, min, max) => typeof value === 'number' && Number.isFinite(value) && value >= min && value <= max;
       if (!object(card) || card.due !== item.dueAt || card.reps !== item.reviews ||
-          !Number.isInteger(card.state) || !finite(card.state, 0, 3) ||
-          !finite(card.stability, 0, 36500) || !finite(card.difficulty, 0, 10) ||
-          !finite(card.elapsed_days, 0, 100000000) ||
-          !Number.isInteger(card.scheduled_days) || !finite(card.scheduled_days, 0, 36500) ||
-          !Number.isInteger(card.learning_steps) || !finite(card.learning_steps, 0, 2) ||
-          !Number.isSafeInteger(card.lapses) || !finite(card.lapses, 0, card.reps)) fail();
+        !Number.isInteger(card.state) || !finite(card.state, 0, 3) ||
+        !finite(card.stability, 0, 36500) || !finite(card.difficulty, 0, 10) ||
+        !finite(card.elapsed_days, 0, 100000000) ||
+        !Number.isInteger(card.scheduled_days) || !finite(card.scheduled_days, 0, 36500) ||
+        !Number.isInteger(card.learning_steps) || !finite(card.learning_steps, 0, 2) ||
+        !Number.isSafeInteger(card.lapses) || !finite(card.lapses, 0, card.reps)) fail();
       if (card.state === memory.State.New) {
         if (card.reps || card.stability || card.difficulty || card.lapses || card.learning_steps ||
-            card.scheduled_days || item.lastReviewedAt || item.lastGrade || card.last_review !== undefined) fail();
+          card.scheduled_days || item.lastReviewedAt || item.lastGrade || card.last_review !== undefined) fail();
       } else if (!card.reps || card.stability < 0.001 || card.difficulty < 1 ||
-          !timestamp(card.last_review) || card.last_review !== item.lastReviewedAt || card.last_review > card.due ||
-          !Object.hasOwn(GRADES, item.lastGrade)) fail();
-      return { ...record, fsrs: { due: card.due, stability: card.stability, difficulty: card.difficulty,
-        elapsed_days: card.elapsed_days, scheduled_days: card.scheduled_days, learning_steps: card.learning_steps,
-        reps: card.reps, lapses: card.lapses, state: card.state,
-        ...(card.last_review !== undefined ? { last_review: card.last_review } : {}) } };
+        !timestamp(card.last_review) || card.last_review !== item.lastReviewedAt || card.last_review > card.due ||
+        !Object.hasOwn(GRADES, item.lastGrade)) fail();
+      return {
+        ...record, fsrs: {
+          due: card.due, stability: card.stability, difficulty: card.difficulty,
+          elapsed_days: card.elapsed_days, scheduled_days: card.scheduled_days, learning_steps: card.learning_steps,
+          reps: card.reps, lapses: card.lapses, state: card.state,
+          ...(card.last_review !== undefined ? { last_review: card.last_review } : {})
+        }
+      };
     });
     return { schemaVersion: 2, words, history, book };
   }
@@ -2274,8 +2298,12 @@ SOFTWARE.
       delete combined.translation;
       delete combined.translatedAt;
       delete combined.translationSource;
-      words.set(item.word, { ...combined, ...(translation ? { translation: translation.translation, translatedAt: translation.translatedAt,
-        ...(translation.translationSource ? { translationSource: translation.translationSource } : {}) } : {}) });
+      words.set(item.word, {
+        ...combined, ...(translation ? {
+          translation: translation.translation, translatedAt: translation.translatedAt,
+          ...(translation.translationSource ? { translationSource: translation.translationSource } : {})
+        } : {})
+      });
     }
     const history = new Map(current.history.map(item => [item.id, item]));
     for (const item of incoming.history) {
@@ -2301,9 +2329,11 @@ SOFTWARE.
   const remove = key => GM_deleteValue(PREFIX + key);
   const notify = () => put('revision', crypto.randomUUID());
   const all = type => GM_listValues().filter(key => key.startsWith(PREFIX + type + ':')).map(key => GM_getValue(key)).filter(Boolean);
-  const snapshot = () => ({ schemaVersion: 2, exportedAt: new Date().toISOString(),
+  const snapshot = () => ({
+    schemaVersion: 2, exportedAt: new Date().toISOString(),
     words: all('word'), history: ordered(all('event'), true), book: all('study').map(migrateStudy),
-    settings: { ...DEFAULTS, ...get('settings', {}) } });
+    settings: { ...DEFAULTS, ...get('settings', {}) }
+  });
   const date = value => new Date(value).toLocaleString('zh-CN', { hour12: false });
   const today = value => new Date(value).toLocaleDateString() === new Date().toLocaleDateString();
   let settings = { ...DEFAULTS, ...get('settings', {}) };
@@ -2515,7 +2545,8 @@ SOFTWARE.
     const pending = new Promise((resolve, reject) => {
       // Anonymous requests force fetch mode, whose native timeout is ignored on Chrome.
       timer = setTimeout(() => { reject(new Error('请求超时，请稍后重试')); handle?.abort(); }, 10000);
-      handle = GM_xmlhttpRequest({ method: 'GET', url, timeout: 10000, anonymous: true,
+      handle = GM_xmlhttpRequest({
+        method: 'GET', url, timeout: 10000, anonymous: true,
         onload: response => {
           if (response.status === 404) { reject(new Error('没有找到这个词，试试原形或其他拼写')); return; }
           if (response.status < 200 || response.status >= 300) { reject(new Error(`服务暂不可用（${response.status}），请稍后重试`)); return; }
@@ -2566,13 +2597,15 @@ SOFTWARE.
           if (epoch !== queryEpoch) return;
           const fresh = dictionary(response, word, Date.now());
           const cached = get('word:' + word);
-          if (!fresh.phonetic && cached?.phonetic?.trim()) {
+          if (cached?.phonetic?.trim() && (cached.phoneticSource === 'youdao' || !fresh.phonetic)) {
             fresh.phonetic = cached.phonetic;
             if (cached.phoneticSource) fresh.phoneticSource = cached.phoneticSource;
           }
           if (entry?.translation && translationMatches(entry, fresh)) {
-            Object.assign(fresh, { translation: entry.translation, translatedAt: entry.translatedAt,
-              ...(entry.translationSource ? { translationSource: entry.translationSource } : {}) });
+            Object.assign(fresh, {
+              translation: entry.translation, translatedAt: entry.translatedAt,
+              ...(entry.translationSource ? { translationSource: entry.translationSource } : {})
+            });
           }
           entry = fresh;
         } catch (error) {
@@ -2664,7 +2697,7 @@ SOFTWARE.
           return updated;
         })();
         translations.set(key, pending);
-        pending.finally(() => translations.delete(key)).catch(() => {});
+        pending.finally(() => translations.delete(key)).catch(() => { });
       }
       const updated = await translations.get(key);
       target.replaceChildren(translationBlock(updated));
@@ -2680,8 +2713,10 @@ SOFTWARE.
       el('div', 'meta', entry.translationSource ? '多条释义 · MyMemory 机器翻译' : 'MyMemory 机器翻译'));
     return node;
   }
-  const createStudy = (word, now = Date.now()) => migrateStudy({ word, addedAt: now, updatedAt: now,
-    stage: 0, dueAt: now, reviews: 0, lastReviewedAt: 0, lastGrade: '' });
+  const createStudy = (word, now = Date.now()) => migrateStudy({
+    word, addedAt: now, updatedAt: now,
+    stage: 0, dueAt: now, reviews: 0, lastReviewedAt: 0, lastGrade: ''
+  });
   function toggleStar(word, rerender = true) {
     const existing = get('study:' + word);
     if (existing) {
@@ -2712,11 +2747,11 @@ SOFTWARE.
     const node = el('div', 'phonetic');
     const show = current => {
       node.title = '';
-      node.replaceChildren(el('span', '', current.phonetic));
+      node.replaceChildren(el('span', '', current.phonetic), button('▷', () => speak(entry), 'icon', '播放单词发音'));
       if (current.phoneticSource === 'youdao') node.append(link('有道音标', 'https://www.youdao.com/result?word=' + encodeURIComponent(entry.word) + '&lang=en'));
     };
     async function load() {
-      node.replaceChildren(el('span', '', '正在补全音标…'));
+      show(entry.phonetic.trim() ? entry : { ...entry, phonetic: '正在获取有道音标…' });
       try {
         if (!pronunciations.has(entry.word)) {
           const pending = (async () => {
@@ -2725,29 +2760,31 @@ SOFTWARE.
             const phonetic = youdaoPhonetic(raw, entry.word);
             const current = get('word:' + entry.word);
             if (!current) throw new Error('词条已删除，请重新查询');
-            if (current.phonetic.trim()) return current;
+            if (current.phonetic.trim() && current.phoneticSource === 'youdao') return current;
             const updated = { ...current, phonetic, phoneticSource: 'youdao' };
             put('word:' + entry.word, updated);
             notify();
             return updated;
           })();
           pronunciations.set(entry.word, pending);
-          pending.finally(() => pronunciations.delete(entry.word)).catch(() => {});
+          pending.finally(() => pronunciations.delete(entry.word)).catch(() => { });
         }
         show(await pronunciations.get(entry.word));
       } catch (error) {
-        node.replaceChildren(el('span', '', '音标暂不可用'), button('重试', load));
+        const current = get('word:' + entry.word) || entry;
+        show(current.phonetic.trim() ? current : { ...current, phonetic: '音标暂不可用' });
+        if (current.phonetic.trim()) node.append(el('span', '', '有道音标暂不可用'));
+        node.append(button('重试', load));
         node.title = error.message;
       }
     }
-    if (entry.phonetic.trim()) show(entry); else load();
+    if (entry.phonetic.trim() && entry.phoneticSource === 'youdao') show(entry); else load();
     return node;
   }
   function wordDetail(entry, event = null, allowStar = true) {
     const node = el('article', 'detail');
     const title = el('div', 'bar');
     const actions = el('div', 'actions');
-    actions.append(button('▷', () => speak(entry), 'icon', '播放单词发音'));
     if (allowStar) {
       const star = button(get('study:' + entry.word) ? '已收藏' : '＋ 收藏', () => {
         if (toggleStar(entry.word)) star.textContent = get('study:' + entry.word) ? '已收藏' : '＋ 收藏';
@@ -2949,7 +2986,6 @@ SOFTWARE.
     const progress = get('study:' + word);
     card.append(el('div', 'muted', `${reviewIndex + 1} / ${queue.length} · ${STUDY_STATES[memoryCard(progress).state]}`), el('h2', 'word', word));
     card.append(phoneticBlock(entry));
-    card.append(button('▷ 播放发音', () => speak(entry)));
     if (!revealed) card.append(el('p', 'muted', '先回忆这个词的含义'), button('显示释义', () => { revealed = true; render(); }, 'button primary'));
     else {
       const answer = el('div', 'review-answer');
@@ -2957,7 +2993,7 @@ SOFTWARE.
       if (entry.translation) answer.append(translationBlock(entry));
       const actions = el('div', 'actions');
       for (const [grade, label, hint] of [['again', '忘记', '没想起来，或答案不正确'], ['hard', '困难', '想对了，但回忆很吃力'],
-        ['good', '记得', '能够正确回忆'], ['easy', '轻松', '无需费力就想起来了']]) {
+      ['good', '记得', '能够正确回忆'], ['easy', '轻松', '无需费力就想起来了']]) {
         const next = schedule(progress, grade, now);
         const caption = `${label} · ${reviewInterval(next.dueAt - now)}`;
         actions.append(button(caption, () => {
@@ -3085,8 +3121,10 @@ SOFTWARE.
         const body = block?.textContent || '';
         const index = body.toLowerCase().indexOf(raw.toLowerCase());
         const url = new URL(location.href); url.search = ''; url.hash = '';
-        context = { context: body.slice(Math.max(0, index - 90), Math.max(0, index - 90) + 300).replace(/\s+/g, ' '),
-          title: text(document.title, 120), sourceUrl: safeUrl(url.href) };
+        context = {
+          context: body.slice(Math.max(0, index - 90), Math.max(0, index - 90) + 300).replace(/\s+/g, ' '),
+          title: text(document.title, 120), sourceUrl: safeUrl(url.href)
+        };
       }
       lookup(word, selection.getRangeAt(0).getBoundingClientRect(), context).catch(showError);
     }, 220);

@@ -6,7 +6,7 @@ const { translationSource, schedule } = require('../lexi.user.js');
 const source = fs.readFileSync(require.resolve('../lexi.user.js'), 'utf8');
 
 // Exercise the userscript's actual UI callbacks without a browser or user GM data.
-function setup(phonetic = '/test/') {
+function setup(phonetic = '/test/', phoneticSource = 'youdao') {
   let shadow;
   let clockNow = Date.UTC(2026, 10, 13, 9);
   class ClockDate extends Date {
@@ -54,7 +54,8 @@ function setup(phonetic = '/test/') {
   const storage = new Map();
   const menus = new Map();
   for (const word of ['alpha', 'beta']) {
-    const entry = { word, fetchedAt: clockNow, phonetic, audio: '', sourceUrl: '', license: { name: '', url: '' },
+    const entry = { word, fetchedAt: clockNow, phonetic, ...(phonetic && phoneticSource ? { phoneticSource } : {}),
+      audio: '', sourceUrl: '', license: { name: '', url: '' },
       meanings: [{ partOfSpeech: 'noun', definitions: [{ definition: word, example: '' }] }], translation: '中文' };
     entry.translationSource = translationSource(entry);
     storage.set(prefix + 'word:' + word, entry);
@@ -275,6 +276,62 @@ test('failed deletion leaves the event and shows the storage error', async () =>
   assert.equal(shadow.querySelector('.toast').textContent, 'Storage unavailable');
 });
 
+test('Youdao replaces main dictionary phonetics once, merges concurrent translation, and is reused in review', async () => {
+  const { shadow, storage, prefix, context, click } = setup('/main/', '');
+  const requests = [];
+  context.GM_xmlhttpRequest = request => { requests.push(request); return { abort() {} }; };
+  await click(shadow.querySelector('.item'));
+  assert.equal(shadow.querySelector('.phonetic').querySelector('span').textContent, '/main/');
+  await click(shadow.querySelector('.item'));
+  assert.equal(requests.length, 1);
+  const current = storage.get(prefix + 'word:alpha');
+  storage.set(prefix + 'word:alpha', { ...current, translation: '刚更新的中文' });
+  requests[0].onload({ status: 200, responseText: JSON.stringify({ simple: { word: [{ 'return-phrase': 'alpha', ukphone: 'ˈælfə' }] } }) });
+  await new Promise(setImmediate);
+  assert.equal(shadow.querySelector('.phonetic').querySelector('span').textContent, '/ˈælfə/');
+  assert.equal(storage.get(prefix + 'word:alpha').phoneticSource, 'youdao');
+  assert.equal(storage.get(prefix + 'word:alpha').translation, '刚更新的中文');
+  await openReview({ shadow, click });
+  assert.equal(requests.length, 1);
+});
+
+test('playback stays next to phonetics in history, book and review', async () => {
+  const app = setup();
+  for (const screen of ['history', 'book', 'review']) {
+    if (screen === 'review') await openReview(app);
+    else {
+      await app.click(app.shadow.querySelectorAll('.tab')[screen === 'history' ? 0 : 1]);
+      await app.click(app.shadow.querySelector('.item'));
+    }
+    const phonetic = app.shadow.querySelector('.phonetic');
+    const play = findButton(app.shadow, '▷');
+    assert.equal(phonetic.children[0].textContent, '/test/');
+    assert.equal(phonetic.children[1], play);
+    assert.equal(app.shadow.querySelectorAll('button').filter(node => node.textContent.startsWith('▷')).length, 1);
+    await app.click(play);
+    assert.equal(app.shadow.querySelector('.toast').textContent, '当前浏览器没有可用的朗读功能');
+  }
+});
+
+test('Youdao failure keeps main phonetics and playback available with explicit retry', async () => {
+  const { shadow, context, click } = setup('/main/', '');
+  const requests = [];
+  context.GM_xmlhttpRequest = request => { requests.push(request); return { abort() {} }; };
+  await click(shadow.querySelector('.item'));
+  requests[0].onerror();
+  await new Promise(setImmediate);
+  const phonetic = shadow.querySelector('.phonetic');
+  assert.equal(phonetic.children[0].textContent, '/main/');
+  assert.equal(phonetic.children[1].attributes['aria-label'], '播放单词发音');
+  assert.ok(phonetic.querySelectorAll('span').some(node => node.textContent === '有道音标暂不可用'));
+  assert.ok(phonetic.title.includes('网络连接失败'));
+  await click(findButton(phonetic, '重试'));
+  requests[1].onload({ status: 200, responseText: JSON.stringify({ simple: { word: [{ 'return-phrase': 'alpha', ukphone: 'ˈælfə' }] } }) });
+  await new Promise(setImmediate);
+  assert.equal(phonetic.children[0].textContent, '/ˈælfə/');
+  assert.equal(findButton(phonetic, '重试'), undefined);
+});
+
 test('missing cached phonetics fill once, merge concurrent translation, and are reused in review', async () => {
   const { shadow, storage, prefix, context, click } = setup('');
   const requests = [];
@@ -306,7 +363,7 @@ test('failed phonetics can be retried, and a late response cannot recreate a del
   requests[0].onerror();
   await new Promise(setImmediate);
   assert.equal(shadow.querySelector('.phonetic').querySelector('span').textContent, '音标暂不可用');
-  await click(shadow.querySelector('.phonetic').querySelector('button'));
+  await click(findButton(shadow.querySelector('.phonetic'), '重试'));
   assert.equal(requests.length, 2);
   storage.delete(prefix + 'word:alpha');
   requests[1].onload({ status: 200, responseText: JSON.stringify({ simple: { word: [{ 'return-phrase': 'alpha', ukphone: 'ˈælfə' }] } }) });
@@ -315,7 +372,7 @@ test('failed phonetics can be retried, and a late response cannot recreate a del
   assert.equal(shadow.querySelector('.phonetic').querySelector('span').textContent, '音标暂不可用');
 });
 
-test('definition refresh preserves supplemental phonetics until the main dictionary supplies its own', async () => {
+test('definition refresh preserves preferred Youdao phonetics even when the main dictionary supplies its own', async () => {
   const { shadow, storage, prefix, context, click } = setup();
   const requests = [];
   context.GM_xmlhttpRequest = request => { requests.push(request); return { abort() {} }; };
@@ -335,8 +392,9 @@ test('definition refresh preserves supplemental phonetics until the main diction
   await click(query.querySelector('button'));
   requests[1].onload({ status: 200, responseText: JSON.stringify([{ meanings: entry.meanings, phonetic: '/fresh/' }]) });
   await new Promise(setImmediate);
-  assert.equal(storage.get(prefix + 'word:alpha').phonetic, '/fresh/');
-  assert.equal(storage.get(prefix + 'word:alpha').phoneticSource, undefined);
+  assert.equal(storage.get(prefix + 'word:alpha').phonetic, '/test/');
+  assert.equal(storage.get(prefix + 'word:alpha').phoneticSource, 'youdao');
+  assert.equal(requests.length, 2, 'definition refresh reuses saved Youdao phonetics');
 });
 
 test('deleting an unselected filtered event preserves selection and scroll positions', async () => {
