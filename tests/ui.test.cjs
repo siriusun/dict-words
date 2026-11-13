@@ -56,6 +56,7 @@ function setup(phonetic = '/test/', phoneticSource = 'youdao') {
   const menus = new Map();
   for (const word of ['alpha', 'beta']) {
     const entry = { word, fetchedAt: clockNow, phonetic, ...(phonetic && phoneticSource ? { phoneticSource } : {}),
+      wordForms: { base: word, forms: [] },
       audio: '', sourceUrl: '', license: { name: '', url: '' },
       meanings: [{ partOfSpeech: 'noun', definitions: [{ definition: word, example: '' }] }], translation: '中文' };
     entry.translationSource = translationSource(entry);
@@ -101,6 +102,108 @@ const openReview = async app => {
   await app.click(app.shadow.querySelectorAll('.tab')[2]);
   await app.click(findButton(app.shadow, '开始复习'));
 };
+
+function seedTook(app) {
+  const entry = { ...app.storage.get(app.prefix + 'word:alpha'), word: 'took', phonetic: '/tʊk/',
+    meanings: [{ partOfSpeech: 'verb', definitions: [{ definition: 'simple past tense of take', example: '' }] }] };
+  delete entry.wordForms;
+  entry.translationSource = translationSource(entry);
+  app.storage.set(app.prefix + 'word:took', entry);
+  return entry;
+}
+const respondYoudao = async (request, word, extra = {}) => {
+  request.onload({ status: 200, responseText: JSON.stringify({
+    ec: { word: [{ 'return-phrase': { l: { i: word } }, ...extra }] }
+  }) });
+  await new Promise(setImmediate);
+};
+const takeForms = [
+  { name: '复数', value: 'takes' }, { name: '第三人称单数', value: 'takes' },
+  { name: '现在分词', value: 'taking' }, { name: '过去式', value: 'took' }, { name: '过去分词', value: 'taken' }
+];
+
+test('took keeps its definition and shows the full take paradigm with shared phonetics and persistent review reuse', async () => {
+  const app = setup('/main/', '');
+  const { shadow, storage, prefix, context, click } = app;
+  seedTook(app);
+  const requests = [];
+  context.GM_xmlhttpRequest = request => { requests.push(request); return { abort() {} }; };
+  const query = shadow.querySelector('.search');
+  query.querySelector('input').value = 'took';
+  await click(query.querySelector('button'));
+  await click(shadow.querySelector('.item'));
+  assert.equal(requests.length, 1, 'phonetics, word forms and repeated views share the took request');
+  assert.equal(new URL(requests[0].url).searchParams.get('q'), 'took');
+  await respondYoudao(requests[0], 'took', { prototype: 'take', ukphone: 'tʊk' });
+  assert.equal(requests.length, 2);
+  assert.equal(new URL(requests[1].url).searchParams.get('q'), 'take');
+  storage.set(prefix + 'word:took', { ...storage.get(prefix + 'word:took'), translation: '刚更新的中文' });
+  await respondYoudao(requests[1], 'take', { wfs: takeForms.map(wf => ({ wf })) });
+  assert.equal(shadow.querySelector('.definition').textContent, 'simple past tense of take');
+  const forms = shadow.querySelector('.word-forms');
+  assert.deepEqual(forms.querySelectorAll('dt').map(node => node.textContent),
+    ['原形', '复数', '第三人称单数', '现在分词', '过去式', '过去分词']);
+  assert.deepEqual(forms.querySelectorAll('dd').map(node => node.textContent),
+    ['take', 'takes', 'takes', 'taking', 'took（当前词）', 'taken']);
+  assert.deepEqual(JSON.parse(JSON.stringify(storage.get(prefix + 'word:took').wordForms)), { base: 'take', forms: takeForms });
+  assert.equal(storage.get(prefix + 'word:took').translation, '刚更新的中文');
+  assert.equal(storage.get(prefix + 'word:took').phoneticSource, 'youdao');
+  assert.equal(storage.has(prefix + 'word:take'), false, 'supplementing the root does not create another saved word');
+  assert.equal([...storage.keys()].filter(key => key.startsWith(prefix + 'event:')).length, 4);
+  storage.delete(prefix + 'study:alpha');
+  storage.set(prefix + 'study:took', createStudy('took', context.Date.now()));
+  await openReview(app);
+  assert.equal(shadow.querySelector('.word-forms'), null, 'review does not leak forms before revealing the answer');
+  await click(findButton(shadow, '显示释义'));
+  assert.ok(shadow.querySelector('.review-answer').querySelector('.word-forms'));
+  assert.equal(requests.length, 2, 'the answer reuses saved forms and phonetics');
+});
+
+test('legacy words supplement missing forms without history or study changes, retry failures and cache absence', async () => {
+  const { shadow, storage, prefix, context, click } = setup();
+  delete storage.get(prefix + 'word:alpha').wordForms;
+  const studyBefore = structuredClone(storage.get(prefix + 'study:alpha'));
+  const requests = [];
+  context.GM_xmlhttpRequest = request => { requests.push(request); return { abort() {} }; };
+  await click(shadow.querySelector('.item'));
+  requests[0].onerror();
+  await new Promise(setImmediate);
+  const forms = shadow.querySelector('.word-forms');
+  assert.equal(shadow.querySelector('.definition').textContent, 'alpha');
+  assert.ok(forms.querySelector('.notice').textContent.includes('网络连接失败'));
+  await click(findButton(forms, '重试词形变化'));
+  await respondYoudao(requests[1], 'alpha');
+  assert.equal(forms.hidden, true, 'a successful response with no forms hides the section');
+  assert.deepEqual(JSON.parse(JSON.stringify(storage.get(prefix + 'word:alpha').wordForms)), { base: 'alpha', forms: [] });
+  await click(shadow.querySelectorAll('.tab')[1]);
+  await click(shadow.querySelector('.item'));
+  assert.equal(requests.length, 2);
+  assert.equal([...storage.keys()].filter(key => key.startsWith(prefix + 'event:')).length, 3);
+  assert.deepEqual(storage.get(prefix + 'study:alpha'), studyBefore);
+});
+
+test('root lookup failures remain retryable and late form responses cannot restore a deleted word', async () => {
+  const app = setup();
+  const { shadow, storage, prefix, context, click } = app;
+  seedTook(app);
+  const requests = [];
+  context.GM_xmlhttpRequest = request => { requests.push(request); return { abort() {} }; };
+  const query = shadow.querySelector('.search');
+  query.querySelector('input').value = 'took';
+  await click(query.querySelector('button'));
+  await respondYoudao(requests[0], 'took', { prototype: 'take' });
+  requests[1].onerror();
+  await new Promise(setImmediate);
+  assert.equal(storage.get(prefix + 'word:took').wordForms, undefined, 'incomplete forms are not cached as success');
+  const forms = shadow.querySelector('.word-forms');
+  await click(findButton(forms, '重试词形变化'));
+  await respondYoudao(requests[2], 'took', { prototype: 'take' });
+  storage.delete(prefix + 'word:took');
+  await respondYoudao(requests[3], 'take', { wfs: takeForms.map(wf => ({ wf })) });
+  assert.equal(storage.has(prefix + 'word:took'), false);
+  assert.ok(forms.querySelector('.notice').textContent.includes('词条已删除'));
+  assert.ok(findButton(forms, '重试词形变化'));
+});
 
 test('review hides answers until recalled, previews four schedules and persists a grade only once', async () => {
   const app = setup();
@@ -390,6 +493,7 @@ test('definition refresh preserves preferred Youdao phonetics even when the main
   await new Promise(setImmediate);
   assert.equal(storage.get(prefix + 'word:alpha').phonetic, '/test/');
   assert.equal(storage.get(prefix + 'word:alpha').phoneticSource, 'youdao');
+  assert.deepEqual(storage.get(prefix + 'word:alpha').wordForms, entry.wordForms);
   assert.equal(requests.length, 1);
   storage.set(prefix + 'word:alpha', { ...storage.get(prefix + 'word:alpha'), fetchedAt: 1 });
   await click(query.querySelector('button'));
@@ -397,6 +501,7 @@ test('definition refresh preserves preferred Youdao phonetics even when the main
   await new Promise(setImmediate);
   assert.equal(storage.get(prefix + 'word:alpha').phonetic, '/test/');
   assert.equal(storage.get(prefix + 'word:alpha').phoneticSource, 'youdao');
+  assert.deepEqual(storage.get(prefix + 'word:alpha').wordForms, entry.wordForms);
   assert.equal(requests.length, 2, 'definition refresh reuses saved Youdao phonetics');
 });
 

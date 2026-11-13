@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const test = require('node:test');
 const fs = require('node:fs');
 const { createHash } = require('node:crypto');
-const { normalize, schedule, scheduleAll, migrateStudy, createStudy, reviewInterval, csv, dictionary, validateBackup, mergeBackup, ordered, audioUrl, translationSource, translationChunks, youdaoPhonetic,
+const { normalize, schedule, scheduleAll, migrateStudy, createStudy, reviewInterval, csv, dictionary, validateBackup, mergeBackup, ordered, audioUrl, translationSource, translationChunks, youdaoPhonetic, youdaoWordForms,
   dayStart, nextDayStart, availableAt, planReview, retentionStats, contextParts, isLeech } = require('../lexi.user.js');
 const now = Date.UTC(2026, 10, 12);
 const DAY = 86400000;
@@ -181,6 +181,36 @@ test('supplemental phonetics survive backup/import and a newer definition withou
   assert.equal(refreshed.words[0].phoneticSource, undefined);
   data.words[0].phoneticSource = 'unknown';
   assert.throws(() => validateBackup(data));
+});
+test('word forms read exact-word prototypes, categories and alternative spellings without guessing', () => {
+  const response = (word, extra) => ({ ec: { word: [{ 'return-phrase': { l: { i: word } }, ...extra }] } });
+  assert.deepEqual(youdaoWordForms(response('took', { prototype: 'take' }), 'took'), { base: 'take', forms: [] });
+  const forms = [{ name: '第三人称单数', value: 'learns' }, { name: '过去式', value: 'learnt或learned' },
+    { name: '过去分词', value: 'learnt或learned' }];
+  assert.deepEqual(youdaoWordForms(response('learn', { wfs: [...forms, forms[0]].map(wf => ({ wf })) }), 'learn'),
+    { base: 'learn', forms });
+  assert.deepEqual(youdaoWordForms(response('alpha', {}), 'alpha'), { base: 'alpha', forms: [] });
+  for (const raw of [null, {}, response('take', {}), response('took', { prototype: 'two words' }),
+    response('took', { wfs: {} }), response('took', { wfs: [{ wf: { name: '过去式', value: '' } }] }),
+    response('took', { wfs: [null] })]) assert.throws(() => youdaoWordForms(raw, 'took'));
+});
+test('word forms survive backup, definition-only merges and reject malformed imported data', () => {
+  const data = backup();
+  const wordForms = { base: 'test', forms: [{ name: '过去式', value: 'tested' }] };
+  data.words[0].wordForms = wordForms;
+  const restored = validateBackup(JSON.parse(JSON.stringify(data)));
+  assert.deepEqual(restored.words[0].wordForms, wordForms);
+  const incoming = backup();
+  incoming.words[0].fetchedAt++;
+  assert.deepEqual(mergeBackup(restored, validateBackup(incoming)).words[0].wordForms, wordForms);
+  incoming.words[0].wordForms = { base: 'test', forms: [] };
+  assert.deepEqual(mergeBackup(restored, validateBackup(incoming)).words[0].wordForms, incoming.words[0].wordForms);
+  for (const invalid of [null, { base: '', forms: [] }, { base: 'two words', forms: [] }, { base: 'test', forms: {} },
+    { base: 'test', forms: [{ name: '', value: 'tested' }] }, { base: 'test', forms: [{ name: '过去式', value: true }] },
+    { base: 'test', forms: Array(21).fill(wordForms.forms[0]) }]) {
+    data.words[0].wordForms = invalid;
+    assert.throws(() => validateBackup(data));
+  }
 });
 test('backup roundtrips all persistent learning data without executing imported strings', () => {
   const data = backup();

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Lexi · 划词词典与复习
 // @namespace    lexi-local
-// @version      0.3.0
+// @version      0.3.1
 // @description  英文划词、发音、跨网站历史、生词复习与本地备份。无需账号。
 // @match        http://*/*
 // @match        https://*/*
@@ -2289,16 +2289,39 @@ SOFTWARE.
   const translationMatches = (cached, entry) => cached.translationSource
     ? cached.translationSource === translationSource(entry)
     : cached.meanings[0].definitions[0].definition === entry.meanings[0].definitions[0].definition;
-  function youdaoPhonetic(raw, word) {
-    const records = [raw?.simple?.word, raw?.ec?.word].flatMap(items => Array.isArray(items) ? items : []);
-    for (const item of records) {
+  function youdaoRecords(raw, word) {
+    return [raw?.simple?.word, raw?.ec?.word].flatMap(items => Array.isArray(items) ? items : []).filter(item => {
       const phrase = item?.['return-phrase'];
-      if (normalize(typeof phrase === 'string' ? phrase : phrase?.l?.i) !== word) continue;
+      return normalize(typeof phrase === 'string' ? phrase : phrase?.l?.i) === word;
+    });
+  }
+  function youdaoPhonetic(raw, word) {
+    const records = youdaoRecords(raw, word);
+    for (const item of records) {
       const value = [item.ukphone, item.usphone, item.phone].find(value =>
         typeof value === 'string' && value.trim() && value.length <= 148);
       if (value) return '/' + value.trim().replace(/^\/|\/$/g, '') + '/';
     }
     throw new Error('暂未找到该词的音标，可稍后重试');
+  }
+  const validWordForms = value => value && typeof value === 'object' &&
+    typeof value.base === 'string' && !!value.base && normalize(value.base) === value.base &&
+    Array.isArray(value.forms) && value.forms.length <= 20 && value.forms.every(item =>
+      item && typeof item.name === 'string' && !!item.name.trim() && item.name.length <= 30 &&
+      typeof item.value === 'string' && !!item.value.trim() && item.value.length <= 200);
+  function youdaoWordForms(raw, word) {
+    const records = youdaoRecords(raw, word);
+    const item = records.find(item => item.prototype !== undefined || item.wfs !== undefined) || records[0];
+    if (!item) throw new Error('暂未找到该词的词形信息，可稍后重试');
+    if (item.wfs !== undefined && !Array.isArray(item.wfs)) throw new Error('词形数据格式异常，请稍后重试');
+    const result = {
+      base: item.prototype === undefined ? word : normalize(item.prototype),
+      forms: (item.wfs || []).map(item => ({ name: item?.wf?.name, value: item?.wf?.value }))
+    };
+    if (!validWordForms(result)) throw new Error('词形数据格式异常，请稍后重试');
+    result.forms = result.forms.filter((item, index, forms) =>
+      forms.findIndex(other => other.name === item.name && other.value === item.value) === index);
+    return result;
   }
   function dictionary(raw, word, now) {
     if (!Array.isArray(raw) || !raw.length) throw new Error('词典返回格式异常');
@@ -2350,9 +2373,13 @@ SOFTWARE.
       if (item.translation !== undefined && (!string(item.translation, 16000) || !timestamp(item.translatedAt))) fail();
       if (item.translationSource !== undefined && (!item.translation || !string(item.translationSource, 8000))) fail();
       if (item.phoneticSource !== undefined && (item.phoneticSource !== 'youdao' || !item.phonetic.trim())) fail();
+      if (item.wordForms !== undefined && !validWordForms(item.wordForms)) fail();
       return {
         word: item.word, fetchedAt: item.fetchedAt, phonetic: item.phonetic.trim(), meanings,
         ...(item.phoneticSource ? { phoneticSource: item.phoneticSource } : {}),
+        ...(item.wordForms ? { wordForms: {
+          base: item.wordForms.base, forms: item.wordForms.forms.map(({ name, value }) => ({ name, value }))
+        } } : {}),
         audio: audioUrl(item.audio), sourceUrl: safeUrl(item.sourceUrl),
         license: { name: text(item.license?.name, 120), url: safeUrl(item.license?.url) },
         ...(item.translation ? {
@@ -2435,6 +2462,8 @@ SOFTWARE.
       const translation = [old, item].filter(value => value?.translation && translationMatches(value, newer))
         .sort((a, b) => b.translatedAt - a.translatedAt)[0];
       const combined = { ...newer };
+      const wordForms = [newer, old, item].find(value => value?.wordForms)?.wordForms;
+      if (wordForms) combined.wordForms = wordForms;
       const phonetic = [newer, old, item].find(value => value?.phonetic?.trim());
       if (phonetic) {
         combined.phonetic = phonetic.phonetic;
@@ -2483,7 +2512,7 @@ SOFTWARE.
   const ordered = (events, oldest = false) => [...events].sort((a, b) =>
     (oldest ? 1 : -1) * (a.at - b.at || a.id.localeCompare(b.id)));
   if (typeof window === 'undefined') {
-    module.exports = { normalize, schedule, scheduleAll, migrateStudy, createStudy, reviewInterval, csv, dictionary, validateBackup, mergeBackup, ordered, audioUrl, translationSource, translationChunks, youdaoPhonetic,
+    module.exports = { normalize, schedule, scheduleAll, migrateStudy, createStudy, reviewInterval, csv, dictionary, validateBackup, mergeBackup, ordered, audioUrl, translationSource, translationChunks, youdaoPhonetic, youdaoWordForms,
       dayStart, nextDayStart, availableAt, planReview, retentionStats, contextParts, isLeech };
     return;
   }
@@ -2573,6 +2602,7 @@ SOFTWARE.
     .translation-copy{white-space:pre-line;line-height:1.85}
     .logo .version{font:11px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:var(--muted);margin-left:6px;white-space:nowrap}
     .phonetic{display:flex;align-items:center;flex-wrap:wrap;gap:8px}.phonetic .icon{border:0;background:transparent;transition:transform .12s,color .12s,opacity .12s}.phonetic .icon:active{transform:scale(.85);color:var(--accent);opacity:.6}.phonetic .link{font-size:11px}.phonetic .button{font-size:12px;padding:2px 8px}.review>.phonetic{justify-content:center}
+    .word-forms dl{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:5px 16px;margin:6px 0 10px}.word-forms dt{color:var(--muted);font-size:12px}.word-forms dd{margin:0;overflow-wrap:anywhere}
     *{overscroll-behavior:contain}
     ::-webkit-scrollbar{width:6px;height:6px}::-webkit-scrollbar-track,::-webkit-scrollbar-corner{background:transparent}
     ::-webkit-scrollbar-thumb{background:color-mix(in srgb,var(--muted) 42%,transparent);border-radius:8px}
@@ -2775,6 +2805,7 @@ SOFTWARE.
           if (epoch !== queryEpoch) return;
           const fresh = dictionary(response, word, Date.now());
           const cached = get('word:' + word);
+          if (cached?.wordForms) fresh.wordForms = cached.wordForms;
           if (cached?.phonetic?.trim() && (cached.phoneticSource === 'youdao' || !fresh.phonetic)) {
             fresh.phonetic = cached.phonetic;
             if (cached.phoneticSource) fresh.phoneticSource = cached.phoneticSource;
@@ -2915,7 +2946,63 @@ SOFTWARE.
       });
       container.append(section);
     }
+    container.append(wordFormsBlock(entry));
     return container;
+  }
+  const youdaoRequests = new Map();
+  function requestYoudao(word) {
+    if (!youdaoRequests.has(word)) {
+      const pending = request('https://dict.youdao.com/jsonapi?q=' + encodeURIComponent(word)
+        + '&dicts=' + encodeURIComponent(JSON.stringify({ count: 1, dicts: [['ec']] })));
+      youdaoRequests.set(word, pending);
+      pending.finally(() => youdaoRequests.delete(word)).catch(() => { });
+    }
+    return youdaoRequests.get(word);
+  }
+  const inflections = new Map();
+  function wordFormsBlock(entry) {
+    const node = el('section', 'word-forms sense');
+    const show = wordForms => {
+      node.replaceChildren();
+      node.hidden = wordForms.base === entry.word && !wordForms.forms.length;
+      if (node.hidden) return;
+      node.append(el('div', 'pos', '词形变化'));
+      const list = el('dl');
+      list.append(el('dt', '', '原形'), el('dd', '', wordForms.base));
+      for (const { name, value } of wordForms.forms) {
+        list.append(el('dt', '', name), el('dd', '', value + (value === entry.word ? '（当前词）' : '')));
+      }
+      node.append(list, link('有道词形', 'https://www.youdao.com/result?word=' + encodeURIComponent(wordForms.base) + '&lang=en'));
+    };
+    async function load() {
+      node.replaceChildren(el('div', 'pos', '词形变化'), el('p', 'muted', '正在获取词形变化…'));
+      try {
+        if (!inflections.has(entry.word)) {
+          const pending = (async () => {
+            let wordForms = youdaoWordForms(await requestYoudao(entry.word), entry.word);
+            if (wordForms.base !== entry.word) {
+              const rootForms = youdaoWordForms(await requestYoudao(wordForms.base), wordForms.base);
+              if (rootForms.base !== wordForms.base) throw new Error('词形原形不一致，请稍后重试');
+              wordForms = rootForms;
+            }
+            const current = get('word:' + entry.word);
+            if (!current) throw new Error('词条已删除，请重新查询');
+            const updated = { ...current, wordForms };
+            put('word:' + entry.word, updated);
+            notify();
+            return updated;
+          })();
+          inflections.set(entry.word, pending);
+          pending.finally(() => inflections.delete(entry.word)).catch(() => { });
+        }
+        show((await inflections.get(entry.word)).wordForms);
+      } catch (error) {
+        node.replaceChildren(el('div', 'pos', '词形变化'), el('p', 'notice', error.message),
+          button('重试词形变化', load));
+      }
+    }
+    if (entry.wordForms) show(entry.wordForms); else load();
+    return node;
   }
   const pronunciations = new Map();
   function phoneticBlock(entry) {
@@ -2930,8 +3017,7 @@ SOFTWARE.
       try {
         if (!pronunciations.has(entry.word)) {
           const pending = (async () => {
-            const raw = await request('https://dict.youdao.com/jsonapi?q=' + encodeURIComponent(entry.word)
-              + '&dicts=' + encodeURIComponent(JSON.stringify({ count: 1, dicts: [['ec']] })));
+            const raw = await requestYoudao(entry.word);
             const phonetic = youdaoPhonetic(raw, entry.word);
             const current = get('word:' + entry.word);
             if (!current) throw new Error('词条已删除，请重新查询');
