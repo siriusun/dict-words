@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Lexi · 划词词典与复习
 // @namespace    lexi-local
-// @version      0.3.1
+// @version      0.3.2
 // @description  英文划词、发音、跨网站历史、生词复习与本地备份。无需账号。
 // @match        http://*/*
 // @match        https://*/*
@@ -2545,6 +2545,10 @@ SOFTWARE.
   let answer = null;
   let reviewTimer;
   let returnFocus;
+  let internalLookup = null;
+  let internalSelection = null;
+  let internalSelectionTimer;
+  let refreshLibrary = null;
   const host = document.createElement('div');
   host.id = 'lexi-local-root';
   host.style.cssText = 'all:initial!important;position:fixed!important;inset:0!important;z-index:2147483647!important;pointer-events:none!important;';
@@ -2635,9 +2639,13 @@ SOFTWARE.
     .spell{font-weight:650}.spell.ok{color:var(--accent)}.spell.bad,.leech{color:var(--error)}
     .review-actions{justify-content:center;margin-top:14px}.review .actions{justify-content:center}
     .setting input.number{width:80px;height:auto;text-align:right;border:1px solid var(--line)}
+    .selection-lookup{pointer-events:auto;position:fixed;z-index:3;max-width:calc(100vw - 24px);overflow:hidden;text-overflow:ellipsis;background:var(--accent);border-color:var(--accent);color:var(--surface);box-shadow:0 4px 18px #102a2030}
+    .selection-lookup:hover{background:var(--accent);filter:brightness(1.1)}
+    .lookup-back{min-width:0;max-width:100%;overflow:hidden;text-overflow:ellipsis}.lookup-bar{margin-bottom:16px;gap:8px}
   `;
   const launcher = button('L', () => openStudio(), 'launcher', '打开 Lexi 学习中心');
   const popover = el('section', 'popover');
+  popover.tabIndex = -1;
   popover.setAttribute('role', 'region');
   popover.setAttribute('aria-label', 'Lexi 查词结果');
   popover.hidden = true;
@@ -2670,14 +2678,21 @@ SOFTWARE.
   form.addEventListener('submit', event => { event.preventDefault(); lookup(input.value).catch(showError); });
   top.append(form, button('×', closeStudio, 'icon', '关闭学习中心'));
   const view = el('div', 'view');
+  view.tabIndex = -1;
   const toast = el('div', 'toast');
   toast.setAttribute('role', 'status');
   toast.setAttribute('aria-live', 'polite');
   toast.hidden = true;
+  const selectionAction = button('', () => {
+    const selection = internalSelection;
+    if (selection) beginInternalLookup(selection.word, selection.target);
+  }, 'button selection-lookup');
+  selectionAction.hidden = true;
+  selectionAction.addEventListener('pointerdown', event => event.preventDefault());
   main.append(top, view);
   studio.append(sidebar, main);
   overlay.append(studio);
-  app.append(launcher, popover, overlay, toast);
+  app.append(launcher, popover, overlay, selectionAction, toast);
   shadow.append(style, app);
   let toastTimer;
   function message(value) {
@@ -2695,7 +2710,7 @@ SOFTWARE.
     if (ownSpeech) window.speechSynthesis?.cancel();
     ownSpeech = false;
   }
-  function closePopover() { popover.hidden = true; stopQuery(); stopAudio(); }
+  function closePopover() { resetInternalLookup(); hideSelectionAction(); popover.hidden = true; stopQuery(); stopAudio(); }
   function openStudio(nextScreen) {
     returnFocus = shadow.activeElement || document.activeElement;
     closePopover();
@@ -2705,6 +2720,8 @@ SOFTWARE.
     if (!studio.contains(shadow.activeElement)) input.focus();
   }
   function closeStudio() {
+    resetInternalLookup();
+    hideSelectionAction();
     overlay.hidden = true;
     clearTimeout(reviewTimer);
     stopQuery();
@@ -2730,8 +2747,14 @@ SOFTWARE.
   overlay.addEventListener('wheel', containWheel, { passive: false });
   popover.addEventListener('wheel', containWheel, { passive: false });
   shadow.addEventListener('keydown', event => {
-    if (event.key === 'Escape') { event.stopPropagation(); overlay.hidden ? closePopover() : closeStudio(); }
-    if (!overlay.hidden && screen === 'review' && round && !event.altKey && !event.repeat) {
+    if (event.key === 'Escape') {
+      event.preventDefault(); event.stopPropagation();
+      if (!selectionAction.hidden) hideSelectionAction();
+      else if (internalLookup) returnInternalLookup();
+      else overlay.hidden ? closePopover() : closeStudio();
+      return;
+    }
+    if (!internalLookup && selectionAction.hidden && !overlay.hidden && screen === 'review' && round && !event.altKey && !event.repeat) {
       let handled = false;
       try { handled = reviewKey(event); } catch (error) { handled = true; showError(error); }
       if (handled) { event.preventDefault(); event.stopPropagation(); return; }
@@ -2786,13 +2809,117 @@ SOFTWARE.
     bar.append(el('span', 'brand', 'LEXI · 英语词典'), button('×', closePopover, 'icon', '关闭查词卡'));
     return bar;
   }
-  async function lookup(raw, rect, context = null) {
+  function hideSelectionAction() {
+    clearTimeout(internalSelectionTimer);
+    internalSelection = null;
+    selectionAction.hidden = true;
+  }
+  function readingElement(node) {
+    const element = node instanceof Element ? node : node?.parentElement;
+    if (!element || element.closest('button,a,input,textarea,select,[contenteditable]:not([contenteditable="false"])')) return null;
+    return element.closest('.word,.definition,.example,.translation-copy,.word-forms,.context,.context-line,.recall-prompt');
+  }
+  function updateSelectionAction() {
+    hideSelectionAction();
+    const selection = typeof shadow.getSelection === 'function' ? shadow.getSelection() : window.getSelection();
+    if (!selection) return;
+    let range;
+    if (typeof selection.getComposedRanges === 'function') {
+      const [composed] = selection.getComposedRanges({ shadowRoots: [shadow] });
+      if (!composed || !shadow.contains(composed.startContainer) || !shadow.contains(composed.endContainer)) return;
+      range = document.createRange();
+      range.setStart(composed.startContainer, composed.startOffset);
+      range.setEnd(composed.endContainer, composed.endOffset);
+    } else {
+      if (!selection.rangeCount) return;
+      range = selection.getRangeAt(0);
+    }
+    if (range.collapsed || !shadow.contains(range.startContainer) || !shadow.contains(range.endContainer)) return;
+    const start = readingElement(range.startContainer);
+    if (!start || start !== readingElement(range.endContainer)) return;
+    const target = start.closest('.popover,.detail-pane,.view');
+    if (!target || target.hidden || (target !== popover && overlay.hidden)) return;
+    const word = normalize(range.toString());
+    if (!word) return;
+    internalSelection = { word, target };
+    selectionAction.textContent = '查 ' + word;
+    selectionAction.hidden = false;
+    const rect = range.getBoundingClientRect();
+    const size = selectionAction.getBoundingClientRect();
+    selectionAction.style.left = Math.max(12, Math.min(rect.left, window.innerWidth - size.width - 12)) + 'px';
+    selectionAction.style.top = Math.max(12, Math.min(rect.bottom + 6, window.innerHeight - size.height - 12)) + 'px';
+  }
+  function scheduleSelectionAction() {
+    clearTimeout(internalSelectionTimer);
+    internalSelectionTimer = setTimeout(updateSelectionAction, 0);
+  }
+  shadow.addEventListener('pointerup', event => { if (event.button === 0) scheduleSelectionAction(); });
+  shadow.addEventListener('keyup', event => { if (event.key.startsWith('Arrow') || event.key === 'Shift') scheduleSelectionAction(); });
+  shadow.addEventListener('pointerdown', event => { if (!event.composedPath().includes(selectionAction)) hideSelectionAction(); });
+  shadow.addEventListener('scroll', hideSelectionAction, true);
+  shadow.addEventListener('selectionchange', scheduleSelectionAction);
+  document.addEventListener('selectionchange', scheduleSelectionAction);
+
+  function navigationFrame(target) {
+    return {
+      nodes: [...target.childNodes], word: target.querySelector('.word')?.textContent || '复习',
+      focus: shadow.activeElement,
+      scroll: [target, ...target.querySelectorAll('div,article,section')].map(node => ({ node, top: node.scrollTop, left: node.scrollLeft }))
+    };
+  }
+  function restoreFrame(target, frame) {
+    target.replaceChildren(...frame.nodes);
+    for (const { node, top, left } of frame.scroll) { node.scrollTop = top; node.scrollLeft = left; }
+    refreshStarButtons();
+  }
+  function resetInternalLookup() {
+    if (!internalLookup) return;
+    const { target, frames } = internalLookup;
+    internalLookup = null;
+    stopQuery(); stopAudio();
+    restoreFrame(target, frames[0]);
+  }
+  function returnInternalLookup() {
+    hideSelectionAction();
+    stopQuery(); stopAudio();
+    const { target, frames } = internalLookup;
+    const frame = frames.pop();
+    if (!frames.length) internalLookup = null;
+    restoreFrame(target, frame);
+    if (frame.focus !== selectionAction && frame.focus?.getClientRects().length) frame.focus.focus({ preventScroll: true });
+    else (target.querySelector('.lookup-back') || target).focus({ preventScroll: true });
+  }
+  function beginInternalLookup(word, target) {
+    if (internalLookup && internalLookup.target !== target) resetInternalLookup();
+    if (!internalLookup) internalLookup = { target, frames: [] };
+    internalLookup.frames.push(navigationFrame(target));
+    hideSelectionAction();
+    stopAudio();
+    lookup(word, null, null, target).catch(showError);
+    target.querySelector('.lookup-back')?.focus({ preventScroll: true });
+  }
+  function internalResult(target, ...nodes) {
+    const focused = target.contains(shadow.activeElement);
+    const bar = el('div', 'bar lookup-bar');
+    bar.append(button('← 返回 ' + internalLookup.frames.at(-1).word, returnInternalLookup, 'button lookup-back'));
+    if (target === popover) bar.append(button('×', closePopover, 'icon', '关闭查词卡'));
+    target.replaceChildren(bar, ...nodes);
+    target.scrollTop = 0;
+    if (target === popover) {
+      const rect = popover.getBoundingClientRect();
+      popover.style.top = Math.max(12, Math.min(rect.top, window.innerHeight - rect.height - 12)) + 'px';
+    }
+    if (focused) bar.querySelector('button').focus({ preventScroll: true });
+  }
+  async function lookup(raw, rect, context = null, target = null) {
     const word = normalize(raw);
     if (!word) { message('请输入单个英文单词，支持内部连字符和撇号'); return; }
+    if (!target) { resetInternalLookup(); hideSelectionAction(); }
     stopQuery();
     const epoch = queryEpoch;
-    const showPopup = overlay.hidden;
-    if (showPopup) {
+    const showPopup = !target && overlay.hidden;
+    if (target) internalResult(target, el('h2', 'word', word), el('p', 'muted', '正在查词…'));
+    else if (showPopup) {
       popover.replaceChildren(popHeader(), el('h2', 'word', word), el('p', 'muted', '正在查词…'));
       positionPopover(rect);
     } else message(`正在查询 ${word}…`);
@@ -2830,10 +2957,13 @@ SOFTWARE.
       put('event:' + event.id, event);
       settings = cleanSettings(get('settings', {}));
       if (settings.autoBook && !get('study:' + word)) put('study:' + word, createStudy(word, now));
-      selectedWord = word;
-      selectedEvent = event;
+      if (!target) { selectedWord = word; selectedEvent = event; }
       notify();
-      if (showPopup) {
+      if (target) {
+        internalResult(target, wordDetail(entry, event));
+        if (stale) target.append(el('p', 'notice', '使用离线缓存 · 暂未能更新释义'));
+        refreshLibrary?.();
+      } else if (showPopup) {
         popover.replaceChildren(popHeader(), wordDetail(entry, event));
         if (stale) popover.append(el('p', 'notice', '使用离线缓存 · 暂未能更新释义'));
         popover.append(button('打开学习中心 ↗', () => openStudio('history'), 'button'));
@@ -2845,7 +2975,10 @@ SOFTWARE.
       }
     } catch (error) {
       if (epoch !== queryEpoch) return;
-      if (showPopup) {
+      if (target) {
+        internalResult(target, el('h2', 'word', word), el('p', 'error', error.message),
+          button('重试', () => lookup(word, rect, context, target)));
+      } else if (showPopup) {
         popover.replaceChildren(popHeader(), el('h2', 'word', word), el('p', 'error', error.message),
           button('重试', () => lookup(word, rect, context)));
         positionPopover(rect);
@@ -2932,8 +3065,23 @@ SOFTWARE.
       put('study:' + word, createStudy(word));
     }
     notify();
+    refreshStarButtons();
+    if (internalLookup) refreshLibrary?.();
     if (rerender && !overlay.hidden) render();
     return true;
+  }
+  function refreshStarButtons() {
+    for (const node of shadow.querySelectorAll('[data-star-word]')) {
+      const word = node.getAttribute('data-star-word');
+      const starred = Boolean(get('study:' + word));
+      const list = node.className.split(' ').includes('list-star');
+      node.textContent = list ? starred ? '★' : '☆' : starred ? '已收藏' : '＋ 收藏';
+      node.setAttribute('aria-pressed', String(starred));
+      if (list) {
+        node.classList.toggle('starred', starred);
+        node.setAttribute('aria-label', starred ? `取消收藏 ${word}` : `收藏 ${word}`);
+      }
+    }
   }
   function senses(entry) {
     const container = el('div');
@@ -3048,8 +3196,9 @@ SOFTWARE.
     const actions = el('div', 'actions');
     if (allowStar) {
       const star = button(get('study:' + entry.word) ? '已收藏' : '＋ 收藏', () => {
-        if (toggleStar(entry.word)) star.textContent = get('study:' + entry.word) ? '已收藏' : '＋ 收藏';
+        if (toggleStar(entry.word, !internalLookup)) star.textContent = get('study:' + entry.word) ? '已收藏' : '＋ 收藏';
       });
+      star.setAttribute('data-star-word', entry.word);
       actions.append(star);
     }
     node.append(el('h2', 'word', entry.word));
@@ -3077,6 +3226,9 @@ SOFTWARE.
   }
 
   function render() {
+    resetInternalLookup();
+    hideSelectionAction();
+    refreshLibrary = null;
     clearTimeout(reviewTimer);
     for (const [key, node] of Object.entries(navButtons)) {
       node.classList.toggle('active', key === screen);
@@ -3090,9 +3242,8 @@ SOFTWARE.
   }
   function renderLibrary() {
     const isBook = screen === 'book';
-    const records = isBook ? all('study').sort((a, b) => b.addedAt - a.addedAt || a.word.localeCompare(b.word)) : ordered(all('event'), oldest);
-    view.append(el('h1', 'heading', isBook ? '生词本' : '查词历史'),
-      el('p', 'subheading', isBook ? `${records.length} 个词 · 收藏的词会进入复习` : `${records.length} 次查询 · 每次成功查询都留有记录`));
+    const subheading = el('p', 'subheading');
+    view.append(el('h1', 'heading', isBook ? '生词本' : '查词历史'), subheading);
     const split = el('div', 'split');
     const left = el('div', 'library-list');
     const toolbar = el('div', 'row');
@@ -3129,12 +3280,15 @@ SOFTWARE.
       detail.replaceChildren(entry ? wordDetail(entry, isBook ? null : selectedEvent, false) : el('div', 'empty', '选择一个单词，或在上方开始查询'));
     }
     function drawList() {
+      const records = isBook ? all('study').sort((a, b) => b.addedAt - a.addedAt || a.word.localeCompare(b.word)) : ordered(all('event'), oldest);
+      subheading.textContent = isBook ? `${records.length} 个词 · 收藏的词会进入复习` : `${records.length} 次查询 · 每次成功查询都留有记录`;
       list.replaceChildren();
       const matches = records.filter(item => item.word.includes(filter.toLowerCase()));
       if (!matches.length) { list.append(el('div', 'empty', records.length ? '没有匹配的单词' : isBook ? '遇到想记住的词，点一下收藏' : '你的第一条查词记录会出现在这里')); return; }
       // shortcut: 一次显示最近的 300 条匹配记录，历史超过此数量时使用筛选或导出查看全量。
       for (const [index, item] of matches.slice(0, 300).entries()) {
         const row = button('', () => {
+          resetInternalLookup(); hideSelectionAction();
           selectedWord = item.word;
           selectedEvent = isBook ? null : item;
           drawList(); drawDetail(); detail.scrollTop = 0;
@@ -3183,6 +3337,7 @@ SOFTWARE.
           }
         }, starred ? 'icon list-star starred' : 'icon list-star', starred ? `取消收藏 ${item.word}` : `收藏 ${item.word}`);
         star.setAttribute('aria-pressed', String(starred));
+        star.setAttribute('data-star-word', item.word);
         actions.append(star);
         wrapper.append(row, actions);
         list.append(wrapper);
@@ -3190,6 +3345,11 @@ SOFTWARE.
       if (matches.length > 300) list.append(el('p', 'notice', `显示前 300 / ${matches.length} 条，可继续筛选或导出全量`));
     }
     search.addEventListener('input', () => { filter = search.value; drawList(); });
+    refreshLibrary = () => {
+      const scrollTop = list.scrollTop;
+      drawList();
+      list.scrollTop = scrollTop;
+    };
     drawList(); drawDetail();
   }
   function bookMeta(item) {
@@ -3644,18 +3804,21 @@ SOFTWARE.
       lookup(word, selection.getRangeAt(0).getBoundingClientRect(), context).catch(showError);
     }, 220);
   });
-  window.addEventListener('resize', () => { if (!popover.hidden) positionPopover(); });
+  window.addEventListener('resize', () => { hideSelectionAction(); if (!popover.hidden) positionPopover(); });
   document.addEventListener('pointerdown', event => {
-    if (!popover.hidden && !event.composedPath().includes(host)) closePopover();
+    if (!event.composedPath().includes(host)) {
+      hideSelectionAction();
+      if (!popover.hidden) closePopover();
+    }
   });
   GM_addValueChangeListener(PREFIX + 'revision', (_name, _old, _next, remote) => {
     if (!remote) return;
     settings = cleanSettings(get('settings', {}));
-    if (!overlay.hidden && !studio.contains(shadow.activeElement)) render();
+    if (!internalLookup && !overlay.hidden && !studio.contains(shadow.activeElement)) render();
   });
   window.addEventListener('focus', () => {
     settings = cleanSettings(get('settings', {}));
-    if (!overlay.hidden) render();
+    if (!internalLookup && !overlay.hidden) render();
   });
   GM_registerMenuCommand('打开 Lexi 学习中心', () => openStudio());
   GM_registerMenuCommand('暂停 / 开启自动划词', () => {

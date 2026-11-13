@@ -29,7 +29,17 @@ function setup(phonetic = '/test/', phoneticSource = 'youdao') {
     }
     append(...nodes) { for (const node of nodes) { node.parent = this; this.children.push(node); } }
     replaceChildren(...nodes) { this.children = []; this.textContent = ''; this.append(...nodes); }
+    get childNodes() { return this.children; }
+    get parentElement() { return this.parent || null; }
+    closest(selector) {
+      if (selector.split(',').some(part => part.startsWith('.') ? this.className.split(' ').includes(part.slice(1))
+        : part.startsWith('[contenteditable]') ? this.attributes.contenteditable && this.attributes.contenteditable !== 'false'
+        : this.tag === part)) return this;
+      return this.parent?.closest(selector) || null;
+    }
+    getBoundingClientRect() { return { left: 20, right: 120, top: 30, bottom: 70, width: 100, height: 40 }; }
     setAttribute(name, value) { this.attributes[name] = value; }
+    getAttribute(name) { return this.attributes[name] ?? null; }
     removeAttribute(name) { delete this.attributes[name]; }
     addEventListener(type, listener, options) { this.listeners[type] = { listener, options }; }
     attachShadow() { return shadow = new Element('shadow'); }
@@ -40,7 +50,8 @@ function setup(phonetic = '/test/', phoneticSource = 'youdao') {
     querySelectorAll(selector) {
       const matches = node => selector.split(',').some(part => part.startsWith('.')
         ? node.className.split(' ').includes(part.slice(1))
-        : part === '[tabindex="0"]' ? node.tabIndex === 0 : node.tag === part);
+        : part === '[tabindex="0"]' ? node.tabIndex === 0
+        : /^\[[\w-]+\]$/.test(part) ? part.slice(1, -1) in node.attributes : node.tag === part);
       return this.children.flatMap(child => [...(matches(child) ? [child] : []), ...child.querySelectorAll(selector)]);
     }
     querySelector(selector) { return this.querySelectorAll(selector)[0] || null; }
@@ -51,6 +62,8 @@ function setup(phonetic = '/test/', phoneticSource = 'youdao') {
   document.createTextNode = text => { const node = new Element('#text'); node.textContent = text; return node; };
   document.activeElement = new Element('button');
   const window = new Element('window');
+  window.innerWidth = 1100; window.innerHeight = 800;
+  window.getSelection = () => null;
   const prefix = 'lexi:v1:';
   const storage = new Map();
   const menus = new Map();
@@ -661,6 +674,158 @@ const answerWith = async (app, label) => {
   await app.click(findButton(app.shadow, '显示'));
   await app.click(findButton(app.shadow, label + ' ·'));
 };
+
+function selectInside(app, node, raw, collapsed = false) {
+  const range = { startContainer: node, endContainer: node, collapsed, toString: () => raw,
+    getBoundingClientRect: () => node.getBoundingClientRect() };
+  app.context.window.getSelection = () => ({ rangeCount: 1, isCollapsed: collapsed, getRangeAt: () => range });
+  assert.ok(app.shadow.listeners.pointerup, 'plugin handles its own selection');
+  app.shadow.listeners.pointerup.listener({ button: 0 });
+  app.advance(250);
+  return app.shadow.querySelector('.selection-lookup');
+}
+const historyOf = app => [...app.storage.entries()].filter(([key]) => key.startsWith(app.prefix + 'event:')).map(([, event]) => event);
+
+test('explicit internal lookup works with auto selection paused, saves history and stars, and restores nested views', async () => {
+  const app = setup();
+  const { shadow, click, storage, prefix } = app;
+  useSettings(app, { auto: false });
+  addWord(app, 'gamma');
+  await click(shadow.querySelector('.item'));
+  const pane = shadow.querySelector('.detail-pane');
+  const original = pane.querySelector('article');
+  pane.scrollTop = 75;
+  shadow.querySelector('.list').scrollTop = 42;
+  const action = selectInside(app, pane.querySelector('.definition'), 'beta');
+  assert.equal(action.hidden, false);
+  assert.equal(action.textContent, '查 beta');
+  assert.equal(historyOf(app).length, 3, 'selecting alone is not a lookup');
+  await click(action);
+  assert.equal(pane.querySelector('.word').textContent, 'beta');
+  assert.equal(historyOf(app).length, 4);
+  assert.equal(shadow.querySelectorAll('.item').length, 4, 'the current history list updates without leaving the word');
+  assert.ok(findButton(pane, '← 返回 alpha'));
+  await click(findButton(pane, '＋ 收藏'));
+  assert.ok(storage.has(prefix + 'study:beta'));
+  assert.equal(pane.querySelector('.word').textContent, 'beta', 'starring does not interrupt the temporary view');
+  pane.scrollTop = 39;
+  await click(selectInside(app, pane.querySelector('.definition'), 'gamma'));
+  assert.equal(pane.querySelector('.word').textContent, 'gamma');
+  assert.equal(historyOf(app).length, 5);
+  await click(findButton(pane, '← 返回 beta'));
+  assert.equal(pane.scrollTop, 39);
+  assert.equal(findButton(pane, '已收藏').textContent, '已收藏');
+  await click(findButton(pane, '← 返回 alpha'));
+  assert.equal(pane.querySelector('article'), original);
+  assert.equal(pane.scrollTop, 75);
+  assert.equal(shadow.querySelector('.list').scrollTop, 42);
+  assert.equal(historyOf(app).length, 5, 'returning never records another lookup');
+  assert.ok(shadow.querySelectorAll('.list-star').find(node => node.attributes['aria-label'] === '取消收藏 beta'));
+  await click(shadow.querySelectorAll('.tab')[0]);
+  assert.equal(shadow.querySelectorAll('.item').length, 5, 'temporary queries appear in the normal history');
+});
+
+test('review internal lookup preserves the revealed card and blocks grading until return', async () => {
+  const app = setup();
+  const { shadow, click, storage, prefix } = app;
+  useSettings(app, { autoBook: true });
+  await openReview(app);
+  await click(findButton(shadow, '显示释义'));
+  const original = shadow.querySelector('.review-answer');
+  const before = json(storage.get(prefix + 'study:alpha'));
+  shadow.querySelector('.view').scrollTop = 81;
+  await click(selectInside(app, original.querySelector('.definition'), 'beta'));
+  assert.equal(shadow.querySelector('.view').querySelector('.word').textContent, 'beta');
+  assert.ok(storage.has(prefix + 'study:beta'), 'temporary lookup respects automatic bookmarking');
+  assert.equal(historyOf(app).at(-1).word, 'beta');
+  await press(app, '1');
+  await press(app, 'r');
+  assert.deepEqual(json(storage.get(prefix + 'study:alpha')), before);
+  assert.equal(shadow.querySelector('.toast').hidden, true, 'review pronunciation is not triggered underneath');
+  await press(app, 'Escape');
+  assert.equal(shadow.querySelector('.overlay').hidden, false);
+  assert.equal(shadow.querySelector('.review-answer'), original);
+  assert.equal(shadow.querySelector('.view').scrollTop, 81);
+  assert.equal(shadow.activeElement, findButton(shadow, '记得 ·'));
+  await press(app, '3');
+  assert.equal(storage.get(prefix + 'study:alpha').reviews, before.reviews + 1);
+});
+
+test('the internal selection action ignores controls and phrases, and dismisses without closing the studio', async () => {
+  const app = setup();
+  const { shadow, click } = app;
+  await click(shadow.querySelector('.item'));
+  const definition = shadow.querySelector('.definition');
+  const action = selectInside(app, definition, 'beta');
+  assert.equal(action.hidden, false);
+  await press(app, 'Escape');
+  assert.equal(action.hidden, true);
+  assert.equal(shadow.querySelector('.overlay').hidden, false);
+  for (const [node, raw, collapsed] of [
+    [definition, 'two words', false], [definition, 'beta', true],
+    [findButton(shadow, '查询'), 'query', false], [shadow.querySelector('input'), 'beta', false],
+    [app.context.document.activeElement, 'beta', false]
+  ]) {
+    selectInside(app, node, raw, collapsed);
+    assert.equal(action.hidden, true);
+  }
+  selectInside(app, definition, 'beta');
+  app.context.window.getSelection = () => null;
+  app.context.document.listeners.selectionchange.listener();
+  app.advance(250);
+  assert.equal(action.hidden, true);
+  assert.equal(historyOf(app).length, 3);
+});
+
+test('internal lookup failures can retry or return, and late cancelled responses do not save history', async () => {
+  const app = setup();
+  const { shadow, click, context } = app;
+  const requests = [];
+  let aborted = 0;
+  context.GM_xmlhttpRequest = request => { requests.push(request); return { abort() { aborted++; } }; };
+  await click(shadow.querySelector('.item'));
+  const pane = shadow.querySelector('.detail-pane');
+  await click(selectInside(app, pane.querySelector('.definition'), 'missing'));
+  assert.ok(textOf(pane).includes('正在查词'));
+  requests[0].onerror();
+  await new Promise(setImmediate);
+  assert.ok(pane.querySelector('.error').textContent.includes('网络连接失败'));
+  assert.equal(historyOf(app).length, 3);
+  addWord(app, 'missing');
+  await click(findButton(pane, '重试'));
+  assert.equal(pane.querySelector('.word').textContent, 'missing');
+  assert.equal(historyOf(app).length, 4);
+  await click(findButton(pane, '← 返回 alpha'));
+  await click(selectInside(app, pane.querySelector('.definition'), 'cancelled'));
+  await click(findButton(pane, '← 返回 alpha'));
+  assert.equal(aborted, 1);
+  requests[1].onload({ status: 200, responseText: JSON.stringify([{ word: 'cancelled',
+    meanings: [{ partOfSpeech: 'verb', definitions: [{ definition: 'stopped' }] }] }]) });
+  await new Promise(setImmediate);
+  assert.equal(pane.querySelector('.word').textContent, 'alpha');
+  assert.equal(historyOf(app).length, 4);
+  assert.equal(app.storage.has(app.prefix + 'word:cancelled'), false);
+});
+
+test('internal selections use composed ranges when a browser retargets shadow selections', async () => {
+  const app = setup();
+  const { shadow, click, context } = app;
+  await click(shadow.querySelector('.item'));
+  const definition = shadow.querySelector('.definition');
+  selectInside(app, definition, 'beta');
+  const range = context.window.getSelection().getRangeAt(0);
+  context.document.createRange = () => ({ ...range, setStart() {}, setEnd() {} });
+  context.window.getSelection = () => ({ rangeCount: 1, getRangeAt: () => ({ startContainer: context.document }),
+    getComposedRanges: ({ shadowRoots }) => {
+      assert.equal(shadowRoots[0], shadow);
+      return [{ startContainer: definition, endContainer: definition, startOffset: 0, endOffset: 4 }];
+    } });
+  context.document.listeners.selectionchange.listener();
+  app.advance(250);
+  assert.equal(shadow.querySelector('.selection-lookup').hidden, false);
+  await click(shadow.querySelector('.selection-lookup'));
+  assert.equal(shadow.querySelector('.detail-pane').querySelector('.word').textContent, 'beta');
+});
 
 test('learning steps return within the same round, waiting for due cards before showing them early', async () => {
   const app = setup();
