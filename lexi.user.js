@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Lexi · 划词词典与复习
 // @namespace    lexi-local
-// @version      0.2.2
+// @version      0.2.3
 // @description  英文划词、发音、跨网站历史、生词复习与本地备份。无需账号。
 // @match        http://*/*
 // @match        https://*/*
@@ -2408,7 +2408,7 @@ SOFTWARE.
     .item .meta{margin-top:2px;font-size:11px;line-height:1.4}
     .translation-copy{white-space:pre-line;line-height:1.85}
     .logo .version{font:11px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:var(--muted);margin-left:6px;white-space:nowrap}
-    .phonetic{display:flex;align-items:center;flex-wrap:wrap;gap:8px}.phonetic .link{font-size:11px}.phonetic .button{font-size:12px;padding:2px 8px}.review>.phonetic{justify-content:center}
+    .phonetic{display:flex;align-items:center;flex-wrap:wrap;gap:8px}.phonetic .icon{border:0;background:transparent;transition:transform .12s,color .12s,opacity .12s}.phonetic .icon:active{transform:scale(.85);color:var(--accent);opacity:.6}.phonetic .link{font-size:11px}.phonetic .button{font-size:12px;padding:2px 8px}.review>.phonetic{justify-content:center}
     *{overscroll-behavior:contain}
     ::-webkit-scrollbar{width:6px;height:6px}::-webkit-scrollbar-track,::-webkit-scrollbar-corner{background:transparent}
     ::-webkit-scrollbar-thumb{background:color-mix(in srgb,var(--muted) 42%,transparent);border-radius:8px}
