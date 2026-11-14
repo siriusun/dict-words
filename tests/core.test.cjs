@@ -347,23 +347,26 @@ test('Youdao Chinese definitions require the exact word and usable bounded Chine
   }
 });
 
-test('fallback provider survives backup and definition refresh without relabeling legacy MyMemory text', () => {
+test('legacy Youdao fallback migrates separately and survives English refresh alongside MyMemory', () => {
   const data = backup();
   Object.assign(data.words[0], { translation: 'n. 测试', translatedAt: now, translationProvider: 'youdao' });
   const current = validateBackup(JSON.parse(JSON.stringify(data)));
-  assert.equal(current.words[0].translationProvider, 'youdao');
+  assert.equal(current.words[0].youdaoTranslation, 'n. 测试');
+  assert.equal(current.words[0].youdaoTranslatedAt, now);
+  assert.equal(current.words[0].translation, undefined);
   assert.equal(current.words[0].translationSource, undefined);
   const incoming = backup();
   incoming.words[0].fetchedAt++;
   incoming.words[0].meanings[0].definitions[0].definition = 'A changed English definition.';
   const merged = mergeBackup(current, validateBackup(incoming));
-  assert.equal(merged.words[0].translation, 'n. 测试');
-  assert.equal(merged.words[0].translationProvider, 'youdao');
+  assert.equal(merged.words[0].youdaoTranslation, 'n. 测试');
+  assert.equal(merged.words[0].translation, undefined);
   Object.assign(incoming.words[0], { translation: '新版中文', translatedAt: now + 1,
     translationSource: translationSource(incoming.words[0]), translationProvider: 'mymemory' });
   const refreshed = mergeBackup(current, validateBackup(incoming));
   assert.equal(refreshed.words[0].translationProvider, 'mymemory');
   assert.equal(refreshed.words[0].translation, '新版中文');
+  assert.equal(refreshed.words[0].youdaoTranslation, 'n. 测试');
   delete data.words[0].translationProvider;
   assert.equal(validateBackup(data).words[0].translationProvider, undefined);
   data.words[0].translationProvider = 'unknown';
@@ -371,6 +374,41 @@ test('fallback provider survives backup and definition refresh without relabelin
   delete data.words[0].translation;
   data.words[0].translationProvider = 'youdao';
   assert.throws(() => validateBackup(data));
+});
+
+test('parallel Chinese caches roundtrip and merge each provider by its own timestamp', () => {
+  const data = backup();
+  Object.assign(data.words[0], { translation: '原机器翻译', translatedAt: now,
+    translationSource: translationSource(data.words[0]), youdaoTranslation: '新有道中文', youdaoTranslatedAt: now + 2 });
+  const current = validateBackup(JSON.parse(JSON.stringify(data)));
+  const incoming = structuredClone(current);
+  Object.assign(incoming.words[0], { translation: '新机器翻译', translatedAt: now + 3,
+    youdaoTranslation: '旧有道中文', youdaoTranslatedAt: now + 1 });
+  const merged = mergeBackup(current, incoming);
+  assert.equal(merged.words[0].translation, '新机器翻译');
+  assert.equal(merged.words[0].translatedAt, now + 3);
+  assert.equal(merged.words[0].youdaoTranslation, '新有道中文');
+  assert.equal(merged.words[0].youdaoTranslatedAt, now + 2);
+  assert.deepEqual(mergeBackup({ ...current, words: merged.words }, incoming).words, merged.words);
+  incoming.words[0].fetchedAt++;
+  incoming.words[0].meanings[0].definitions[0].definition = 'A changed English definition.';
+  const refreshed = mergeBackup(current, incoming);
+  assert.equal(refreshed.words[0].translation, undefined);
+  assert.equal(refreshed.words[0].youdaoTranslation, '新有道中文');
+});
+
+test('Youdao cache backup validation rejects malformed text and timestamps', () => {
+  for (const fields of [{ youdaoTranslation: '' }, { youdaoTranslation: true, youdaoTranslatedAt: now },
+    { youdaoTranslation: '中'.repeat(16001), youdaoTranslatedAt: now },
+    { youdaoTranslation: '有道中文', youdaoTranslatedAt: 0 }, { youdaoTranslatedAt: now }]) {
+    const data = backup();
+    Object.assign(data.words[0], fields);
+    assert.throws(() => validateBackup(data));
+  }
+  const data = backup();
+  Object.assign(data.words[0], { translation: '旧有道中文', translatedAt: now, translationProvider: 'youdao',
+    youdaoTranslation: '新有道中文', youdaoTranslatedAt: now + 1 });
+  assert.equal(validateBackup(data).words[0].youdaoTranslation, '新有道中文');
 });
 
 const reviewRecord = (word, lastReview, stability, due, lapses = 0) => ({ word, addedAt: lastReview - DAY, updatedAt: lastReview,

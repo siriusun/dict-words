@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Lexi · 划词词典与复习
 // @namespace    lexi-local
-// @version      0.3.4
+// @version      0.3.5
 // @description  英文划词、发音、跨网站历史、生词复习与本地备份。无需账号。
 // @match        http://*/*
 // @match        https://*/*
@@ -2084,12 +2084,12 @@ SOFTWARE.
   };
   const GRADES = { again: 1, hard: 2, good: 3, easy: 4 };
   const STUDY_STATES = ['新词', '学习中', '间隔复习', '重新学习'];
-  const DEFAULTS = { auto: true, autoBook: false, context: false, newPerDay: 20, retention: 0.9, reverse: false, translationFallback: 'youdao', phoneticFallback: 'datamuse' };
+  const DEFAULTS = { auto: true, autoBook: false, context: false, newPerDay: 20, retention: 0.9, reverse: false, phoneticFallback: 'datamuse' };
   const cleanSettings = raw => {
     const value = { ...DEFAULTS, ...(raw && typeof raw === 'object' ? raw : {}) };
     if (!Number.isInteger(value.newPerDay) || value.newPerDay < 0 || value.newPerDay > 200) value.newPerDay = DEFAULTS.newPerDay;
     if (!RETENTIONS.includes(value.retention)) value.retention = DEFAULTS.retention;
-    if (!['none', 'youdao'].includes(value.translationFallback)) value.translationFallback = DEFAULTS.translationFallback;
+    delete value.translationFallback;
     if (!['none', 'datamuse'].includes(value.phoneticFallback)) value.phoneticFallback = DEFAULTS.phoneticFallback;
     return value;
   };
@@ -2289,10 +2289,23 @@ SOFTWARE.
     if (chunk) chunks.push(chunk);
     return chunks;
   }
-  const translationMatches = (cached, entry) => cached.translationProvider === 'youdao'
-    ? cached.word === entry.word
-    : cached.translationSource ? cached.translationSource === translationSource(entry)
-      : cached.meanings[0].definitions[0].definition === entry.meanings[0].definitions[0].definition;
+  const translationMatches = (cached, entry) => cached.translationSource
+    ? cached.translationSource === translationSource(entry)
+    : cached.meanings[0].definitions[0].definition === entry.meanings[0].definitions[0].definition;
+  function splitTranslations(entry) {
+    if (entry.translationProvider !== 'youdao') return entry;
+    const updated = { ...entry };
+    if (!entry.youdaoTranslation || entry.translatedAt > entry.youdaoTranslatedAt) {
+      updated.youdaoTranslation = entry.translation;
+      updated.youdaoTranslatedAt = entry.translatedAt;
+    }
+    delete updated.translation;
+    delete updated.translatedAt;
+    delete updated.translationSource;
+    delete updated.translationProvider;
+    return updated;
+  }
+  const chineseText = entry => [entry?.translation, entry?.youdaoTranslation].filter(Boolean).join('\n');
   function youdaoRecords(raw, word) {
     return [raw?.simple?.word, raw?.ec?.word].flatMap(items => Array.isArray(items) ? items : []).filter(item => {
       const phrase = item?.['return-phrase'];
@@ -2398,9 +2411,11 @@ SOFTWARE.
       if (item.translation !== undefined && (!string(item.translation, 16000) || !timestamp(item.translatedAt))) fail();
       if (item.translationSource !== undefined && (!item.translation || !string(item.translationSource, 8000))) fail();
       if (item.translationProvider !== undefined && (!item.translation || !['mymemory', 'youdao'].includes(item.translationProvider))) fail();
+      if ((item.youdaoTranslation !== undefined || item.youdaoTranslatedAt !== undefined) &&
+        (!string(item.youdaoTranslation, 16000) || !item.youdaoTranslation.trim() || !timestamp(item.youdaoTranslatedAt))) fail();
       if (item.phoneticSource !== undefined && (!['youdao', 'datamuse'].includes(item.phoneticSource) || !item.phonetic.trim())) fail();
       if (item.wordForms !== undefined && !validWordForms(item.wordForms)) fail();
-      return {
+      return splitTranslations({
         word: item.word, fetchedAt: item.fetchedAt, phonetic: item.phonetic.trim(), meanings,
         ...(item.phoneticSource ? { phoneticSource: item.phoneticSource } : {}),
         ...(item.wordForms ? { wordForms: {
@@ -2412,8 +2427,9 @@ SOFTWARE.
           translation: item.translation, translatedAt: item.translatedAt,
           ...(item.translationSource ? { translationSource: item.translationSource } : {}),
           ...(item.translationProvider ? { translationProvider: item.translationProvider } : {})
-        } : {})
-      };
+        } : {}),
+        ...(item.youdaoTranslation ? { youdaoTranslation: item.youdaoTranslation, youdaoTranslatedAt: item.youdaoTranslatedAt } : {})
+      });
     });
     const wordSet = new Set(words.map(item => item.word));
     const history = raw.history.map(item => {
@@ -2482,12 +2498,15 @@ SOFTWARE.
     return { schemaVersion: 3, words, history, book, recall: recallBook };
   }
   function mergeBackup(current, incoming, retention) {
-    const words = new Map(current.words.map(item => [item.word, item]));
-    for (const item of incoming.words) {
+    const words = new Map(current.words.map(item => [item.word, splitTranslations(item)]));
+    for (const incomingWord of incoming.words) {
+      const item = splitTranslations(incomingWord);
       const old = words.get(item.word);
       const newer = !old || item.fetchedAt > old.fetchedAt ? item : old;
       const translation = [old, item].filter(value => value?.translation && translationMatches(value, newer))
         .sort((a, b) => b.translatedAt - a.translatedAt)[0];
+      const youdao = [old, item].filter(value => value?.youdaoTranslation)
+        .sort((a, b) => b.youdaoTranslatedAt - a.youdaoTranslatedAt)[0];
       const combined = { ...newer };
       const wordForms = [newer, old, item].find(value => value?.wordForms)?.wordForms;
       if (wordForms) combined.wordForms = wordForms;
@@ -2501,12 +2520,15 @@ SOFTWARE.
       delete combined.translatedAt;
       delete combined.translationSource;
       delete combined.translationProvider;
+      delete combined.youdaoTranslation;
+      delete combined.youdaoTranslatedAt;
       words.set(item.word, {
         ...combined, ...(translation ? {
           translation: translation.translation, translatedAt: translation.translatedAt,
           ...(translation.translationSource ? { translationSource: translation.translationSource } : {}),
           ...(translation.translationProvider ? { translationProvider: translation.translationProvider } : {})
-        } : {})
+        } : {}),
+        ...(youdao ? { youdaoTranslation: youdao.youdaoTranslation, youdaoTranslatedAt: youdao.youdaoTranslatedAt } : {})
       });
     }
     const history = new Map(current.history.map(item => [item.id, item]));
@@ -2546,14 +2568,17 @@ SOFTWARE.
     return;
   }
 
-  const get = (key, fallback) => GM_getValue(PREFIX + key, fallback);
+  const get = (key, fallback) => {
+    const value = GM_getValue(PREFIX + key, fallback);
+    return key.startsWith('word:') && value ? splitTranslations(value) : value;
+  };
   const put = (key, value) => GM_setValue(PREFIX + key, value);
   const remove = key => GM_deleteValue(PREFIX + key);
   const notify = () => put('revision', crypto.randomUUID());
   const all = type => GM_listValues().filter(key => key.startsWith(PREFIX + type + ':')).map(key => GM_getValue(key)).filter(Boolean);
   const snapshot = () => ({
     schemaVersion: 3, exportedAt: new Date().toISOString(),
-    words: all('word'), history: ordered(all('event'), true), book: all('study').map(migrateStudy),
+    words: all('word').map(splitTranslations), history: ordered(all('event'), true), book: all('study').map(migrateStudy),
     recall: all('recall').map(migrateStudy), settings: cleanSettings(get('settings', {}))
   });
   const date = value => new Date(value).toLocaleString('zh-CN', { hour12: false });
@@ -2969,6 +2994,9 @@ SOFTWARE.
           const fresh = dictionary(response, word, Date.now());
           const cached = get('word:' + word);
           if (cached?.wordForms) fresh.wordForms = cached.wordForms;
+          if (cached?.youdaoTranslation) Object.assign(fresh, {
+            youdaoTranslation: cached.youdaoTranslation, youdaoTranslatedAt: cached.youdaoTranslatedAt
+          });
           if (cached?.phonetic?.trim() && (cached.phoneticSource === 'youdao' || !fresh.phonetic)) {
             fresh.phonetic = cached.phonetic;
             if (cached.phoneticSource) fresh.phoneticSource = cached.phoneticSource;
@@ -3048,73 +3076,70 @@ SOFTWARE.
     });
   }
   const translations = new Map();
-  async function translate(entry, target) {
-    target.replaceChildren(el('div', 'muted', '正在补全中文释义…'));
+  function translate(entry, provider) {
     const source = translationSource(entry);
-    const key = entry.word + '\n' + source;
-    try {
-      if (!translations.has(key)) {
-        const pending = (async () => {
+    const key = provider + '\n' + entry.word + (provider === 'mymemory' ? '\n' + source : '');
+    if (!translations.has(key)) {
+      const pending = (async () => {
+        if (!get('word:' + entry.word)) throw new Error('词条已删除，请重新查询');
+        let translation;
+        if (provider === 'youdao') {
+          translation = youdaoTranslation(await requestYoudao(entry.word), entry.word);
+        } else {
           const translated = [];
-          let primaryError;
           for (const chunk of translationChunks(source)) {
             if (!get('word:' + entry.word)) throw new Error('词条已删除，请重新查询');
-            try {
-              const result = await request('https://api.mymemory.translated.net/get?langpair=en%7Czh-CN&q=' + encodeURIComponent(chunk));
-              const value = result?.responseData?.translatedText;
-              if (Number(result?.responseStatus) !== 200 || result?.quotaFinished || typeof value !== 'string' || !value.trim()) {
-                throw new Error('中文服务暂不可用或额度已用尽，可稍后重试');
-              }
-              translated.push(value.trim());
-            } catch (error) {
-              primaryError = error;
-              break;
+            const result = await request('https://api.mymemory.translated.net/get?langpair=en%7Czh-CN&q=' + encodeURIComponent(chunk));
+            const value = result?.responseData?.translatedText;
+            if (Number(result?.responseStatus) !== 200 || result?.quotaFinished || typeof value !== 'string' || !value.trim()) {
+              throw new Error('中文服务暂不可用或额度已用尽，可稍后重试');
             }
+            translated.push(value.trim());
           }
-          let translation = translated.join('\n');
-          let translationProvider = 'mymemory';
-          if (!primaryError && translation.length > 16000) primaryError = new Error('中文响应过长，请稍后重试');
-          if (primaryError) {
-            if (cleanSettings(get('settings', {})).translationFallback !== 'youdao') throw new Error('MyMemory：' + primaryError.message);
-            const current = get('word:' + entry.word);
-            if (!current) throw new Error('词条已删除，请重新查询');
-            if (translationSource(current) !== source) throw new Error('词典释义已更新，请重新获取中文');
-            target.replaceChildren(el('p', 'notice', `MyMemory：${primaryError.message}；正在尝试有道备用释义…`));
-            try {
-              translation = youdaoTranslation(await requestYoudao(entry.word), entry.word);
-              translationProvider = 'youdao';
-            } catch (error) {
-              throw new Error(`MyMemory：${primaryError.message}；有道词典：${error.message}`);
-            }
-          }
-          const current = get('word:' + entry.word);
-          if (!current) throw new Error('词条已删除，请重新查询');
-          if (translationSource(current) !== source) throw new Error('词典释义已更新，请重新获取中文');
-          const updated = { ...current, translation, translationProvider, translatedAt: Date.now() };
-          delete updated.translationSource;
-          if (translationProvider === 'mymemory') updated.translationSource = source;
-          put('word:' + entry.word, updated);
-          notify();
-          return { updated, primaryError };
-        })();
-        translations.set(key, pending);
-        pending.finally(() => translations.delete(key)).catch(() => { });
-      }
-      const { updated, primaryError } = await translations.get(key);
-      target.replaceChildren(translationBlock(updated));
-      if (primaryError) target.append(el('p', 'notice', `MyMemory：${primaryError.message}；已使用有道备用释义。`));
-    } catch (error) {
-      target.replaceChildren();
-      if (entry.translation) target.append(translationBlock(entry));
-      target.append(el('p', 'notice', error.message), button('重试中文释义', () => translate(entry, target)));
+          translation = translated.join('\n');
+          if (translation.length > 16000) throw new Error('中文响应过长，请稍后重试');
+        }
+        const current = get('word:' + entry.word);
+        if (!current) throw new Error('词条已删除，请重新查询');
+        if (provider === 'mymemory' && translationSource(current) !== source) throw new Error('词典释义已更新，请重新获取中文');
+        const updated = { ...current, ...(provider === 'youdao'
+          ? { youdaoTranslation: translation, youdaoTranslatedAt: Date.now() }
+          : { translation, translationSource: source, translationProvider: 'mymemory', translatedAt: Date.now() }) };
+        put('word:' + entry.word, updated);
+        notify();
+        return updated;
+      })();
+      translations.set(key, pending);
+      pending.finally(() => translations.delete(key)).catch(() => { });
     }
+    return translations.get(key);
   }
-  function translationBlock(entry) {
-    const node = el('div', 'translation');
-    node.append(el('div', 'translation-copy', entry.translation),
-      el('div', 'meta', entry.translationProvider === 'youdao' ? '有道词典 · 中文备用释义（不与英文逐条对应）'
-        : entry.translationSource ? '多条释义 · MyMemory 机器翻译' : 'MyMemory 机器翻译'));
-    if (entry.translationProvider === 'youdao') node.append(link('有道词典', 'https://www.youdao.com/result?word=' + encodeURIComponent(entry.word) + '&lang=en'));
+  function translationBlock(entry, provider) {
+    const node = el('section', 'translation translation-' + provider);
+    const label = provider === 'youdao' ? '有道词典' : 'MyMemory';
+    const show = current => {
+      node.replaceChildren(el('div', 'pos', label));
+      const value = provider === 'youdao' ? current.youdaoTranslation : current.translation;
+      if (value) node.append(el('div', 'translation-copy', value));
+      node.append(el('div', 'meta', provider === 'youdao' ? '中文词典释义 · 不与英文逐条对应' : '英文释义的机器翻译'));
+      if (provider === 'youdao') node.append(link('有道词典', 'https://www.youdao.com/result?word=' + encodeURIComponent(entry.word) + '&lang=en'));
+    };
+    async function load() {
+      show(get('word:' + entry.word) || entry);
+      node.append(el('p', 'muted', '正在获取 ' + label + ' 中文释义…'));
+      try { show(await translate(entry, provider)); }
+      catch (error) {
+        show(get('word:' + entry.word) || entry);
+        node.append(el('p', 'notice', label + '：' + error.message), button('重试 ' + label + ' 中文释义', load));
+      }
+    }
+    if (provider === 'youdao' ? entry.youdaoTranslation : entry.translation && entry.translationSource === translationSource(entry)) show(entry);
+    else load();
+    return node;
+  }
+  function chineseDefinitions(entry) {
+    const node = el('div', 'chinese-definitions');
+    node.append(translationBlock(entry, 'mymemory'), translationBlock(entry, 'youdao'));
     return node;
   }
   function toggleStar(word, rerender = true) {
@@ -3286,10 +3311,7 @@ SOFTWARE.
     title.append(el('h2', 'word', entry.word), actions);
     node.append(title, phoneticBlock(entry));
     node.append(senses(entry));
-    const chinese = el('div');
-    node.append(chinese);
-    if (entry.translation && (entry.translationProvider === 'youdao' || entry.translationSource === translationSource(entry))) chinese.append(translationBlock(entry));
-    else translate(entry, chinese);
+    node.append(chineseDefinitions(entry));
     if (event?.context || event?.sourceUrl) {
       const context = el('details', 'context');
       context.append(el('summary', '', '阅读来源'));
@@ -3660,7 +3682,7 @@ SOFTWARE.
     let focusTarget;
     if (recall) {
       const prompt = el('div', 'recall-prompt');
-      if (wordEntry.translation) prompt.append(el('div', 'translation-copy', maskWord(wordEntry.translation, word)));
+      if (chineseText(wordEntry)) prompt.append(el('div', 'translation-copy', maskWord(chineseText(wordEntry), word)));
       else {
         for (const def of wordEntry.meanings.flatMap(meaning => meaning.definitions).slice(0, 3)) {
           prompt.append(el('p', 'definition', maskWord(def.definition, word)));
@@ -3701,12 +3723,7 @@ SOFTWARE.
       }
       const back = el('div', 'review-answer');
       back.append(senses(wordEntry));
-      if (!recall) {
-        const chinese = el('div');
-        back.append(chinese);
-        if (wordEntry.translation && (wordEntry.translationProvider === 'youdao' || wordEntry.translationSource === translationSource(wordEntry))) chinese.append(translationBlock(wordEntry));
-        else translate(wordEntry, chinese);
-      }
+      if (!recall) back.append(chineseDefinitions(wordEntry));
       const actions = el('div', 'actions');
       for (const [index, [grade, label, hint]] of [['again', '忘记', '没想起来，或答案不正确'], ['hard', '困难', '想对了，但回忆很吃力'],
       ['good', '记得', '能够正确回忆'], ['easy', '轻松', '无需费力就想起来了']].entries()) {
@@ -3747,9 +3764,9 @@ SOFTWARE.
       const entry = words.get(item.word);
       const definition = entry?.meanings[0]?.definitions[0]?.definition || '';
       const reverse = recalls.get(item.word);
-      rows.push(isBook ? [item.word, definition, entry?.translation, STUDY_STATES[item.fsrs.state], new Date(item.dueAt).toISOString(),
+      rows.push(isBook ? [item.word, definition, chineseText(entry), STUDY_STATES[item.fsrs.state], new Date(item.dueAt).toISOString(),
         item.reviews, item.fsrs.lapses, reverse ? STUDY_STATES[reverse.fsrs.state] : '', reverse ? new Date(reverse.dueAt).toISOString() : '']
-        : [new Date(item.at).toISOString(), item.word, definition, entry?.translation, item.context, item.sourceUrl]);
+        : [new Date(item.at).toISOString(), item.word, definition, chineseText(entry), item.context, item.sourceUrl]);
     }
     download(`lexi-${isBook ? 'book' : 'history'}-${new Date().toISOString().slice(0, 10)}.csv`, csv(rows), 'text/csv;charset=utf-8');
   }
@@ -3823,16 +3840,7 @@ SOFTWARE.
     study.append(limitRow, retentionRow, reverseRow, el('p', 'notice',
       '每天凌晨 4:00 开始新的学习日。记得率越高，间隔越短、复习越多，只影响之后的安排。反向卡在该词进入长期复习后加入，计入新词上限，进度独立保存；关闭后暂停反向卡，进度保留。'));
     const chinese = el('section', 'section');
-    chinese.append(el('h3', '', '中文释义'));
-    const fallbackRow = el('label', 'setting fallback-setting');
-    const fallback = el('select', 'translation-fallback');
-    for (const [value, label] of [['youdao', '有道词典（默认）'], ['none', '关闭备用来源']]) {
-      const option = el('option', '', label); option.value = value; fallback.append(option);
-    }
-    fallback.value = settings.translationFallback;
-    fallback.addEventListener('change', () => save('translationFallback', fallback.value, () => { fallback.value = settings.translationFallback; }, false));
-    fallbackRow.append(el('span', '', '失败时的备用来源（fallback）'), fallback);
-    chinese.append(fallbackRow, el('p', 'notice', '优先用 MyMemory 翻译英文释义；限流、额度用尽、超时或响应异常时，自动尝试有道中文词典释义（不与英文逐条对应）。成功后缓存并标注来源。关闭仅停止之后的备用请求，不删除已有中文。'));
+    chinese.append(el('h3', '', '中文释义'), el('p', 'notice', 'MyMemory 机器翻译与有道中文词典释义同时显示、分别缓存，不再互为备用。有道释义不与英文逐条对应；每路独立显示加载、失败与重试状态，一路失败不影响另一路。旧有道备用缓存自动保留，原中文 fallback 设置不再生效。'));
     const phonetics = el('section', 'section');
     phonetics.append(el('h3', '', '音标'));
     const phoneticRow = el('label', 'setting fallback-setting');
@@ -3855,7 +3863,7 @@ SOFTWARE.
     actions.append(button('导入 JSON 合并', () => upload.click()));
     data.append(actions, upload, el('p', 'notice', 'JSON 包含完整历史与复习进度，CSV 便于表格查看。导入保留当前设置，按时间合并。'));
     const privacy = el('section', 'section');
-    privacy.append(el('h3', '', '服务与隐私'), el('p', 'notice', '查词会向 Free Dictionary API 发送当前单词，并自动向 MyMemory 发送最多 6 条词典释义以补全中文；获取音标、词形或启用中文备用来源后切换到有道时，向有道词典发送单词，词形补全可能另查原形。启用额外音标备用来源后，在有道失败且主词典无音标时向 Datamuse 发送当前单词。成功后本地保存，再次打开直接读取。网页上下文不会发送。在线音频和浏览器朗读可能联网。服务可用性、内容与额度由提供方决定。'),
+    privacy.append(el('h3', '', '服务与隐私'), el('p', 'notice', '查词会向 Free Dictionary API 发送当前单词；缺少对应缓存时，向 MyMemory 发送最多 6 条英文释义、向有道发送当前单词，分别获取并同时显示两路中文。获取音标和词形同样向有道发送单词，词形补全可能另查原形；进行中的有道请求复用。启用额外音标备用来源后，在有道失败且主词典无音标时向 Datamuse 发送当前单词。成功后本地保存，再次打开直接读取。网页上下文不会发送。在线音频和浏览器朗读可能联网。服务可用性、内容与额度由提供方决定。'),
       link('Free Dictionary API', 'https://dictionaryapi.dev/'), document.createTextNode(' · '),
       link('MyMemory', 'https://mymemory.translated.net/doc/spec.php'), document.createTextNode(' · '),
       link('有道词典', 'https://www.youdao.com/'), document.createTextNode(' · '),
