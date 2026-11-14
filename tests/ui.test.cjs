@@ -692,6 +692,91 @@ async function selectInside(app, node, raw, collapsed = false) {
 }
 const historyOf = app => [...app.storage.entries()].filter(([key]) => key.startsWith(app.prefix + 'event:')).map(([, event]) => event);
 
+test('automatic internal lookup ignores the displayed word but still allows other words and earlier navigation words', async () => {
+  const app = setup();
+  const { shadow, click } = app;
+  await click(shadow.querySelector('.item'));
+  const pane = shadow.querySelector('.detail-pane');
+  const original = pane.querySelector('article');
+  pane.scrollTop = 75;
+  for (const raw of ['alpha', ' ALPHA ']) {
+    await selectInside(app, pane.querySelector('.definition'), raw);
+    assert.ok(!pane.querySelector('.lookup-back'), 'selecting the current word must not open a child lookup');
+    assert.equal(pane.querySelector('article'), original);
+    assert.equal(pane.scrollTop, 75);
+    assert.equal(historyOf(app).length, 3, 'selecting the current word must not add history');
+  }
+  await selectInside(app, pane.querySelector('.definition'), 'beta');
+  const nested = pane.querySelector('article');
+  await selectInside(app, pane.querySelector('.word'), 'BETA');
+  assert.equal(pane.querySelector('article'), nested, 'compare against the displayed child, not the original word');
+  assert.equal(findButton(pane, '← 返回 beta'), undefined);
+  assert.equal(historyOf(app).length, 4);
+  await selectInside(app, pane.querySelector('.definition'), 'alpha');
+  assert.equal(pane.querySelector('.word').textContent, 'alpha', 'an earlier word remains a valid different-word lookup');
+  assert.ok(findButton(pane, '← 返回 beta'));
+  assert.equal(historyOf(app).length, 5);
+});
+
+test('same-word selection preserves take in history and book details without querying or changing favorites', async () => {
+  for (const tab of [0, 1]) {
+    const app = setup();
+    const { shadow, storage, prefix, click } = app;
+    addWord(app, 'take');
+    storage.set(prefix + 'study:take', createStudy('take', app.context.Date.now()));
+    storage.set(prefix + 'event:take-event', { word: 'take', id: 'take-event', at: 4 });
+    useSettings(app, { auto: false, autoBook: true });
+    await click(shadow.querySelectorAll('.tab')[tab]);
+    await click(shadow.querySelectorAll('.item').find(node => node.querySelector('.term')?.textContent === 'take'));
+    const pane = shadow.querySelector('.detail-pane');
+    const original = pane.querySelector('article');
+    const before = json([...storage]);
+    for (const selector of ['.word', '.definition']) {
+      await selectInside(app, pane.querySelector(selector), ' TAKE ');
+      assert.ok(!pane.querySelector('.lookup-back'));
+      assert.equal(pane.querySelector('article'), original);
+      assert.deepEqual(json([...storage]), before);
+    }
+  }
+});
+
+test('same-word selection preserves the review answer and keeps grading available', async () => {
+  const app = setup();
+  const { shadow, storage, prefix, click } = app;
+  await openReview(app);
+  await click(findButton(shadow, '显示释义'));
+  const original = shadow.querySelector('.review-answer');
+  const before = json(storage.get(prefix + 'study:alpha'));
+  await selectInside(app, original.querySelector('.definition'), 'ALPHA');
+  assert.ok(!shadow.querySelector('.lookup-back'));
+  assert.equal(shadow.querySelector('.review-answer'), original);
+  assert.equal(historyOf(app).length, 3);
+  await press(app, '3');
+  assert.equal(storage.get(prefix + 'study:alpha').reviews, before.reviews + 1);
+});
+
+test('same-word selection in the website card does not open a child lookup', async () => {
+  const app = setup();
+  const { shadow, context } = app;
+  await press(app, 'Escape');
+  const node = new app.Element('p');
+  const range = { startContainer: node, endContainer: node, collapsed: false,
+    toString: () => 'alpha', getBoundingClientRect: () => node.getBoundingClientRect() };
+  const selection = setSelection(app, range);
+  selection.toString = range.toString;
+  context.document.listeners.pointerup.listener({ button: 0, target: node, composedPath: () => [node] });
+  app.advance(250);
+  await new Promise(setImmediate);
+  const popover = shadow.querySelector('.popover');
+  assert.equal(popover.hidden, false);
+  assert.equal(popover.querySelector('.word').textContent, 'alpha');
+  const original = popover.querySelector('article');
+  await selectInside(app, popover.querySelector('.definition'), 'alpha');
+  assert.ok(!popover.querySelector('.lookup-back'));
+  assert.equal(popover.querySelector('article'), original);
+  assert.equal(historyOf(app).length, 4, 'only the website lookup adds history');
+});
+
 test('automatic internal lookup works with website selection paused, saves history and stars, and restores nested views', async () => {
   const app = setup();
   const { shadow, click, storage, prefix } = app;

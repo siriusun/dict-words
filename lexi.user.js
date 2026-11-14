@@ -2832,7 +2832,7 @@ SOFTWARE.
     const target = start.closest('.popover,.detail-pane,.view');
     if (!target || target.hidden || (target !== popover && overlay.hidden)) return;
     const word = normalize(range.toString());
-    if (!word) return;
+    if (!word || word === normalize(target.querySelector('.word')?.textContent)) return;
     return { selection, word, target };
   }
   function lookupInternalSelection() {
