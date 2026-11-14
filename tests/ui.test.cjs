@@ -698,7 +698,11 @@ test('explicit internal lookup works with auto selection paused, saves history a
   shadow.querySelector('.list').scrollTop = 42;
   const action = selectInside(app, pane.querySelector('.definition'), 'beta');
   assert.equal(action.hidden, false);
-  assert.equal(action.textContent, '查 beta');
+  assert.equal(textOf(action), '', 'entry is icon-only');
+  assert.equal(action.title, '查询 beta');
+  assert.equal(action.getAttribute('aria-label'), '查询 beta');
+  const symbol = action.querySelector('.lookup-symbol');
+  assert.equal(symbol.getAttribute('aria-hidden'), 'true');
   assert.equal(historyOf(app).length, 3, 'selecting alone is not a lookup');
   await click(action);
   assert.equal(pane.querySelector('.word').textContent, 'beta');
@@ -709,7 +713,10 @@ test('explicit internal lookup works with auto selection paused, saves history a
   assert.ok(storage.has(prefix + 'study:beta'));
   assert.equal(pane.querySelector('.word').textContent, 'beta', 'starring does not interrupt the temporary view');
   pane.scrollTop = 39;
-  await click(selectInside(app, pane.querySelector('.definition'), 'gamma'));
+  selectInside(app, pane.querySelector('.definition'), 'gamma');
+  assert.equal(action.querySelector('.lookup-symbol'), symbol, 'changing selection keeps the icon');
+  assert.equal(action.getAttribute('aria-label'), '查询 gamma');
+  await click(action);
   assert.equal(pane.querySelector('.word').textContent, 'gamma');
   assert.equal(historyOf(app).length, 5);
   await click(findButton(pane, '← 返回 beta'));

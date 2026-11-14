@@ -73,6 +73,30 @@ async page => {
     check(rect && rect.x >= 0 && rect.y >= 0 && rect.x + rect.width <= viewport.width
       && rect.y + rect.height <= viewport.height, `Viewport fit: ${selector}`);
   };
+  const lightweightEntry = async () => {
+    const entry = await element('.selection-lookup');
+    const appearance = await entry.evaluate(node => {
+      const style = getComputedStyle(node);
+      const rect = node.getBoundingClientRect();
+      const symbol = node.querySelector('.lookup-symbol');
+      const selection = window.__lexiShadow.getSelection();
+      const selectionRect = selection.getRangeAt(0).getBoundingClientRect();
+      return { width: rect.width, height: rect.height, background: style.backgroundColor, border: style.borderWidth,
+        shadow: style.boxShadow, text: node.textContent, label: node.getAttribute('aria-label'), title: node.title,
+        selectedWord: selection.toString().trim().toLowerCase(),
+        icon: symbol?.getAttribute('aria-hidden') === 'true' && symbol.getBoundingClientRect().width > 0,
+        outsideSelection: rect.bottom <= selectionRect.top || rect.top >= selectionRect.bottom
+          || rect.right <= selectionRect.left || rect.left >= selectionRect.right };
+    });
+    await entry.dispose();
+    check(appearance.width === 24 && appearance.height === 24, 'Compact entry has a 24px click target');
+    check(appearance.background === 'rgba(0, 0, 0, 0)' && appearance.border === '0px' && appearance.shadow === 'none',
+      'Idle entry has no filled background, border or shadow');
+    check(appearance.text === '' && appearance.icon, 'Entry shows only the magnifier icon');
+    check(appearance.label === '查询 ' + appearance.selectedWord && appearance.title === appearance.label,
+      'Icon keeps the selected word accessible');
+    check(appearance.outsideSelection, 'Entry does not cover the selected word');
+  };
   await click('.item');
   await page.evaluate(() => {
     const pane = window.__lexiShadow.querySelector('.detail-pane');
@@ -81,6 +105,7 @@ async page => {
   });
   await selectWord('.detail-pane .definition');
   await fits('.selection-lookup');
+  await lightweightEntry();
   check(await historyCount() === 1, 'Selection alone does not save history');
   await click('input', '查询英文单词');
   await page.waitForFunction(() => window.__lexiShadow.querySelector('.selection-lookup').hidden);
@@ -140,6 +165,7 @@ async page => {
   await click('.item');
   await selectWord('.detail-pane .definition');
   await fits('.selection-lookup');
+  await lightweightEntry();
   await click('.selection-lookup');
   check(Boolean(await word('.detail-pane .word')), 'Narrow dark temporary detail is usable');
   await fits('.lookup-back');

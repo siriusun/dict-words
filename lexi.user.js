@@ -2639,8 +2639,10 @@ SOFTWARE.
     .spell{font-weight:650}.spell.ok{color:var(--accent)}.spell.bad,.leech{color:var(--error)}
     .review-actions{justify-content:center;margin-top:14px}.review .actions{justify-content:center}
     .setting input.number{width:80px;height:auto;text-align:right;border:1px solid var(--line)}
-    .selection-lookup{pointer-events:auto;position:fixed;z-index:3;max-width:calc(100vw - 24px);overflow:hidden;text-overflow:ellipsis;background:var(--accent);border-color:var(--accent);color:var(--surface);box-shadow:0 4px 18px #102a2030}
-    .selection-lookup:hover{background:var(--accent);filter:brightness(1.1)}
+    .selection-lookup{pointer-events:auto;position:fixed;z-index:3;display:grid;place-items:center;width:24px;height:24px;padding:0;border:0;border-radius:6px;background:transparent;color:var(--muted);box-shadow:none;transition:background .12s,color .12s,transform .12s}
+    .selection-lookup:hover{background:var(--tint);color:var(--accent)}.selection-lookup:active{transform:scale(.9)}
+    .lookup-symbol{position:relative;width:12px;height:12px;border:1.5px solid currentColor;border-radius:50%}
+    .lookup-symbol::after{content:"";position:absolute;right:-4px;bottom:-2px;width:5px;height:1.5px;border-radius:1px;background:currentColor;transform:rotate(45deg)}
     .lookup-back{min-width:0;max-width:100%;overflow:hidden;text-overflow:ellipsis}.lookup-bar{margin-bottom:16px;gap:8px}
   `;
   const launcher = button('L', () => openStudio(), 'launcher', '打开 Lexi 学习中心');
@@ -2686,7 +2688,10 @@ SOFTWARE.
   const selectionAction = button('', () => {
     const selection = internalSelection;
     if (selection) beginInternalLookup(selection.word, selection.target);
-  }, 'button selection-lookup');
+  }, 'selection-lookup', '查询选中单词');
+  const lookupSymbol = el('span', 'lookup-symbol');
+  lookupSymbol.setAttribute('aria-hidden', 'true');
+  selectionAction.append(lookupSymbol);
   selectionAction.hidden = true;
   selectionAction.addEventListener('pointerdown', event => event.preventDefault());
   main.append(top, view);
@@ -2842,7 +2847,8 @@ SOFTWARE.
     const word = normalize(range.toString());
     if (!word) return;
     internalSelection = { word, target };
-    selectionAction.textContent = '查 ' + word;
+    selectionAction.title = '查询 ' + word;
+    selectionAction.setAttribute('aria-label', selectionAction.title);
     selectionAction.hidden = false;
     const rect = range.getBoundingClientRect();
     const size = selectionAction.getBoundingClientRect();
