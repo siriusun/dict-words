@@ -4,7 +4,8 @@ const test = require('node:test');
 const fs = require('node:fs');
 const { createHash } = require('node:crypto');
 const { normalize, schedule, scheduleAll, migrateStudy, createStudy, reviewInterval, csv, dictionary, validateBackup, mergeBackup, ordered, audioUrl, translationSource, translationChunks, youdaoTranslation, youdaoPhonetic, datamusePhonetic, youdaoWordForms,
-  dayStart, nextDayStart, availableAt, planReview, retentionStats, contextParts, isLeech } = require('../lexi.user.js');
+  dayStart, nextDayStart, availableAt, planReview, retentionStats, contextParts, isLeech,
+  pageScope, siteState, validateSiteRules } = require('../lexi.user.js');
 const now = Date.UTC(2026, 10, 12);
 const DAY = 86400000;
 const word = dictionary([{ phonetics: [{ text: '/test/', audio: 'https://api.dictionaryapi.dev/media/test.mp3' }],
@@ -13,6 +14,59 @@ const word = dictionary([{ phonetics: [{ text: '/test/', audio: 'https://api.dic
 const study = { word: 'test', addedAt: now, updatedAt: now, dueAt: now, stage: 0, reviews: 0, lastReviewedAt: 0, lastGrade: '' };
 const event = { word: 'test', id: '12345678-1234-4123-8123-123456789012', at: now };
 const backup = () => structuredClone({ schemaVersion: 1, words: [word], history: [event], book: [study] });
+
+test('page rules ignore query and ordinary anchors but retain exact paths, origins and hash routes', () => {
+  const rule = { type: 'page', value: 'https://docs.example.com/article/123' };
+  for (const address of [rule.value, rule.value + '?share=secret#heading']) {
+    assert.equal(siteState(address, [rule]).disabled, true);
+  }
+  for (const address of ['http://docs.example.com/article/123', 'https://docs.example.com:8443/article/123',
+    rule.value + '/', rule.value + '/child', 'https://docs.example.com/Article/123']) {
+    assert.equal(siteState(address, [rule]).disabled, false);
+  }
+  assert.equal(pageScope('https://docs.example.com/app?q=token#/article/1?session=secret').page,
+    'https://docs.example.com/app#/article/1');
+  assert.equal(pageScope('https://docs.example.com/app#!/article/1?session=secret').page,
+    'https://docs.example.com/app#!/article/1');
+  assert.equal(siteState('https://docs.example.com/app#/article/2',
+    [{ type: 'page', value: 'https://docs.example.com/app#/article/1' }]).disabled, false);
+});
+
+test('domain bans cover both protocols and ports, never siblings or subdomains, and combine with page bans', () => {
+  const rules = validateSiteRules([
+    { type: 'domain', value: 'docs.example.com' },
+    { type: 'page', value: 'https://docs.example.com/reading' }
+  ]);
+  for (const address of ['http://docs.example.com/other', 'https://docs.example.com:8443/other']) {
+    assert.equal(siteState(address, rules).disabled, true);
+  }
+  for (const domain of ['www.example.com', 'child.docs.example.com', 'docs.example.com.attacker.test']) {
+    assert.equal(siteState('https://' + domain, rules).disabled, false);
+  }
+  const both = siteState('https://docs.example.com/reading', rules);
+  assert.equal(both.pageDisabled && both.domainDisabled, true);
+  assert.equal(siteState(both.page, rules.slice(1)).disabled, true);
+  assert.equal(siteState(both.page, []).disabled, false);
+  assert.throws(() => pageScope('https://user:password@docs.example.com/reading'));
+});
+
+test('backup rules roundtrip separately from vocabulary merge and reject malformed or duplicate ranges', () => {
+  const data = backup();
+  data.siteRules = [{ type: 'page', value: 'http://localhost:8080/reading' }, { type: 'domain', value: 'docs.example.com' }];
+  assert.deepEqual(validateBackup(JSON.parse(JSON.stringify(data))).siteRules, data.siteRules);
+  assert.deepEqual(validateBackup(backup()).siteRules, []);
+  assert.equal(Object.hasOwn(mergeBackup(validateBackup(backup()), validateBackup(data)), 'siteRules'), false);
+  for (const rules of [[{ type: 'domain', value: 'docs.example.com:8080' }],
+    [{ type: 'domain', value: 'docs.example.com/reading' }],
+    [{ type: 'page', value: 'https://docs.example.com/reading?secret=1' }],
+    [{ type: 'page', value: 'javascript:alert(1)' }],
+    [{ type: 'allow', value: 'docs.example.com' }], [data.siteRules[0], data.siteRules[0]], null]) {
+    assert.throws(() => validateBackup({ ...data, siteRules: rules }));
+  }
+  const maximum = Array.from({ length: 10000 }, (_, index) => ({ type: 'domain', value: 'site-' + index + '.example.com' }));
+  assert.doesNotThrow(() => validateSiteRules(maximum));
+  assert.throws(() => validateSiteRules([...maximum, { type: 'domain', value: 'another.example.com' }]), /10,000/);
+});
 
 test('vendored FSRS matches the pinned upstream bundle after whitespace normalization', () => {
   const source = fs.readFileSync(require.resolve('../lexi.user.js'), 'utf8');

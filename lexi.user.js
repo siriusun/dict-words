@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Lexi · 划词词典与复习
 // @namespace    lexi-local
-// @version      0.3.5
+// @version      0.4.1
 // @description  英文划词、发音、跨网站历史、生词复习与本地备份。无需账号。
 // @match        http://*/*
 // @match        https://*/*
@@ -13,6 +13,7 @@
 // @grant        GM_listValues
 // @grant        GM_addValueChangeListener
 // @grant        GM_registerMenuCommand
+// @grant        GM_unregisterMenuCommand
 // @grant        GM_xmlhttpRequest
 // @grant        GM_info
 // @connect      api.dictionaryapi.dev
@@ -24,7 +25,10 @@
 
 (() => {
   'use strict';
-  const memory = (() => {
+  let memory;
+  function loadMemory() {
+    if (memory) return;
+    memory = (() => {
     const exports = {};
     const module = { exports };
     // BEGIN VENDORED TS-FSRS 5.4.2
@@ -2068,7 +2072,8 @@ SOFTWARE.
 //# sourceMappingURL=index.umd.js.map
     // END VENDORED TS-FSRS 5.4.2
     return module.exports;
-  })();
+    })();
+  }
   const DAY = 86400000;
   const PREFIX = 'lexi:v1:';
   const MAX_REVIEW_DAYS = 365;
@@ -2093,6 +2098,36 @@ SOFTWARE.
     if (!['none', 'datamuse'].includes(value.phoneticFallback)) value.phoneticFallback = DEFAULTS.phoneticFallback;
     return value;
   };
+  function pageScope(value) {
+    const url = new URL(value);
+    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) {
+      throw new Error('网页范围必须是无账号信息的 HTTP / HTTPS 地址');
+    }
+    const route = /^#!?\//.test(url.hash) ? url.hash.split('?')[0] : '';
+    return { page: url.origin + url.pathname + route, domain: url.hostname };
+  }
+  function validateSiteRules(raw) {
+    if (!Array.isArray(raw) || raw.length > 10000) throw new Error('网页禁用规则格式无效或超过 10,000 条');
+    const seen = new Set();
+    return raw.map(item => {
+      if (!item || !['page', 'domain'].includes(item.type) || typeof item.value !== 'string' ||
+        !item.value || item.value.length > 4096) throw new Error('网页禁用规则格式无效');
+      const normalized = item.type === 'page' ? pageScope(item.value).page : pageScope('https://' + item.value).domain;
+      if (normalized !== item.value || (item.type === 'domain' && item.value !== new URL('https://' + item.value).host)) {
+        throw new Error('网页禁用规则地址无效');
+      }
+      const key = item.type + ':' + normalized;
+      if (seen.has(key)) throw new Error('网页禁用规则重复');
+      seen.add(key);
+      return { type: item.type, value: normalized };
+    });
+  }
+  function siteState(address, rules) {
+    const scope = pageScope(address);
+    const pageDisabled = rules.some(rule => rule.type === 'page' && rule.value === scope.page);
+    const domainDisabled = rules.some(rule => rule.type === 'domain' && rule.value === scope.domain);
+    return { ...scope, pageDisabled, domainDisabled, disabled: pageDisabled || domainDisabled };
+  }
   const normalize = value => {
     if (typeof value !== 'string') return '';
     const word = value.trim().replace(/[‘’]/g, "'")
@@ -2391,6 +2426,7 @@ SOFTWARE.
     if (!object(raw) || ![1, 2, 3].includes(raw.schemaVersion) || !['words', 'history', 'book'].every(key => Array.isArray(raw[key]))) fail();
     if (raw.schemaVersion === 3 ? !Array.isArray(raw.recall) : raw.recall !== undefined) fail();
     const recall = raw.recall || [];
+    const siteRules = validateSiteRules(raw.siteRules === undefined ? [] : raw.siteRules);
     if (raw.words.length > 10000 || raw.history.length > 30000 || raw.book.length > 10000 || recall.length > 10000) fail();
     const unique = (items, key) => new Set(items.map(item => item[key])).size === items.length;
     if (![...raw.words, ...raw.history, ...raw.book, ...recall].every(object)) fail();
@@ -2495,7 +2531,7 @@ SOFTWARE.
       if (!bookWords.has(item.word)) fail();
       return progress(item);
     });
-    return { schemaVersion: 3, words, history, book, recall: recallBook };
+    return { schemaVersion: 3, words, history, book, recall: recallBook, siteRules };
   }
   function mergeBackup(current, incoming, retention) {
     const words = new Map(current.words.map(item => [item.word, splitTranslations(item)]));
@@ -2563,8 +2599,10 @@ SOFTWARE.
   const ordered = (events, oldest = false) => [...events].sort((a, b) =>
     (oldest ? 1 : -1) * (a.at - b.at || a.id.localeCompare(b.id)));
   if (typeof window === 'undefined') {
+    loadMemory();
     module.exports = { normalize, schedule, scheduleAll, migrateStudy, createStudy, reviewInterval, csv, dictionary, validateBackup, mergeBackup, ordered, audioUrl, translationSource, translationChunks, youdaoTranslation, youdaoPhonetic, datamusePhonetic, youdaoWordForms,
-      dayStart, nextDayStart, availableAt, planReview, retentionStats, contextParts, isLeech };
+      dayStart, nextDayStart, availableAt, planReview, retentionStats, contextParts, isLeech,
+      pageScope, siteState, validateSiteRules };
     return;
   }
 
@@ -2576,11 +2614,83 @@ SOFTWARE.
   const remove = key => GM_deleteValue(PREFIX + key);
   const notify = () => put('revision', crypto.randomUUID());
   const all = type => GM_listValues().filter(key => key.startsWith(PREFIX + type + ':')).map(key => GM_getValue(key)).filter(Boolean);
+  const ruleKey = rule => 'disabled:' + rule.type + ':' + encodeURIComponent(rule.value);
+  const readSiteRules = () => validateSiteRules(all('disabled'));
+  const readSiteState = () => {
+    const scope = pageScope(location.href);
+    const rules = ['page', 'domain'].map(type => get(ruleKey({ type, value: scope[type] }), null)).filter(Boolean);
+    return siteState(location.href, validateSiteRules(rules));
+  };
   const snapshot = () => ({
     schemaVersion: 3, exportedAt: new Date().toISOString(),
     words: all('word').map(splitTranslations), history: ordered(all('event'), true), book: all('study').map(migrateStudy),
-    recall: all('recall').map(migrateStudy), settings: cleanSettings(get('settings', {}))
+    recall: all('recall').map(migrateStudy), settings: cleanSettings(get('settings', {})), siteRules: readSiteRules()
   });
+  let ui;
+  let currentSite;
+  let menuSignature = '';
+  const menuIds = [];
+  function reportError(error) {
+    if (ui && !currentSite?.disabled) ui.showError(error);
+    else alert(error?.message || '操作失败，请重试');
+  }
+  function menu(label, action) {
+    menuIds.push(GM_registerMenuCommand(label, () => {
+      try { return Promise.resolve(action()).catch(reportError); }
+      catch (error) { reportError(error); }
+    }));
+  }
+  function updateMenus() {
+    const signature = JSON.stringify(currentSite);
+    if (signature === menuSignature) return;
+    for (const id of menuIds) GM_unregisterMenuCommand(id);
+    menuIds.length = 0;
+    menuSignature = signature;
+    menu('Lexi：' + (currentSite.disabled ? '当前网页已禁用' : '当前网页已启用'), () => openUI('sites'));
+    menu(currentSite.disabled ? '打开 Lexi 学习中心（手动）' : '打开 Lexi 学习中心', () => openUI());
+    for (const type of ['page', 'domain']) {
+      const disabled = currentSite[type + 'Disabled'];
+      const label = type === 'page' ? '此页面' : '此域名';
+      menu(disabled ? '解除' + label + '禁用' : '禁用' + label,
+        () => changeSiteRule({ type, value: pageScope(location.href)[type] }, !readSiteState()[type + 'Disabled']));
+    }
+    menu('管理网页启用范围', () => openUI('sites'));
+    menu('暂停 / 开启自动划词', () => {
+      const next = cleanSettings({ ...get('settings', {}), auto: !cleanSettings(get('settings', {})).auto });
+      put('settings', next); notify();
+      ui?.refresh();
+      if (!currentSite.disabled) ui.showError({ message: next.auto ? '自动划词已开启' : '自动划词已暂停' });
+      else alert((next.auto ? '自动划词已开启' : '自动划词已暂停') + '；当前网页仍受禁用规则限制');
+    });
+  }
+  function syncSite() {
+    const next = readSiteState();
+    const changed = JSON.stringify(next) !== JSON.stringify(currentSite);
+    currentSite = next;
+    if (!next.disabled && !ui) ui = createUI();
+    ui?.applySite(changed);
+    updateMenus();
+  }
+  function openUI(screen) {
+    syncSite();
+    if (!ui) ui = createUI();
+    ui.open(screen);
+  }
+  function changeSiteRule(rule, disable) {
+    rule = validateSiteRules([rule])[0];
+    if (disable && rule.type === 'domain' &&
+      !confirm(`禁用 ${rule.value} 的全部页面？\n不包含其他子域名。可通过油猴菜单解除禁用。`)) return;
+    if (disable && !get(ruleKey(rule), null) && readSiteRules().length >= 10000) {
+      throw new Error('网页禁用规则已达 10,000 条，请先解除不再需要的规则');
+    }
+    if (disable) put(ruleKey(rule), rule);
+    else remove(ruleKey(rule));
+    syncSite();
+    ui?.refresh(true);
+    put('scope-revision', crypto.randomUUID());
+  }
+  function createUI() {
+  loadMemory();
   const date = value => new Date(value).toLocaleString('zh-CN', { hour12: false });
   const when = (record, at = availableAt(record)) => stateOf(record) === memory.State.Review
     ? new Date(at).toLocaleDateString('zh-CN') : date(at);
@@ -2594,6 +2704,8 @@ SOFTWARE.
   let selectedEvent = null;
   let screen = 'history';
   let filter = '';
+  let scopeFilter = '';
+  let scopePage = 0;
   let oldest = false;
   let round = null;
   let answer = null;
@@ -2603,6 +2715,8 @@ SOFTWARE.
   let internalSelectionTimer;
   let internalPointerDown = false;
   let refreshLibrary = null;
+  let activityEpoch = 0;
+  const requests = new Set();
   const host = document.createElement('div');
   host.id = 'lexi-local-root';
   host.style.cssText = 'all:initial!important;position:fixed!important;inset:0!important;z-index:2147483647!important;pointer-events:none!important;';
@@ -2697,6 +2811,15 @@ SOFTWARE.
     .setting input.number{width:80px;height:auto;text-align:right;border:1px solid var(--line)}
     .fallback-setting{flex-wrap:wrap}.fallback-setting select{max-width:100%}
     .lookup-back{min-width:0;max-width:100%;overflow:hidden;text-overflow:ellipsis}.lookup-bar{margin-bottom:16px;gap:8px}
+    .scope-menu{position:relative}.scope-menu summary{list-style:none;cursor:pointer}.scope-menu summary::-webkit-details-marker{display:none}
+    .scope-actions{position:absolute;right:0;top:100%;z-index:1;width:190px;padding:8px;display:flex;flex-direction:column;gap:5px;background:var(--surface);border:1px solid var(--line);border-radius:12px;box-shadow:0 6px 20px #102a2025}
+    .view.scope-view{display:flex;flex-direction:column;overflow:hidden}.scope-view>.heading,.scope-view>.subheading{flex-shrink:0}.scope-view>.subheading{margin-bottom:12px}
+    .scope-manager{display:flex;flex-direction:column;gap:12px;flex:1;min-height:0}.scope-current{padding:12px 14px;border:1px solid var(--line);border-radius:12px;background:var(--surface);flex-shrink:0}
+    .scope-current p{margin:0 0 5px}.scope-current .actions{margin-top:10px}.scope-help{font-size:12px;color:var(--muted);flex-shrink:0}.scope-help summary{cursor:pointer}
+    .scope-toolbar{display:flex;align-items:center;gap:10px;flex-shrink:0}.scope-toolbar input{flex:1;min-width:0;font-size:13px}.scope-toolbar .meta{white-space:nowrap}
+    .scope-rule-list{flex:1;min-height:0;overflow:auto;border-top:1px solid var(--line)}.scope-rule{display:flex;align-items:center;gap:10px;padding:5px 0;border-bottom:1px solid var(--line)}
+    .scope-kind{flex-shrink:0;font-size:11px;color:var(--muted);background:var(--tint);border-radius:4px;padding:1px 5px}.scope-address{min-width:0;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:12px}
+    .scope-remove{font-size:12px;padding:3px 8px;border-color:transparent}.scope-pagination{display:flex;align-items:center;gap:8px;flex-shrink:0}.scope-pagination .meta{flex:1}.scope-pagination .button{font-size:12px;padding:5px 10px}.scope-pagination .button:disabled{cursor:default}
   `;
   const launcher = button('L', () => openStudio(), 'launcher', '打开 Lexi 学习中心');
   const popover = el('section', 'popover');
@@ -2716,7 +2839,7 @@ SOFTWARE.
   logo.append(el('span', 'version', 'v' + GM_info.script.version));
   sidebar.append(logo, el('div', 'muted', '个人词汇库'));
   const navButtons = {};
-  for (const [key, label] of [['history', '查词历史'], ['book', '生词本'], ['review', '复习'], ['settings', '设置']]) {
+  for (const [key, label] of [['history', '查词历史'], ['book', '生词本'], ['review', '复习'], ['sites', '网页管理'], ['settings', '设置']]) {
     navButtons[key] = button(label, () => { screen = key; filter = ''; render(); }, 'tab');
     sidebar.append(navButtons[key]);
   }
@@ -2750,7 +2873,10 @@ SOFTWARE.
     clearTimeout(toastTimer);
     toastTimer = setTimeout(() => { toast.hidden = true; }, 5000);
   }
-  const showError = error => message(error?.message || '操作失败，请重试');
+  const showError = error => {
+    const value = error?.message || '操作失败，请重试';
+    if (host.isConnected) message(value); else alert(value);
+  };
   function stopQuery() { queryEpoch++; activeRequest?.abort(); activeRequest = null; }
   function stopAudio() {
     audioEpoch++;
@@ -2766,6 +2892,7 @@ SOFTWARE.
     if (nextScreen) screen = nextScreen;
     overlay.hidden = false;
     render();
+    if (nextScreen === 'settings' || nextScreen === 'sites') view.scrollTop = 0;
     if (!studio.contains(shadow.activeElement)) input.focus();
   }
   function closeStudio() {
@@ -2776,7 +2903,38 @@ SOFTWARE.
     stopQuery();
     stopAudio();
     if (returnFocus?.getClientRects().length) returnFocus.focus?.();
-    else launcher.focus();
+    else if (!currentSite.disabled) launcher.focus();
+    if (currentSite.disabled) host.remove();
+  }
+  function stopActivity() {
+    activityEpoch++;
+    clearTimeout(selectionTimer);
+    clearTimeout(toastTimer);
+    clearTimeout(reviewTimer);
+    closePopover();
+    stopAudio();
+    for (const request of requests) request.abort();
+    toast.hidden = true;
+  }
+  function applySite(changed) {
+    launcher.hidden = currentSite.disabled;
+    if (changed) {
+      stopActivity();
+      lastSelection = '';
+      if (currentSite.disabled) {
+        closeStudio();
+        host.remove();
+      } else if (!overlay.hidden) render();
+    }
+    if (!currentSite.disabled && !host.isConnected) document.documentElement.append(host);
+  }
+  function refresh(force = false) {
+    settings = cleanSettings(get('settings', {}));
+    if (!internalLookup && !overlay.hidden && (force || !studio.contains(shadow.activeElement))) render();
+  }
+  function checkActivity(epoch) {
+    syncSite();
+    if (epoch !== activityEpoch) throw new Error('查询已取消');
   }
   overlay.addEventListener('click', event => { if (event.target === overlay) closeStudio(); });
   function containWheel(event) {
@@ -2820,14 +2978,22 @@ SOFTWARE.
   });
 
   function request(url, lookupRequest = false) {
+    syncSite();
+    if (currentSite.disabled && overlay.hidden) throw new Error('当前网页已禁用，查询已取消');
+    const epoch = activityEpoch;
     let timer;
     let handle;
+    let cancel;
+    const tracked = { abort: () => { cancel(new Error('查询已取消')); handle?.abort(); } };
+    requests.add(tracked);
     const pending = new Promise((resolve, reject) => {
+      cancel = reject;
       // Anonymous requests force fetch mode, whose native timeout is ignored on Chrome.
       timer = setTimeout(() => { reject(new Error('请求超时，请稍后重试')); handle?.abort(); }, 10000);
       handle = GM_xmlhttpRequest({
         method: 'GET', url, timeout: 10000, anonymous: true,
         onload: response => {
+          try { checkActivity(epoch); } catch (error) { reject(error); return; }
           if (response.status === 404) { reject(new Error('没有找到这个词，试试原形或其他拼写')); return; }
           if (response.status < 200 || response.status >= 300) { reject(new Error(`服务暂不可用（${response.status}），请稍后重试`)); return; }
           try {
@@ -2841,7 +3007,7 @@ SOFTWARE.
       });
       if (lookupRequest) activeRequest = handle;
     });
-    return pending.finally(() => clearTimeout(timer));
+    return pending.finally(() => { clearTimeout(timer); requests.delete(tracked); });
   }
   function positionPopover(rect) {
     popover.hidden = false;
@@ -2855,8 +3021,22 @@ SOFTWARE.
   }
   function popHeader() {
     const bar = el('div', 'bar');
-    bar.append(el('span', 'brand', 'LEXI · 英语词典'), button('×', closePopover, 'icon', '关闭查词卡'));
+    const actions = el('div', 'actions');
+    actions.append(scopeMenu(), button('×', closePopover, 'icon', '关闭查词卡'));
+    bar.append(el('span', 'brand', 'LEXI · 英语词典'), actions);
     return bar;
+  }
+  function scopeMenu() {
+    const details = el('details', 'scope-menu');
+    const summary = el('summary', 'icon', '⋯');
+    summary.setAttribute('aria-label', '网页启用范围');
+    const actions = el('div', 'scope-actions');
+    for (const [type, label] of [['page', '禁用此页面'], ['domain', '禁用此域名…']]) {
+      actions.append(button(label, () => changeSiteRule({ type, value: pageScope(location.href)[type] }, true)));
+    }
+    actions.append(button('网页启用范围…', () => openStudio('sites')));
+    details.append(summary, actions);
+    return details;
   }
   function cancelInternalSelection() {
     clearTimeout(internalSelectionTimer);
@@ -2963,7 +3143,7 @@ SOFTWARE.
     const focused = target.contains(shadow.activeElement);
     const bar = el('div', 'bar lookup-bar');
     bar.append(button('← 返回 ' + internalLookup.frames.at(-1).word, returnInternalLookup, 'button lookup-back'));
-    if (target === popover) bar.append(button('×', closePopover, 'icon', '关闭查词卡'));
+    if (target === popover) bar.append(scopeMenu(), button('×', closePopover, 'icon', '关闭查词卡'));
     target.replaceChildren(bar, ...nodes);
     target.scrollTop = 0;
     if (target === popover) {
@@ -2973,11 +3153,14 @@ SOFTWARE.
     if (focused) bar.querySelector('button').focus({ preventScroll: true });
   }
   async function lookup(raw, rect, context = null, target = null) {
+    syncSite();
+    if (currentSite.disabled && overlay.hidden) { message('当前网页已禁用，请从油猴菜单手动打开学习中心'); return; }
     const word = normalize(raw);
     if (!word) { message('请输入单个英文单词，支持内部连字符和撇号'); return; }
     if (!target) { resetInternalLookup(); cancelInternalSelection(); }
     stopQuery();
     const epoch = queryEpoch;
+    const current = () => { syncSite(); return epoch === queryEpoch; };
     const showPopup = !target && overlay.hidden;
     if (target) internalResult(target, el('h2', 'word', word), el('p', 'muted', '正在查词…'));
     else if (showPopup) {
@@ -2990,7 +3173,7 @@ SOFTWARE.
       if (!entry || Date.now() - entry.fetchedAt > 7 * DAY) {
         try {
           const response = await request('https://api.dictionaryapi.dev/api/v2/entries/en/' + encodeURIComponent(word), true);
-          if (epoch !== queryEpoch) return;
+          if (!current()) return;
           const fresh = dictionary(response, word, Date.now());
           const cached = get('word:' + word);
           if (cached?.wordForms) fresh.wordForms = cached.wordForms;
@@ -3010,12 +3193,12 @@ SOFTWARE.
           }
           entry = fresh;
         } catch (error) {
-          if (epoch !== queryEpoch) return;
+          if (!current()) return;
           if (!entry) throw error;
           stale = true;
         }
       }
-      if (epoch !== queryEpoch) return;
+      if (!current()) return;
       put('word:' + word, entry);
       const now = Date.now();
       const event = { id: crypto.randomUUID(), word, at: now, ...(context || {}) };
@@ -3039,7 +3222,7 @@ SOFTWARE.
         if (stale) message('使用离线缓存 · 暂未能更新释义');
       }
     } catch (error) {
-      if (epoch !== queryEpoch) return;
+      if (!current()) return;
       if (target) {
         internalResult(target, el('h2', 'word', word), el('p', 'error', error.message),
           button('重试', () => lookup(word, rect, context, target)));
@@ -3081,6 +3264,7 @@ SOFTWARE.
     const key = provider + '\n' + entry.word + (provider === 'mymemory' ? '\n' + source : '');
     if (!translations.has(key)) {
       const pending = (async () => {
+        const epoch = activityEpoch;
         if (!get('word:' + entry.word)) throw new Error('词条已删除，请重新查询');
         let translation;
         if (provider === 'youdao') {
@@ -3088,6 +3272,7 @@ SOFTWARE.
         } else {
           const translated = [];
           for (const chunk of translationChunks(source)) {
+            checkActivity(epoch);
             if (!get('word:' + entry.word)) throw new Error('词条已删除，请重新查询');
             const result = await request('https://api.mymemory.translated.net/get?langpair=en%7Czh-CN&q=' + encodeURIComponent(chunk));
             const value = result?.responseData?.translatedText;
@@ -3099,6 +3284,7 @@ SOFTWARE.
           translation = translated.join('\n');
           if (translation.length > 16000) throw new Error('中文响应过长，请稍后重试');
         }
+        checkActivity(epoch);
         const current = get('word:' + entry.word);
         if (!current) throw new Error('词条已删除，请重新查询');
         if (provider === 'mymemory' && translationSource(current) !== source) throw new Error('词典释义已更新，请重新获取中文');
@@ -3212,12 +3398,15 @@ SOFTWARE.
       try {
         if (!inflections.has(entry.word)) {
           const pending = (async () => {
+            const epoch = activityEpoch;
             let wordForms = youdaoWordForms(await requestYoudao(entry.word), entry.word);
+            checkActivity(epoch);
             if (wordForms.base !== entry.word) {
               const rootForms = youdaoWordForms(await requestYoudao(wordForms.base), wordForms.base);
               if (rootForms.base !== wordForms.base) throw new Error('词形原形不一致，请稍后重试');
               wordForms = rootForms;
             }
+            checkActivity(epoch);
             const current = get('word:' + entry.word);
             if (!current) throw new Error('词条已删除，请重新查询');
             const updated = { ...current, wordForms };
@@ -3251,13 +3440,16 @@ SOFTWARE.
       try {
         if (!pronunciations.has(entry.word)) {
           const pending = (async () => {
+            const epoch = activityEpoch;
             let phonetic;
             let phoneticSource = 'youdao';
             let primaryError;
             try {
               phonetic = youdaoPhonetic(await requestYoudao(entry.word), entry.word);
             } catch (error) {
+              checkActivity(epoch);
               primaryError = error;
+              checkActivity(epoch);
               const current = get('word:' + entry.word);
               if (!current) throw new Error('词条已删除，请重新查询');
               if (current.phonetic.trim() || cleanSettings(get('settings', {})).phoneticFallback !== 'datamuse') throw error;
@@ -3337,8 +3529,10 @@ SOFTWARE.
       if (key === screen) node.setAttribute('aria-current', 'page'); else node.removeAttribute('aria-current');
     }
     view.classList.toggle('library', screen === 'history' || screen === 'book');
+    view.classList.toggle('scope-view', screen === 'sites');
     view.replaceChildren();
     if (screen === 'settings') { renderSettings(); return; }
+    if (screen === 'sites') { renderSites(); return; }
     if (screen === 'review') { renderReview(); return; }
     renderLibrary();
   }
@@ -3770,24 +3964,99 @@ SOFTWARE.
     }
     download(`lexi-${isBook ? 'book' : 'history'}-${new Date().toISOString().slice(0, 10)}.csv`, csv(rows), 'text/csv;charset=utf-8');
   }
-  async function importFile(file) {
+  async function importFile(file, restoreRules = false) {
     if (!file) return;
     if (file.size > 5 * 1024 * 1024) throw new Error('备份超过 5 MiB，请选择较小的 Lexi JSON 文件');
     let parsed;
     try { parsed = JSON.parse(await file.text()); } catch { throw new Error('无法读取 JSON 备份，未导入数据'); }
     const incoming = validateBackup(parsed);
+    if (restoreRules) {
+      const combined = new Map([...readSiteRules(), ...incoming.siteRules].map(rule => [ruleKey(rule), rule]));
+      validateSiteRules([...combined.values()]);
+    }
     // Validate conflicts before requesting confirmation or making any writes.
     mergeBackup(snapshot(), incoming, settings.retention);
     const reverseCount = incoming.recall.length ? `（含 ${incoming.recall.length} 个反向卡进度）` : '';
     if (!confirm(`合并 ${incoming.words.length} 个词条、${incoming.history.length} 条历史、${incoming.book.length} 个生词进度${reverseCount}？\n重复历史不会增加，两端复习记录会合并，设置保持当前值。建议先导出当前备份。`)) return;
+    if (restoreRules && !confirm(`同时添加备份中的 ${incoming.siteRules.length} 条网页禁用规则？\n本机已有规则保留，添加后可能立即禁用当前网页。`)) return;
     const merged = mergeBackup(snapshot(), incoming, settings.retention);
     try {
       for (const item of merged.words) put('word:' + item.word, item);
       for (const item of merged.history) put('event:' + item.id, item);
       for (const item of merged.book) put('study:' + item.word, item);
       for (const item of merged.recall) put('recall:' + item.word, item);
+      if (restoreRules) {
+        for (const rule of incoming.siteRules) put(ruleKey(rule), rule);
+        syncSite();
+        put('scope-revision', crypto.randomUUID());
+      }
       notify(); round = null; answer = null; render(); message('合并完成，重复历史已去重');
     } catch { throw new Error('写入中断，部分记录可能已导入；原记录未主动删除，可再次导入继续合并'); }
+  }
+  function renderSites() {
+    view.append(el('h1', 'heading', '网页管理'), el('p', 'subheading', '默认启用，按页面或域名记录禁用范围'));
+    const scope = el('div', 'scope-manager');
+    const current = el('section', 'scope-current');
+    const state = readSiteState();
+    const reason = [state.pageDisabled && '页面禁用规则', state.domainDisabled && '域名禁用规则'].filter(Boolean).join('、');
+    const address = el('p', 'meta scope-address', state.page);
+    address.title = state.page;
+    current.append(el('p', '', state.disabled ? '当前网页已禁用：' + reason : '当前网页已启用（默认开启）'),
+      address, el('p', 'meta', '当前域名：' + state.domain));
+    const scopeActions = el('div', 'actions');
+    for (const [type, label] of [['page', '此页面'], ['domain', '此域名']]) {
+      const disabled = state[type + 'Disabled'];
+      scopeActions.append(button(disabled ? '解除' + label + '禁用' : '禁用' + label + (type === 'domain' ? '…' : ''),
+        () => changeSiteRule({ type, value: state[type] }, !disabled)));
+    }
+    current.append(scopeActions);
+    const help = el('details', 'scope-help');
+    help.append(el('summary', '', '匹配规则与恢复说明'), el('p', 'notice', '页面规则忽略查询参数和普通锚点，保留 #/ 与 #!/ 路由路径；域名规则不包含其他子域名。禁用后无常驻 L，可通过油猴菜单管理或手动打开学习中心，不会解除规则。'));
+    const toolbar = el('div', 'scope-toolbar');
+    const ruleSearch = el('input', 'scope-filter');
+    ruleSearch.placeholder = '搜索已禁用的页面或域名';
+    ruleSearch.setAttribute('aria-label', '搜索禁用规则');
+    ruleSearch.value = scopeFilter;
+    const count = el('span', 'meta scope-count');
+    toolbar.append(ruleSearch, count);
+    const ruleList = el('div', 'scope-rule-list');
+    ruleList.tabIndex = 0;
+    ruleList.setAttribute('role', 'region');
+    ruleList.setAttribute('aria-label', '已禁用的页面和域名');
+    const pagination = el('div', 'scope-pagination');
+    const pageLabel = el('span', 'meta');
+    pageLabel.setAttribute('role', 'status');
+    const previous = button('上一页', () => { scopePage--; renderRules(); });
+    const next = button('下一页', () => { scopePage++; renderRules(); });
+    pagination.append(pageLabel, previous, next);
+    const rules = readSiteRules();
+    const renderRules = () => {
+      const matches = rules.filter(rule => rule.value.toLowerCase().includes(scopeFilter.trim().toLowerCase()));
+      const pages = Math.max(1, Math.ceil(matches.length / 50));
+      scopePage = Math.max(0, Math.min(scopePage, pages - 1));
+      count.textContent = `${matches.length} / ${rules.length} 条`;
+      pageLabel.textContent = `${scopePage + 1} / ${pages} 页`;
+      previous.disabled = scopePage === 0;
+      next.disabled = scopePage === pages - 1;
+      ruleList.replaceChildren();
+      ruleList.scrollTop = 0;
+      if (!matches.length) ruleList.append(el('p', 'notice', rules.length ? '没有匹配的禁用规则' : '还没有禁用规则'));
+      for (const rule of matches.slice(scopePage * 50, (scopePage + 1) * 50)) {
+        const row = el('div', 'scope-rule');
+        const address = el('span', 'scope-address', rule.value);
+        address.title = rule.value;
+        row.append(el('span', 'scope-kind', rule.type === 'page' ? '页面' : '域名'), address,
+          button('解除', () => changeSiteRule(rule, false), 'button scope-remove', '解除禁用：' + rule.value));
+        ruleList.append(row);
+      }
+    };
+    ruleSearch.addEventListener('input', () => {
+      scopeFilter = ruleSearch.value; scopePage = 0;
+      try { renderRules(); } catch (error) { showError(error); }
+    });
+    renderRules();
+    scope.append(current, help, toolbar, ruleList, pagination);
+    view.append(scope);
   }
   function renderSettings() {
     view.append(el('h1', 'heading', '设置与数据'), el('p', 'subheading', '跨网站共用，数据保存在本机油猴存储'));
@@ -3859,9 +4128,12 @@ SOFTWARE.
     actions.append(button('导出 JSON 备份', () => download(`lexi-backup-${new Date().toISOString().slice(0, 10)}.json`, JSON.stringify(snapshot(), null, 2), 'application/json')),
       button('导出历史 CSV', () => exportCsv(false)), button('导出生词 CSV', () => exportCsv(true)));
     const upload = el('input'); upload.type = 'file'; upload.accept = '.json,application/json'; upload.hidden = true;
-    upload.addEventListener('change', () => { importFile(upload.files?.[0]).catch(showError); upload.value = ''; });
+    const restoreRow = el('label', 'setting');
+    const restoreRules = el('input'); restoreRules.type = 'checkbox'; restoreRules.checked = false;
+    restoreRow.append(el('span', '', '导入时添加备份中的网页禁用规则（另行确认）'), restoreRules);
+    upload.addEventListener('change', () => { importFile(upload.files?.[0], restoreRules.checked).catch(showError); upload.value = ''; });
     actions.append(button('导入 JSON 合并', () => upload.click()));
-    data.append(actions, upload, el('p', 'notice', 'JSON 包含完整历史与复习进度，CSV 便于表格查看。导入保留当前设置，按时间合并。'));
+    data.append(actions, upload, restoreRow, el('p', 'notice', 'JSON 包含完整历史、复习进度和网页禁用规则。导入默认保留本机设置与禁用规则，CSV 便于表格查看。'));
     const privacy = el('section', 'section');
     privacy.append(el('h3', '', '服务与隐私'), el('p', 'notice', '查词会向 Free Dictionary API 发送当前单词；缺少对应缓存时，向 MyMemory 发送最多 6 条英文释义、向有道发送当前单词，分别获取并同时显示两路中文。获取音标和词形同样向有道发送单词，词形补全可能另查原形；进行中的有道请求复用。启用额外音标备用来源后，在有道失败且主词典无音标时向 Datamuse 发送当前单词。成功后本地保存，再次打开直接读取。网页上下文不会发送。在线音频和浏览器朗读可能联网。服务可用性、内容与额度由提供方决定。'),
       link('Free Dictionary API', 'https://dictionaryapi.dev/'), document.createTextNode(' · '),
@@ -3876,10 +4148,12 @@ SOFTWARE.
       for (const key of GM_listValues().filter(key => key.startsWith(PREFIX + 'event:'))) GM_deleteValue(key);
       selectedEvent = null; notify(); render(); message('查词历史已清空');
     }, 'button danger'), button('删除全部 Lexi 数据', () => {
-      if (prompt('此操作不可撤销，请先导出备份。输入“删除全部”以删除全部 Lexi 历史、词条和复习进度：') !== '删除全部') return;
-      stopQuery(); stopAudio();
+      if (prompt('此操作不可撤销，请先导出备份。输入“删除全部”以删除全部 Lexi 历史、词条、复习进度和网页禁用规则：') !== '删除全部') return;
+      stopActivity();
       for (const key of GM_listValues().filter(key => key.startsWith(PREFIX))) GM_deleteValue(key);
       settings = { ...DEFAULTS }; selectedWord = ''; selectedEvent = null; round = null; answer = null;
+      scopeFilter = ''; scopePage = 0;
+      syncSite(); put('scope-revision', crypto.randomUUID());
       notify(); render(); message('Lexi 数据已删除');
     }, 'button danger'));
     cleanup.append(cleanActions);
@@ -3890,16 +4164,19 @@ SOFTWARE.
   let lastSelection = '';
   let lastSelectionAt = 0;
   document.addEventListener('pointerup', event => {
+    if (!checkSite()) return;
     clearTimeout(selectionTimer);
     if (internalPointerDown) {
       internalPointerDown = false;
       scheduleInternalSelection();
       return;
     }
-    if (event.button !== 0 || event.composedPath().includes(host) || !overlay.hidden || !settings.auto) return;
+    if (currentSite.disabled || event.button !== 0 || event.composedPath().includes(host) || !overlay.hidden || !settings.auto) return;
     const target = event.target;
     if (target instanceof Element && target.closest('input,textarea,select,[contenteditable]:not([contenteditable="false"])')) return;
     selectionTimer = setTimeout(() => {
+      if (!checkSite()) return;
+      if (currentSite.disabled || !settings.auto || !overlay.hidden) return;
       const selection = window.getSelection();
       if (!selection || selection.isCollapsed || !selection.rangeCount) return;
       const anchor = selection.anchorNode?.parentElement;
@@ -3930,18 +4207,36 @@ SOFTWARE.
       if (!popover.hidden) closePopover();
     }
   });
+  return {
+    applySite, refresh, showError,
+    open: nextScreen => {
+      if (!host.isConnected) document.documentElement.append(host);
+      launcher.hidden = currentSite.disabled;
+      openStudio(nextScreen);
+    }
+  };
+  }
   GM_addValueChangeListener(PREFIX + 'revision', (_name, _old, _next, remote) => {
-    if (!remote) return;
-    settings = cleanSettings(get('settings', {}));
-    if (!internalLookup && !overlay.hidden && !studio.contains(shadow.activeElement)) render();
+    if (remote) { try { ui?.refresh(); } catch (error) { reportError(error); } }
   });
+  GM_addValueChangeListener(PREFIX + 'scope-revision', (_name, _old, _next, remote) => {
+    if (remote) { try { syncSite(); ui?.refresh(true); } catch (error) { reportError(error); } }
+  });
+  const checkSite = () => {
+    try { syncSite(); return true; }
+    catch (error) { reportError(error); return false; }
+  };
   window.addEventListener('focus', () => {
-    settings = cleanSettings(get('settings', {}));
-    if (!internalLookup && !overlay.hidden) render();
+    try { syncSite(); ui?.refresh(true); } catch (error) { reportError(error); }
   });
-  GM_registerMenuCommand('打开 Lexi 学习中心', () => openStudio());
-  GM_registerMenuCommand('暂停 / 开启自动划词', () => {
-    settings = cleanSettings({ ...get('settings', {}), auto: !settings.auto });
-    put('settings', settings); notify(); message(settings.auto ? '自动划词已开启' : '自动划词已暂停');
-  });
+  window.addEventListener('popstate', checkSite);
+  window.addEventListener('hashchange', checkSite);
+  // History changes in a userscript's isolated world are not reliably observable by patching pushState.
+  let lastAddress = location.href;
+  function watchAddress() {
+    if (location.href !== lastAddress) { lastAddress = location.href; checkSite(); }
+    setTimeout(watchAddress, 500);
+  }
+  setTimeout(watchAddress, 500);
+  checkSite();
 })();

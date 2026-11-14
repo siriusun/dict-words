@@ -6,7 +6,7 @@ const { translationSource, schedule, scheduleAll, createStudy, migrateStudy } = 
 const source = fs.readFileSync(require.resolve('../lexi.user.js'), 'utf8');
 
 // Exercise the userscript's actual UI callbacks without a browser or user GM data.
-function setup(phonetic = '/test/', phoneticSource = 'youdao') {
+function setup(phonetic = '/test/', phoneticSource = 'youdao', options = {}) {
   let shadow;
   let clockNow = Date.UTC(2026, 10, 13, 9);
   class ClockDate extends Date {
@@ -29,6 +29,11 @@ function setup(phonetic = '/test/', phoneticSource = 'youdao') {
     }
     append(...nodes) { for (const node of nodes) { node.parent = this; this.children.push(node); } }
     replaceChildren(...nodes) { this.children = []; this.textContent = ''; this.append(...nodes); }
+    remove() {
+      if (this.parent) this.parent.children = this.parent.children.filter(node => node !== this);
+      this.parent = null;
+    }
+    get isConnected() { return this.tag === 'html' || Boolean(this.parent?.isConnected); }
     get childNodes() { return this.children; }
     get parentElement() { return this.parent || null; }
     closest(selector) {
@@ -67,6 +72,8 @@ function setup(phonetic = '/test/', phoneticSource = 'youdao') {
   const prefix = 'lexi:v1:';
   const storage = new Map();
   const menus = new Map();
+  const valueListeners = new Map();
+  const alerts = [];
   for (const word of ['alpha', 'beta']) {
     const entry = { word, fetchedAt: clockNow, phonetic, ...(phonetic && phoneticSource ? { phoneticSource } : {}),
       wordForms: { base: word, forms: [] },
@@ -81,10 +88,15 @@ function setup(phonetic = '/test/', phoneticSource = 'youdao') {
   storage.set(prefix + 'study:alpha', { word: 'alpha', addedAt: clockNow - 5 * 86400000,
     updatedAt: clockNow - 3 * 86400000, dueAt: clockNow - 86400000, stage: 2, reviews: 3,
     lastReviewedAt: clockNow - 3 * 86400000, lastGrade: 'good' });
+  for (const rule of options.rules || []) {
+    storage.set(prefix + 'disabled:' + rule.type + ':' + encodeURIComponent(rule.value), rule);
+  }
   let uuid = 0;
   const context = {
-    window, document, Element, Date: ClockDate, TextEncoder, URL, crypto: { randomUUID: () => 'test-uuid-' + ++uuid },
+    window, document, Element, Date: ClockDate, TextEncoder, URL, location: { href: options.url || 'https://docs.example.com/reading' },
+    crypto: { randomUUID: () => 'test-uuid-' + ++uuid },
     confirm: () => true,
+    alert: message => alerts.push(message),
     GM_info: { script: { version: source.match(/^\/\/ @version\s+(\S+)/m)[1] } },
     getComputedStyle: node => ({ overflowY: 'visible', overflowX: 'visible', ...node.css }),
     setTimeout: (callback, delay) => { const id = ++timerId; timers.set(id, { callback, at: clockNow + delay }); return id; },
@@ -92,11 +104,13 @@ function setup(phonetic = '/test/', phoneticSource = 'youdao') {
     GM_getValue: (key, fallback) => storage.has(key) ? storage.get(key) : fallback,
     GM_setValue: (key, value) => storage.set(key, value),
     GM_deleteValue: key => storage.delete(key), GM_listValues: () => [...storage.keys()],
-    GM_addValueChangeListener: () => {}, GM_registerMenuCommand: (label, callback) => menus.set(label, callback),
+    GM_addValueChangeListener: (key, callback) => valueListeners.set(key, callback),
+    GM_registerMenuCommand: (label, callback) => { menus.set(label, callback); return label; },
+    GM_unregisterMenuCommand: id => menus.delete(id),
     GM_xmlhttpRequest: () => { throw new Error('Unexpected network request'); }
   };
   vm.runInNewContext(source, context);
-  menus.get('打开 Lexi 学习中心')();
+  if (options.open !== false) (menus.get('打开 Lexi 学习中心') || menus.get('打开 Lexi 学习中心（手动）'))();
   const click = async node => {
     assert.ok(node, 'UI control exists');
     node.listeners.click.listener();
@@ -108,7 +122,7 @@ function setup(phonetic = '/test/', phoneticSource = 'youdao') {
       if (timer.at <= clockNow && timers.has(id)) { timers.delete(id); timer.callback(); }
     }
   };
-  return { shadow, storage, events, context, Element, click, prefix, advance, timers };
+  return { get shadow() { return shadow; }, storage, events, context, Element, click, prefix, advance, timers, menus, valueListeners, alerts };
 }
 
 const findButton = (shadow, label) => shadow.querySelectorAll('button').find(node => node.textContent.startsWith(label));
@@ -116,6 +130,291 @@ const openReview = async app => {
   await app.click(app.shadow.querySelectorAll('.tab')[2]);
   await app.click(findButton(app.shadow, '开始复习'));
 };
+
+function selectWebsite(app, word) {
+  const node = new app.Element('p');
+  node.textContent = word;
+  app.context.window.getSelection = () => ({
+    isCollapsed: false, rangeCount: 1, anchorNode: { parentElement: node },
+    toString: () => word, getRangeAt: () => ({ getBoundingClientRect: () => node.getBoundingClientRect() })
+  });
+  app.context.document.listeners.pointerup.listener({ button: 0, target: node, composedPath: () => [node] });
+}
+
+test('disabled startup mounts no UI; manual study stays disabled and the userscript menu can restore it', async () => {
+  const rule = { type: 'domain', value: 'docs.example.com' };
+  const app = setup('/test/', 'youdao', { rules: [rule], open: false });
+  const { context, menus, storage, prefix } = app;
+  assert.equal(app.shadow, undefined);
+  assert.equal(context.document.documentElement.children.length, 0);
+  assert.equal(context.document.listeners.pointerup, undefined);
+  assert.ok(menus.has('解除此域名禁用'));
+  await menus.get('打开 Lexi 学习中心（手动）')();
+  assert.equal(app.shadow.querySelector('.launcher').hidden, true);
+  assert.equal(app.shadow.querySelector('.overlay').hidden, false);
+  const query = app.shadow.querySelector('.search');
+  query.querySelector('input').value = 'beta';
+  await app.click(query.querySelector('button'));
+  assert.equal([...storage.keys()].filter(key => key.startsWith(prefix + 'event:')).length, 4);
+  assert.equal(storage.has(prefix + 'disabled:domain:docs.example.com'), true);
+  await app.click(app.shadow.querySelectorAll('button').find(node => node.attributes['aria-label'] === '关闭学习中心'));
+  assert.equal(context.document.documentElement.children.length, 0);
+  selectWebsite(app, 'alpha');
+  app.advance(220);
+  assert.equal([...storage.keys()].filter(key => key.startsWith(prefix + 'event:')).length, 4);
+  await menus.get('解除此域名禁用')();
+  assert.equal(context.document.documentElement.children.length, 1);
+  assert.equal(app.shadow.querySelector('.launcher').hidden, false);
+  assert.ok(menus.has('禁用此域名'));
+});
+
+test('quick page disable cancels pending selection and late dictionary responses without saving history', async () => {
+  const app = setup('/test/', 'youdao', { open: false });
+  const { context, storage, prefix, menus } = app;
+  const requests = [];
+  let aborted = 0;
+  context.GM_xmlhttpRequest = request => { requests.push(request); return { abort() { aborted++; } }; };
+  selectWebsite(app, 'gamma');
+  app.advance(220);
+  assert.equal(requests.length, 1);
+  assert.equal(app.shadow.querySelector('.popover').hidden, false);
+  selectWebsite(app, 'beta');
+  await app.click(findButton(app.shadow.querySelector('.scope-menu'), '禁用此页面'));
+  app.advance(220);
+  assert.equal(requests.length, 1);
+  assert.ok(aborted > 0);
+  requests[0].onload({ status: 200, responseText: JSON.stringify([{ word: 'gamma',
+    meanings: [{ partOfSpeech: 'noun', definitions: [{ definition: 'A third letter.' }] }] }]) });
+  await new Promise(setImmediate);
+  assert.equal(storage.has(prefix + 'word:gamma'), false);
+  assert.equal([...storage.keys()].filter(key => key.startsWith(prefix + 'event:')).length, 3);
+  assert.equal(context.document.documentElement.children.length, 0);
+  assert.equal(app.shadow.querySelector('.popover').hidden, true);
+  assert.ok(menus.has('解除此页面禁用'));
+  context.location.href = 'https://docs.example.com/another';
+  app.advance(500);
+  assert.equal(context.document.documentElement.children.length, 1);
+  assert.equal(app.shadow.querySelector('.launcher').hidden, false);
+});
+
+test('domain confirmation and failed rule persistence keep the page enabled with an explicit error', async () => {
+  const app = setup('/test/', 'youdao', { open: false });
+  app.context.confirm = () => false;
+  await app.menus.get('禁用此域名')();
+  assert.equal(app.storage.has(app.prefix + 'disabled:domain:docs.example.com'), false);
+  const put = app.context.GM_setValue;
+  app.context.GM_setValue = (key, value) => {
+    if (key.startsWith(app.prefix + 'disabled:')) throw new Error('禁用规则保存失败');
+    put(key, value);
+  };
+  await app.menus.get('禁用此页面')();
+  assert.equal(app.context.document.documentElement.children.length, 1);
+  assert.equal(app.shadow.querySelector('.launcher').hidden, false);
+  assert.equal(app.shadow.querySelector('.toast').textContent, '禁用规则保存失败');
+});
+
+test('notification failures after successful disable remain visible even though the UI has detached', async () => {
+  const app = setup('/test/', 'youdao', { open: false });
+  const put = app.context.GM_setValue;
+  app.context.GM_setValue = (key, value) => {
+    if (key === app.prefix + 'scope-revision') throw new Error('跨标签页通知失败');
+    put(key, value);
+  };
+  selectWebsite(app, 'alpha');
+  app.advance(220);
+  await app.click(findButton(app.shadow.querySelector('.scope-menu'), '禁用此页面'));
+  assert.equal(app.context.document.documentElement.children.length, 0);
+  assert.equal(app.storage.has(app.prefix + 'disabled:page:' + encodeURIComponent(app.context.location.href)), true);
+  assert.deepEqual(app.alerts, ['跨标签页通知失败']);
+});
+
+test('disable stops active playback; clearing history keeps rules and deleting all data restores defaults', async () => {
+  const rule = { type: 'domain', value: 'news.example.com' };
+  const app = setup('/test/', 'youdao', { rules: [rule] });
+  let paused = 0;
+  app.context.Audio = class {
+    play() { return Promise.resolve(); }
+    pause() { paused++; }
+  };
+  app.storage.set(app.prefix + 'word:alpha', { ...app.storage.get(app.prefix + 'word:alpha'),
+    audio: 'https://api.dictionaryapi.dev/media/alpha.mp3' });
+  await app.click(app.shadow.querySelector('.item'));
+  await app.click(app.shadow.querySelector('.phonetic').querySelector('button'));
+  await app.menus.get('禁用此域名')();
+  assert.equal(paused, 1);
+  await app.menus.get('管理网页启用范围')();
+  await app.click(findButton(app.shadow, '设置'));
+  await app.click(findButton(app.shadow, '清空查词历史'));
+  assert.equal(app.storage.has(app.prefix + 'disabled:domain:docs.example.com'), true);
+  assert.equal(app.storage.has(app.prefix + 'disabled:domain:news.example.com'), true);
+  app.context.prompt = () => '删除全部';
+  await app.click(findButton(app.shadow, '删除全部 Lexi 数据'));
+  assert.equal([...app.storage.keys()].filter(key => key.startsWith(app.prefix + 'disabled:')).length, 0);
+  assert.equal(app.shadow.querySelector('.launcher').hidden, false);
+  assert.equal(app.context.document.documentElement.children.length, 1);
+});
+
+test('remote scope updates combine page and domain bans, preserve other rules and restore only after both are removed', async () => {
+  const page = { type: 'page', value: 'https://docs.example.com/reading' };
+  const other = { type: 'page', value: 'https://other.example.com/article' };
+  const app = setup('/test/', 'youdao', { rules: [other], open: false });
+  const domainKey = app.prefix + 'disabled:domain:docs.example.com';
+  app.storage.set(domainKey, { type: 'domain', value: 'docs.example.com' });
+  app.storage.set(app.prefix + 'disabled:page:' + encodeURIComponent(page.value), page);
+  const callback = app.valueListeners.get(app.prefix + 'scope-revision');
+  callback('', '', 'remote', true);
+  assert.equal(app.context.document.documentElement.children.length, 0);
+  await app.menus.get('解除此域名禁用')();
+  assert.equal(app.context.document.documentElement.children.length, 0);
+  assert.ok(app.menus.has('解除此页面禁用'));
+  await app.menus.get('解除此页面禁用')();
+  assert.equal(app.shadow.querySelector('.launcher').hidden, false);
+  assert.equal(app.storage.has(app.prefix + 'disabled:page:' + encodeURIComponent(other.value)), true);
+  assert.equal(app.storage.has(app.prefix + 'study:alpha'), true);
+  assert.equal(app.menus.size, 6, 'dynamic menu updates do not accumulate duplicate commands');
+});
+
+test('route changes disable before a delayed selection or response can write, even before the URL watcher runs', async () => {
+  const app = setup('/test/', 'youdao', { rules: [{ type: 'page', value: 'https://docs.example.com/blocked' }], open: false });
+  const requests = [];
+  app.context.GM_xmlhttpRequest = request => { requests.push(request); return { abort() {} }; };
+  selectWebsite(app, 'alpha');
+  app.context.location.href = 'https://docs.example.com/blocked?share=1#heading';
+  app.advance(220);
+  assert.equal(app.context.document.documentElement.children.length, 0);
+  assert.equal([...app.storage.keys()].filter(key => key.startsWith(app.prefix + 'event:')).length, 3);
+  app.context.location.href = 'https://docs.example.com/reading';
+  app.context.window.listeners.popstate.listener();
+  selectWebsite(app, 'gamma');
+  app.advance(220);
+  app.context.location.href = 'https://docs.example.com/blocked';
+  requests[0].onload({ status: 200, responseText: JSON.stringify([{ word: 'gamma',
+    meanings: [{ definitions: [{ definition: 'Gamma.' }] }] }]) });
+  await new Promise(setImmediate);
+  assert.equal(app.storage.has(app.prefix + 'word:gamma'), false);
+  assert.equal(app.context.document.documentElement.children.length, 0);
+});
+
+test('disable aborts all enrichment requests and prevents even already-resolved responses from updating caches', async () => {
+  const app = setup();
+  const key = app.prefix + 'word:alpha';
+  const entry = { ...app.storage.get(key), phonetic: '' };
+  for (const field of ['phoneticSource', 'wordForms', 'translation', 'translationSource', 'translatedAt', 'youdaoTranslation', 'youdaoTranslatedAt']) delete entry[field];
+  app.storage.set(key, entry);
+  const requests = [];
+  let aborted = 0;
+  app.context.GM_xmlhttpRequest = request => { requests.push(request); return { abort() { aborted++; } }; };
+  await app.click(app.shadow.querySelector('.item'));
+  assert.equal(requests.length, 2, 'phonetics, forms and Chinese share Youdao, while MyMemory runs independently');
+  requests.find(request => request.url.includes('mymemory')).onload({ status: 200,
+    responseText: JSON.stringify({ responseStatus: 200, responseData: { translatedText: '迟到中文' } }) });
+  await app.menus.get('禁用此页面')();
+  const youdao = requests.find(request => request.url.includes('dict.youdao.com'));
+  youdao.onload({ status: 200, responseText: JSON.stringify({ ec: { word: [{ 'return-phrase': { l: { i: 'alpha' } }, ukphone: 'new' }] } }) });
+  await new Promise(setImmediate);
+  assert.ok(aborted >= 1);
+  assert.deepEqual(app.storage.get(key), entry);
+  assert.equal(app.context.document.documentElement.children.length, 0);
+});
+
+test('standalone scope management searches and removes rules while settings retains separately confirmed imports', async () => {
+  const other = { type: 'domain', value: 'news.example.com' };
+  const app = setup('/test/', 'youdao', { rules: [other] });
+  app.shadow.querySelector('.view').scrollTop = 300;
+  await app.menus.get('管理网页启用范围')();
+  assert.equal(app.shadow.querySelector('.view').scrollTop, 0);
+  assert.equal(app.shadow.querySelector('.heading').textContent, '网页管理');
+  assert.ok(app.shadow.querySelector('.scope-manager'));
+  assert.equal(app.shadow.querySelectorAll('.tab').find(node => node.attributes['aria-current'] === 'page').textContent, '网页管理');
+  const search = app.shadow.querySelector('.scope-filter');
+  search.value = 'news';
+  search.listeners.input.listener();
+  assert.equal(app.shadow.querySelectorAll('.scope-rule').length, 1);
+  await app.click(findButton(app.shadow.querySelector('.scope-rule'), '解除'));
+  assert.equal(app.storage.has(app.prefix + 'disabled:domain:news.example.com'), false);
+  await app.click(findButton(app.shadow, '设置'));
+  assert.equal(app.shadow.querySelector('.scope-manager'), null);
+  assert.equal(app.shadow.querySelector('.scope-filter'), null);
+  const incoming = { schemaVersion: 3, words: [], history: [], book: [], recall: [],
+    siteRules: [{ type: 'domain', value: 'docs.example.com' }] };
+  const importBackup = async () => {
+    const upload = app.shadow.querySelectorAll('input').find(node => node.type === 'file');
+    upload.files = [{ size: 100, text: async () => JSON.stringify(incoming) }];
+    upload.listeners.change.listener();
+    await new Promise(setImmediate);
+  };
+  await importBackup();
+  assert.equal(app.storage.has(app.prefix + 'disabled:domain:docs.example.com'), false);
+  const restore = app.shadow.querySelectorAll('.setting').find(row => textOf(row).includes('导入时添加')).querySelector('input');
+  restore.checked = true;
+  app.context.confirm = message => !message.includes('同时添加备份');
+  await importBackup();
+  assert.equal(app.storage.has(app.prefix + 'disabled:domain:docs.example.com'), false);
+  app.context.confirm = () => true;
+  await importBackup();
+  assert.equal(app.storage.has(app.prefix + 'disabled:domain:docs.example.com'), true);
+  assert.equal(app.context.document.documentElement.children.length, 0);
+});
+
+test('compact scope lists paginate, clamp after last-page removal and retain the search across refresh and navigation', async () => {
+  const rules = Array.from({ length: 102 }, (_, index) => {
+    const host = 'site-' + String(index).padStart(3, '0') + '.example.com';
+    return index % 2 ? { type: 'domain', value: host } : { type: 'page', value: 'https://' + host + '/article/' + 'long-path-'.repeat(30) };
+  });
+  const app = setup('/test/', 'youdao', { rules });
+  await app.click(findButton(app.shadow, '网页管理'));
+  assert.equal(app.shadow.querySelectorAll('.scope-rule').length, 50);
+  assert.equal(app.shadow.querySelector('.scope-count').textContent, '102 / 102 条');
+  const firstAddress = app.shadow.querySelector('.scope-rule').querySelector('.scope-address');
+  assert.equal(firstAddress.title, rules[0].value);
+  app.shadow.querySelector('.scope-rule-list').scrollTop = 100;
+  await app.click(findButton(app.shadow, '下一页'));
+  assert.equal(app.shadow.querySelector('.scope-rule-list').scrollTop, 0);
+  await app.click(findButton(app.shadow, '下一页'));
+  assert.equal(app.shadow.querySelectorAll('.scope-rule').length, 2);
+  assert.equal(app.shadow.querySelector('.scope-pagination').querySelector('span').textContent, '3 / 3 页');
+  await app.click(findButton(app.shadow.querySelector('.scope-rule'), '解除'));
+  assert.equal(app.shadow.querySelectorAll('.scope-rule').length, 1);
+  await app.click(findButton(app.shadow.querySelector('.scope-rule'), '解除'));
+  assert.equal(app.shadow.querySelectorAll('.scope-rule').length, 50);
+  assert.equal(app.shadow.querySelector('.scope-pagination').querySelector('span').textContent, '2 / 2 页');
+  const search = app.shadow.querySelector('.scope-filter');
+  search.value = 'site-01';
+  search.listeners.input.listener();
+  assert.equal(app.shadow.querySelectorAll('.scope-rule').length, 10);
+  assert.equal(app.shadow.querySelector('.scope-pagination').querySelector('span').textContent, '1 / 1 页');
+  await app.click(findButton(app.shadow.querySelector('.scope-rule'), '解除'));
+  assert.equal(app.shadow.querySelector('.scope-filter').value, 'site-01');
+  assert.equal(app.shadow.querySelectorAll('.scope-rule').length, 9);
+  await app.click(findButton(app.shadow, '设置'));
+  await app.click(findButton(app.shadow, '网页管理'));
+  assert.equal(app.shadow.querySelector('.scope-filter').value, 'site-01');
+  assert.equal(app.shadow.querySelector('.scope-count').textContent, '9 / 99 条');
+});
+
+test('rule limits reject new bans and oversized backup unions before any vocabulary is imported', async () => {
+  const app = setup();
+  await app.click(findButton(app.shadow, '设置'));
+  for (let index = 0; index < 10000; index++) {
+    const rule = { type: 'domain', value: 'site-' + index + '.example.com' };
+    app.storage.set(app.prefix + 'disabled:domain:' + encodeURIComponent(rule.value), rule);
+  }
+  await app.menus.get('禁用此页面')();
+  assert.ok(app.shadow.querySelector('.toast').textContent.includes('10,000'));
+  assert.equal(app.storage.has(app.prefix + 'disabled:page:' + encodeURIComponent(app.context.location.href)), false);
+  const restore = app.shadow.querySelectorAll('.setting').find(row => textOf(row).includes('导入时添加')).querySelector('input');
+  restore.checked = true;
+  const incoming = { schemaVersion: 3, words: [{ ...app.storage.get(app.prefix + 'word:beta'),
+    word: 'gamma', wordForms: { base: 'gamma', forms: [] } }], history: [], book: [], recall: [],
+    siteRules: [{ type: 'domain', value: 'another.example.com' }] };
+  const upload = app.shadow.querySelectorAll('input').find(node => node.type === 'file');
+  upload.files = [{ size: 100, text: async () => JSON.stringify(incoming) }];
+  upload.listeners.change.listener();
+  await new Promise(setImmediate);
+  assert.ok(app.shadow.querySelector('.toast').textContent.includes('10,000'));
+  assert.equal(app.storage.has(app.prefix + 'word:gamma'), false);
+  assert.equal(app.storage.has(app.prefix + 'disabled:domain:another.example.com'), false);
+});
 
 function seedTook(app) {
   const entry = { ...app.storage.get(app.prefix + 'word:alpha'), word: 'took', phonetic: '/tʊk/',
@@ -352,17 +651,18 @@ test('round limit keeps all remaining due words available and today counts disti
 test('overview resets today at the learning-day boundary and cancels its refresh when leaving or closing', async () => {
   const app = setup();
   const { shadow, storage, prefix, context, click, advance, timers } = app;
+  const backgroundTimers = timers.size;
   storage.set(prefix + 'study:alpha', schedule(storage.get(prefix + 'study:alpha'), 'easy', context.Date.now()));
   await click(shadow.querySelectorAll('.tab')[2]);
   assert.equal(shadow.querySelectorAll('.stat')[2].querySelector('strong').textContent, '1');
   advance(86400000);
   assert.equal(shadow.querySelectorAll('.stat')[2].querySelector('strong').textContent, '0');
   await click(shadow.querySelectorAll('.tab')[1]);
-  assert.equal(timers.size, 0);
+  assert.equal(timers.size, backgroundTimers);
   await click(shadow.querySelectorAll('.tab')[2]);
-  assert.equal(timers.size, 1);
+  assert.equal(timers.size, backgroundTimers + 1);
   await click(shadow.querySelectorAll('button').find(node => node.attributes['aria-label'] === '关闭学习中心'));
-  assert.equal(timers.size, 0);
+  assert.equal(timers.size, backgroundTimers);
 });
 
 test('deleting one repeated history event preserves other events, cache and study progress', async () => {
@@ -528,7 +828,7 @@ test('phonetic fallback setting saves independently, reports write errors and ca
   const { shadow, storage, prefix, context, click } = setup('');
   const requests = [];
   context.GM_xmlhttpRequest = request => { requests.push(request); return { abort() {} }; };
-  await click(shadow.querySelectorAll('.tab')[3]);
+  await click(findButton(shadow, '设置'));
   const select = shadow.querySelector('.phonetic-fallback');
   assert.ok(select);
   assert.equal(select.value, 'datamuse');
@@ -703,7 +1003,7 @@ test('auto-book setting controls whether looked-up words enter vocabulary book w
     entry.translationSource = translationSource(entry);
     storage.set(prefix + 'word:' + word, entry);
   }
-  await click(shadow.querySelectorAll('.tab')[3]);
+  await click(findButton(shadow, '设置'));
   const settingRow = shadow.querySelectorAll('.setting').find(row => row.querySelector('span')?.textContent === '查词直接进入生词本');
   assert.ok(settingRow);
   const checkbox = settingRow.querySelector('input');
@@ -716,7 +1016,7 @@ test('auto-book setting controls whether looked-up words enter vocabulary book w
   assert.equal(shadow.querySelector('.list-star').textContent, '☆');
   assert.equal(shadow.querySelector('.list-star').attributes['aria-pressed'], 'false');
 
-  await click(shadow.querySelectorAll('.tab')[3]);
+  await click(findButton(shadow, '设置'));
   const toggle = shadow.querySelectorAll('.setting').find(row => row.querySelector('span')?.textContent === '查词直接进入生词本').querySelector('input');
   toggle.checked = true;
   toggle.listeners.change.listener();
@@ -1375,7 +1675,7 @@ test('Chinese definitions ignore the retired fallback setting and remove its sel
   useSettings(app, { translationFallback: 'none' });
   delete storage.get(prefix + 'word:alpha').youdaoTranslation;
   delete storage.get(prefix + 'word:alpha').youdaoTranslatedAt;
-  await click(shadow.querySelectorAll('.tab')[3]);
+  await click(findButton(shadow, '设置'));
   assert.equal(shadow.querySelector('.translation-fallback'), null);
   assert.ok(textOf(shadow.querySelector('.view')).includes('同时显示、分别缓存'));
   await click(shadow.querySelectorAll('.tab')[0]);
@@ -1550,7 +1850,7 @@ test('optional reverse cards start after the meaning card graduates and keep sep
 test('review settings validate and persist the new-word limit and target retention used by previews', async () => {
   const app = setup();
   const { shadow, storage, prefix, context, click } = app;
-  await click(shadow.querySelectorAll('.tab')[3]);
+  await click(findButton(shadow, '设置'));
   const limit = shadow.querySelector('.number');
   limit.value = '500';
   limit.listeners.change.listener();

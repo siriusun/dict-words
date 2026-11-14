@@ -35,7 +35,8 @@ async page => {
       GM_getValue: (key, fallback) => structuredClone(data.has(key) ? data.get(key) : fallback),
       GM_setValue: (key, value) => data.set(key, structuredClone(value)),
       GM_deleteValue: key => data.delete(key), GM_listValues: () => [...data.keys()],
-      GM_registerMenuCommand: (name, callback) => window.__lexiMenus.set(name, callback),
+      GM_registerMenuCommand: (name, callback) => { window.__lexiMenus.set(name, callback); return name; },
+      GM_unregisterMenuCommand: name => window.__lexiMenus.delete(name),
       GM_addValueChangeListener: () => {}, GM_info: { script: { version: '0.3.2' } },
       GM_xmlhttpRequest: () => { window.__lexiRequests++; throw new Error('Unexpected network request'); }
     });
