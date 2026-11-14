@@ -2546,8 +2546,8 @@ SOFTWARE.
   let reviewTimer;
   let returnFocus;
   let internalLookup = null;
-  let internalSelection = null;
   let internalSelectionTimer;
+  let internalPointerDown = false;
   let refreshLibrary = null;
   const host = document.createElement('div');
   host.id = 'lexi-local-root';
@@ -2621,10 +2621,12 @@ SOFTWARE.
     .library-row{position:relative;flex-shrink:0}.library-row>.item{padding-right:42px}.history-row>.item{padding-right:70px}
     .library-row:hover>.item{background:var(--surface)}.library-row:hover>.item.active{background:var(--tint)}
     .row-actions{position:absolute;right:5px;top:50%;transform:translateY(-50%);display:flex;align-items:center;gap:2px}
-    .list-star,.history-delete{border:0;background:transparent;padding:4px 7px;line-height:1;border-radius:8px}
-    .list-star:focus-visible,.history-delete:focus-visible{outline-offset:0}
-    .list-star{color:var(--muted);font-size:17px}.list-star.starred{color:var(--accent)}
-    .list-star:hover{color:var(--accent);background:color-mix(in srgb,var(--accent) 12%,transparent)}
+    .detail-star,.list-star,.history-delete{border:0;background:transparent;padding:4px 7px;line-height:1;border-radius:8px}
+    .detail-star:focus-visible,.list-star:focus-visible,.history-delete:focus-visible{outline-offset:0}
+    .detail-star,.list-star{color:var(--muted);font-size:17px}.detail-star.starred,.list-star.starred{color:var(--accent)}
+    .detail-star:hover,.list-star:hover{color:var(--accent);background:color-mix(in srgb,var(--accent) 12%,transparent)}
+    .word-heading{margin:8px 0 6px}.word-heading .word{margin:0;min-width:0}
+    .detail-star{display:flex;align-items:center;justify-content:center;width:44px;height:44px;padding:0;font-size:32px}
     .history-delete{opacity:0;pointer-events:none}
     .history-row:hover .history-delete,.history-row:focus-within .history-delete{opacity:1;pointer-events:auto}
     .history-delete:hover{background:color-mix(in srgb,var(--error) 12%,transparent)}
@@ -2639,10 +2641,6 @@ SOFTWARE.
     .spell{font-weight:650}.spell.ok{color:var(--accent)}.spell.bad,.leech{color:var(--error)}
     .review-actions{justify-content:center;margin-top:14px}.review .actions{justify-content:center}
     .setting input.number{width:80px;height:auto;text-align:right;border:1px solid var(--line)}
-    .selection-lookup{pointer-events:auto;position:fixed;z-index:3;display:grid;place-items:center;width:24px;height:24px;padding:0;border:0;border-radius:6px;background:transparent;color:var(--muted);box-shadow:none;transition:background .12s,color .12s,transform .12s}
-    .selection-lookup:hover{background:var(--tint);color:var(--accent)}.selection-lookup:active{transform:scale(.9)}
-    .lookup-symbol{position:relative;width:12px;height:12px;border:1.5px solid currentColor;border-radius:50%}
-    .lookup-symbol::after{content:"";position:absolute;right:-4px;bottom:-2px;width:5px;height:1.5px;border-radius:1px;background:currentColor;transform:rotate(45deg)}
     .lookup-back{min-width:0;max-width:100%;overflow:hidden;text-overflow:ellipsis}.lookup-bar{margin-bottom:16px;gap:8px}
   `;
   const launcher = button('L', () => openStudio(), 'launcher', '打开 Lexi 学习中心');
@@ -2685,19 +2683,10 @@ SOFTWARE.
   toast.setAttribute('role', 'status');
   toast.setAttribute('aria-live', 'polite');
   toast.hidden = true;
-  const selectionAction = button('', () => {
-    const selection = internalSelection;
-    if (selection) beginInternalLookup(selection.word, selection.target);
-  }, 'selection-lookup', '查询选中单词');
-  const lookupSymbol = el('span', 'lookup-symbol');
-  lookupSymbol.setAttribute('aria-hidden', 'true');
-  selectionAction.append(lookupSymbol);
-  selectionAction.hidden = true;
-  selectionAction.addEventListener('pointerdown', event => event.preventDefault());
   main.append(top, view);
   studio.append(sidebar, main);
   overlay.append(studio);
-  app.append(launcher, popover, overlay, selectionAction, toast);
+  app.append(launcher, popover, overlay, toast);
   shadow.append(style, app);
   let toastTimer;
   function message(value) {
@@ -2715,7 +2704,7 @@ SOFTWARE.
     if (ownSpeech) window.speechSynthesis?.cancel();
     ownSpeech = false;
   }
-  function closePopover() { resetInternalLookup(); hideSelectionAction(); popover.hidden = true; stopQuery(); stopAudio(); }
+  function closePopover() { resetInternalLookup(); cancelInternalSelection(); popover.hidden = true; stopQuery(); stopAudio(); }
   function openStudio(nextScreen) {
     returnFocus = shadow.activeElement || document.activeElement;
     closePopover();
@@ -2726,7 +2715,7 @@ SOFTWARE.
   }
   function closeStudio() {
     resetInternalLookup();
-    hideSelectionAction();
+    cancelInternalSelection();
     overlay.hidden = true;
     clearTimeout(reviewTimer);
     stopQuery();
@@ -2754,12 +2743,12 @@ SOFTWARE.
   shadow.addEventListener('keydown', event => {
     if (event.key === 'Escape') {
       event.preventDefault(); event.stopPropagation();
-      if (!selectionAction.hidden) hideSelectionAction();
+      if (internalSelectionTimer) cancelInternalSelection();
       else if (internalLookup) returnInternalLookup();
       else overlay.hidden ? closePopover() : closeStudio();
       return;
     }
-    if (!internalLookup && selectionAction.hidden && !overlay.hidden && screen === 'review' && round && !event.altKey && !event.repeat) {
+    if (!internalLookup && !internalSelectionTimer && !overlay.hidden && screen === 'review' && round && !event.altKey && !event.repeat) {
       let handled = false;
       try { handled = reviewKey(event); } catch (error) { handled = true; showError(error); }
       if (handled) { event.preventDefault(); event.stopPropagation(); return; }
@@ -2814,18 +2803,16 @@ SOFTWARE.
     bar.append(el('span', 'brand', 'LEXI · 英语词典'), button('×', closePopover, 'icon', '关闭查词卡'));
     return bar;
   }
-  function hideSelectionAction() {
+  function cancelInternalSelection() {
     clearTimeout(internalSelectionTimer);
-    internalSelection = null;
-    selectionAction.hidden = true;
+    internalSelectionTimer = undefined;
   }
   function readingElement(node) {
     const element = node instanceof Element ? node : node?.parentElement;
     if (!element || element.closest('button,a,input,textarea,select,[contenteditable]:not([contenteditable="false"])')) return null;
     return element.closest('.word,.definition,.example,.translation-copy,.word-forms,.context,.context-line,.recall-prompt');
   }
-  function updateSelectionAction() {
-    hideSelectionAction();
+  function selectedInternalWord() {
     const selection = typeof shadow.getSelection === 'function' ? shadow.getSelection() : window.getSelection();
     if (!selection) return;
     let range;
@@ -2846,25 +2833,38 @@ SOFTWARE.
     if (!target || target.hidden || (target !== popover && overlay.hidden)) return;
     const word = normalize(range.toString());
     if (!word) return;
-    internalSelection = { word, target };
-    selectionAction.title = '查询 ' + word;
-    selectionAction.setAttribute('aria-label', selectionAction.title);
-    selectionAction.hidden = false;
-    const rect = range.getBoundingClientRect();
-    const size = selectionAction.getBoundingClientRect();
-    selectionAction.style.left = Math.max(12, Math.min(rect.left, window.innerWidth - size.width - 12)) + 'px';
-    selectionAction.style.top = Math.max(12, Math.min(rect.bottom + 6, window.innerHeight - size.height - 12)) + 'px';
+    return { selection, word, target };
   }
-  function scheduleSelectionAction() {
-    clearTimeout(internalSelectionTimer);
-    internalSelectionTimer = setTimeout(updateSelectionAction, 0);
+  function lookupInternalSelection() {
+    cancelInternalSelection();
+    const selected = selectedInternalWord();
+    if (!selected) return;
+    selected.selection.removeAllRanges();
+    beginInternalLookup(selected.word, selected.target);
   }
-  shadow.addEventListener('pointerup', event => { if (event.button === 0) scheduleSelectionAction(); });
-  shadow.addEventListener('keyup', event => { if (event.key.startsWith('Arrow') || event.key === 'Shift') scheduleSelectionAction(); });
-  shadow.addEventListener('pointerdown', event => { if (!event.composedPath().includes(selectionAction)) hideSelectionAction(); });
-  shadow.addEventListener('scroll', hideSelectionAction, true);
-  shadow.addEventListener('selectionchange', scheduleSelectionAction);
-  document.addEventListener('selectionchange', scheduleSelectionAction);
+  function scheduleInternalSelection() {
+    cancelInternalSelection();
+    if (internalPointerDown) return;
+    try {
+      if (selectedInternalWord()) internalSelectionTimer = setTimeout(() => {
+        try { lookupInternalSelection(); } catch (error) { showError(error); }
+      }, 220);
+    } catch (error) { showError(error); }
+  }
+  shadow.addEventListener('pointerup', event => {
+    internalPointerDown = false;
+    if (event.button === 0) scheduleInternalSelection();
+  });
+  shadow.addEventListener('keyup', event => { if (event.key.startsWith('Arrow') || event.key === 'Shift') scheduleInternalSelection(); });
+  shadow.addEventListener('pointerdown', event => {
+    cancelInternalSelection();
+    const reading = readingElement(event.composedPath()[0]);
+    internalPointerDown = event.button === 0 && Boolean(reading);
+    if (event.button === 0 && !reading) selectedInternalWord()?.selection.removeAllRanges();
+  });
+  shadow.addEventListener('scroll', cancelInternalSelection, true);
+  shadow.addEventListener('selectionchange', scheduleInternalSelection);
+  document.addEventListener('selectionchange', scheduleInternalSelection);
 
   function navigationFrame(target) {
     return {
@@ -2886,20 +2886,20 @@ SOFTWARE.
     restoreFrame(target, frames[0]);
   }
   function returnInternalLookup() {
-    hideSelectionAction();
+    cancelInternalSelection();
     stopQuery(); stopAudio();
     const { target, frames } = internalLookup;
     const frame = frames.pop();
     if (!frames.length) internalLookup = null;
     restoreFrame(target, frame);
-    if (frame.focus !== selectionAction && frame.focus?.getClientRects().length) frame.focus.focus({ preventScroll: true });
+    if (frame.focus?.getClientRects().length) frame.focus.focus({ preventScroll: true });
     else (target.querySelector('.lookup-back') || target).focus({ preventScroll: true });
   }
   function beginInternalLookup(word, target) {
     if (internalLookup && internalLookup.target !== target) resetInternalLookup();
     if (!internalLookup) internalLookup = { target, frames: [] };
     internalLookup.frames.push(navigationFrame(target));
-    hideSelectionAction();
+    cancelInternalSelection();
     stopAudio();
     lookup(word, null, null, target).catch(showError);
     target.querySelector('.lookup-back')?.focus({ preventScroll: true });
@@ -2920,7 +2920,7 @@ SOFTWARE.
   async function lookup(raw, rect, context = null, target = null) {
     const word = normalize(raw);
     if (!word) { message('请输入单个英文单词，支持内部连字符和撇号'); return; }
-    if (!target) { resetInternalLookup(); hideSelectionAction(); }
+    if (!target) { resetInternalLookup(); cancelInternalSelection(); }
     stopQuery();
     const epoch = queryEpoch;
     const showPopup = !target && overlay.hidden;
@@ -3080,13 +3080,11 @@ SOFTWARE.
     for (const node of shadow.querySelectorAll('[data-star-word]')) {
       const word = node.getAttribute('data-star-word');
       const starred = Boolean(get('study:' + word));
-      const list = node.className.split(' ').includes('list-star');
-      node.textContent = list ? starred ? '★' : '☆' : starred ? '已收藏' : '＋ 收藏';
+      node.textContent = starred ? '★' : '☆';
       node.setAttribute('aria-pressed', String(starred));
-      if (list) {
-        node.classList.toggle('starred', starred);
-        node.setAttribute('aria-label', starred ? `取消收藏 ${word}` : `收藏 ${word}`);
-      }
+      node.classList.toggle('starred', starred);
+      node.title = starred ? `取消收藏 ${word}` : `收藏 ${word}`;
+      node.setAttribute('aria-label', node.title);
     }
   }
   function senses(entry) {
@@ -3198,19 +3196,18 @@ SOFTWARE.
   }
   function wordDetail(entry, event = null, allowStar = true) {
     const node = el('article', 'detail');
-    const title = el('div', 'bar');
+    const title = el('div', 'bar word-heading');
     const actions = el('div', 'actions');
     if (allowStar) {
-      const star = button(get('study:' + entry.word) ? '已收藏' : '＋ 收藏', () => {
-        if (toggleStar(entry.word, !internalLookup)) star.textContent = get('study:' + entry.word) ? '已收藏' : '＋ 收藏';
-      });
+      const starred = Boolean(get('study:' + entry.word));
+      const star = button(starred ? '★' : '☆', () => toggleStar(entry.word, !internalLookup),
+        starred ? 'icon detail-star starred' : 'icon detail-star', starred ? `取消收藏 ${entry.word}` : `收藏 ${entry.word}`);
+      star.setAttribute('aria-pressed', String(starred));
       star.setAttribute('data-star-word', entry.word);
       actions.append(star);
     }
-    node.append(el('h2', 'word', entry.word));
-    title.append(phoneticBlock(entry));
-    title.append(actions);
-    node.append(title);
+    title.append(el('h2', 'word', entry.word), actions);
+    node.append(title, phoneticBlock(entry));
     node.append(senses(entry));
     const chinese = el('div');
     node.append(chinese);
@@ -3233,7 +3230,7 @@ SOFTWARE.
 
   function render() {
     resetInternalLookup();
-    hideSelectionAction();
+    cancelInternalSelection();
     refreshLibrary = null;
     clearTimeout(reviewTimer);
     for (const [key, node] of Object.entries(navButtons)) {
@@ -3294,7 +3291,7 @@ SOFTWARE.
       // shortcut: 一次显示最近的 300 条匹配记录，历史超过此数量时使用筛选或导出查看全量。
       for (const [index, item] of matches.slice(0, 300).entries()) {
         const row = button('', () => {
-          resetInternalLookup(); hideSelectionAction();
+          resetInternalLookup(); cancelInternalSelection();
           selectedWord = item.word;
           selectedEvent = isBook ? null : item;
           drawList(); drawDetail(); detail.scrollTop = 0;
@@ -3784,6 +3781,11 @@ SOFTWARE.
   let lastSelectionAt = 0;
   document.addEventListener('pointerup', event => {
     clearTimeout(selectionTimer);
+    if (internalPointerDown) {
+      internalPointerDown = false;
+      scheduleInternalSelection();
+      return;
+    }
     if (event.button !== 0 || event.composedPath().includes(host) || !overlay.hidden || !settings.auto) return;
     const target = event.target;
     if (target instanceof Element && target.closest('input,textarea,select,[contenteditable]:not([contenteditable="false"])')) return;
@@ -3810,10 +3812,11 @@ SOFTWARE.
       lookup(word, selection.getRangeAt(0).getBoundingClientRect(), context).catch(showError);
     }, 220);
   });
-  window.addEventListener('resize', () => { hideSelectionAction(); if (!popover.hidden) positionPopover(); });
+  window.addEventListener('resize', () => { cancelInternalSelection(); if (!popover.hidden) positionPopover(); });
   document.addEventListener('pointerdown', event => {
     if (!event.composedPath().includes(host)) {
-      hideSelectionAction();
+      internalPointerDown = false;
+      cancelInternalSelection();
       if (!popover.hidden) closePopover();
     }
   });

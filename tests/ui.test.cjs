@@ -675,18 +675,24 @@ const answerWith = async (app, label) => {
   await app.click(findButton(app.shadow, label + ' ·'));
 };
 
-function selectInside(app, node, raw, collapsed = false) {
+function setSelection(app, range) {
+  const selection = { rangeCount: 1, isCollapsed: Boolean(range.collapsed), getRangeAt: () => range,
+    removeAllRanges() { this.rangeCount = 0; this.isCollapsed = true; } };
+  app.context.window.getSelection = () => selection;
+  return selection;
+}
+async function selectInside(app, node, raw, collapsed = false) {
   const range = { startContainer: node, endContainer: node, collapsed, toString: () => raw,
     getBoundingClientRect: () => node.getBoundingClientRect() };
-  app.context.window.getSelection = () => ({ rangeCount: 1, isCollapsed: collapsed, getRangeAt: () => range });
+  setSelection(app, range);
   assert.ok(app.shadow.listeners.pointerup, 'plugin handles its own selection');
   app.shadow.listeners.pointerup.listener({ button: 0 });
   app.advance(250);
-  return app.shadow.querySelector('.selection-lookup');
+  await new Promise(setImmediate);
 }
 const historyOf = app => [...app.storage.entries()].filter(([key]) => key.startsWith(app.prefix + 'event:')).map(([, event]) => event);
 
-test('explicit internal lookup works with auto selection paused, saves history and stars, and restores nested views', async () => {
+test('automatic internal lookup works with website selection paused, saves history and stars, and restores nested views', async () => {
   const app = setup();
   const { shadow, click, storage, prefix } = app;
   useSettings(app, { auto: false });
@@ -696,32 +702,31 @@ test('explicit internal lookup works with auto selection paused, saves history a
   const original = pane.querySelector('article');
   pane.scrollTop = 75;
   shadow.querySelector('.list').scrollTop = 42;
-  const action = selectInside(app, pane.querySelector('.definition'), 'beta');
-  assert.equal(action.hidden, false);
-  assert.equal(textOf(action), '', 'entry is icon-only');
-  assert.equal(action.title, '查询 beta');
-  assert.equal(action.getAttribute('aria-label'), '查询 beta');
-  const symbol = action.querySelector('.lookup-symbol');
-  assert.equal(symbol.getAttribute('aria-hidden'), 'true');
-  assert.equal(historyOf(app).length, 3, 'selecting alone is not a lookup');
-  await click(action);
+  await selectInside(app, pane.querySelector('.definition'), 'beta');
+  assert.equal(shadow.querySelector('.selection-lookup'), null, 'there is no extra lookup icon to click');
   assert.equal(pane.querySelector('.word').textContent, 'beta');
   assert.equal(historyOf(app).length, 4);
   assert.equal(shadow.querySelectorAll('.item').length, 4, 'the current history list updates without leaving the word');
   assert.ok(findButton(pane, '← 返回 alpha'));
-  await click(findButton(pane, '＋ 收藏'));
+  const star = pane.querySelector('.detail-star');
+  assert.equal(star.textContent, '☆');
+  assert.equal(star.getAttribute('aria-pressed'), 'false');
+  assert.equal(star.getAttribute('aria-label'), '收藏 beta');
+  await click(star);
+  assert.equal(star.textContent, '★');
+  assert.equal(star.getAttribute('aria-pressed'), 'true');
+  assert.equal(star.getAttribute('aria-label'), '取消收藏 beta');
+  assert.equal(star.title, '取消收藏 beta');
+  assert.ok(star.className.split(' ').includes('starred'));
   assert.ok(storage.has(prefix + 'study:beta'));
   assert.equal(pane.querySelector('.word').textContent, 'beta', 'starring does not interrupt the temporary view');
   pane.scrollTop = 39;
-  selectInside(app, pane.querySelector('.definition'), 'gamma');
-  assert.equal(action.querySelector('.lookup-symbol'), symbol, 'changing selection keeps the icon');
-  assert.equal(action.getAttribute('aria-label'), '查询 gamma');
-  await click(action);
+  await selectInside(app, pane.querySelector('.definition'), 'gamma');
   assert.equal(pane.querySelector('.word').textContent, 'gamma');
   assert.equal(historyOf(app).length, 5);
   await click(findButton(pane, '← 返回 beta'));
   assert.equal(pane.scrollTop, 39);
-  assert.equal(findButton(pane, '已收藏').textContent, '已收藏');
+  assert.equal(pane.querySelector('.detail-star').textContent, '★');
   await click(findButton(pane, '← 返回 alpha'));
   assert.equal(pane.querySelector('article'), original);
   assert.equal(pane.scrollTop, 75);
@@ -730,6 +735,38 @@ test('explicit internal lookup works with auto selection paused, saves history a
   assert.ok(shadow.querySelectorAll('.list-star').find(node => node.attributes['aria-label'] === '取消收藏 beta'));
   await click(shadow.querySelectorAll('.tab')[0]);
   assert.equal(shadow.querySelectorAll('.item').length, 5, 'temporary queries appear in the normal history');
+});
+
+test('lookup star preserves its state on cancellation or storage failure and clears progress only on confirmed removal', async () => {
+  const app = setup();
+  const { shadow, click, storage, prefix, context } = app;
+  await click(shadow.querySelector('.item'));
+  await selectInside(app, shadow.querySelector('.definition'), 'beta');
+  const star = shadow.querySelector('.detail-star');
+  const write = context.GM_setValue;
+  context.GM_setValue = () => { throw new Error('Storage unavailable'); };
+  await click(star);
+  assert.equal(star.textContent, '☆');
+  assert.equal(star.getAttribute('aria-pressed'), 'false');
+  assert.equal(storage.has(prefix + 'study:beta'), false);
+  assert.ok(shadow.querySelector('.toast').textContent.includes('Storage unavailable'));
+  context.GM_setValue = write;
+  await click(star);
+  const progress = json(storage.get(prefix + 'study:beta'));
+  context.confirm = () => false;
+  await click(star);
+  assert.equal(star.textContent, '★');
+  assert.equal(star.getAttribute('aria-pressed'), 'true');
+  assert.deepEqual(json(storage.get(prefix + 'study:beta')), progress);
+  context.confirm = () => true;
+  await click(star);
+  assert.equal(star.textContent, '☆');
+  assert.equal(star.getAttribute('aria-pressed'), 'false');
+  assert.equal(star.getAttribute('aria-label'), '收藏 beta');
+  assert.equal(star.title, '收藏 beta');
+  assert.equal(star.className.split(' ').includes('starred'), false);
+  assert.equal(storage.has(prefix + 'study:beta'), false);
+  assert.equal(historyOf(app).length, 4, 'favorite changes preserve lookup history');
 });
 
 test('review internal lookup preserves the revealed card and blocks grading until return', async () => {
@@ -741,7 +778,7 @@ test('review internal lookup preserves the revealed card and blocks grading unti
   const original = shadow.querySelector('.review-answer');
   const before = json(storage.get(prefix + 'study:alpha'));
   shadow.querySelector('.view').scrollTop = 81;
-  await click(selectInside(app, original.querySelector('.definition'), 'beta'));
+  await selectInside(app, original.querySelector('.definition'), 'beta');
   assert.equal(shadow.querySelector('.view').querySelector('.word').textContent, 'beta');
   assert.ok(storage.has(prefix + 'study:beta'), 'temporary lookup respects automatic bookmarking');
   assert.equal(historyOf(app).at(-1).word, 'beta');
@@ -758,29 +795,91 @@ test('review internal lookup preserves the revealed card and blocks grading unti
   assert.equal(storage.get(prefix + 'study:alpha').reviews, before.reviews + 1);
 });
 
-test('the internal selection action ignores controls and phrases, and dismisses without closing the studio', async () => {
+test('automatic internal lookup ignores controls, phrases, collapsed and cancelled selections', async () => {
   const app = setup();
   const { shadow, click } = app;
   await click(shadow.querySelector('.item'));
   const definition = shadow.querySelector('.definition');
-  const action = selectInside(app, definition, 'beta');
-  assert.equal(action.hidden, false);
-  await press(app, 'Escape');
-  assert.equal(action.hidden, true);
-  assert.equal(shadow.querySelector('.overlay').hidden, false);
   for (const [node, raw, collapsed] of [
     [definition, 'two words', false], [definition, 'beta', true],
     [findButton(shadow, '查询'), 'query', false], [shadow.querySelector('input'), 'beta', false],
     [app.context.document.activeElement, 'beta', false]
   ]) {
-    selectInside(app, node, raw, collapsed);
-    assert.equal(action.hidden, true);
+    await selectInside(app, node, raw, collapsed);
+    assert.equal(shadow.querySelector('.word').textContent, 'alpha');
+    assert.equal(historyOf(app).length, 3);
   }
-  selectInside(app, definition, 'beta');
+  await selectInside(app, definition, 'two words');
+  const range = { startContainer: definition, endContainer: definition, collapsed: false, toString: () => 'beta' };
+  setSelection(app, range);
+  app.context.document.listeners.selectionchange.listener();
   app.context.window.getSelection = () => null;
   app.context.document.listeners.selectionchange.listener();
   app.advance(250);
-  assert.equal(action.hidden, true);
+  await new Promise(setImmediate);
+  assert.equal(historyOf(app).length, 3);
+});
+
+test('automatic internal lookup waits for pointer release, debounces selection changes and does not repeat a consumed selection', async () => {
+  const app = setup();
+  const { shadow, context, click, advance } = app;
+  await click(shadow.querySelector('.item'));
+  const definition = shadow.querySelector('.definition');
+  const range = { startContainer: definition, endContainer: definition, collapsed: false, toString: () => 'beta' };
+  setSelection(app, range);
+  shadow.listeners.pointerdown.listener({ button: 0, composedPath: () => [definition] });
+  context.document.listeners.selectionchange.listener();
+  advance(500);
+  await new Promise(setImmediate);
+  assert.equal(historyOf(app).length, 3, 'dragging does not query an intermediate selection');
+  shadow.listeners.pointerup.listener({ button: 0 });
+  advance(100);
+  context.document.listeners.selectionchange.listener();
+  advance(100);
+  await new Promise(setImmediate);
+  assert.equal(historyOf(app).length, 3, 'rapid events are debounced');
+  advance(150);
+  await new Promise(setImmediate);
+  assert.equal(shadow.querySelector('.detail-pane').querySelector('.word').textContent, 'beta');
+  assert.equal(historyOf(app).length, 4);
+  context.document.listeners.selectionchange.listener();
+  shadow.listeners.keyup.listener({ key: 'Shift' });
+  advance(250);
+  await new Promise(setImmediate);
+  assert.equal(historyOf(app).length, 4, 'the same selection cannot create another history event');
+});
+
+test('Escape cancels a pending automatic internal lookup before navigating or closing', async () => {
+  const app = setup();
+  const { shadow, context, click, advance } = app;
+  await click(shadow.querySelector('.item'));
+  const definition = shadow.querySelector('.definition');
+  const range = { startContainer: definition, endContainer: definition, collapsed: false, toString: () => 'beta' };
+  setSelection(app, range);
+  context.document.listeners.selectionchange.listener();
+  await press(app, 'Escape');
+  advance(250);
+  await new Promise(setImmediate);
+  assert.equal(shadow.querySelector('.overlay').hidden, false);
+  assert.equal(shadow.querySelector('.word').textContent, 'alpha');
+  assert.equal(historyOf(app).length, 3);
+});
+
+test('clicking a control cancels pending selection lookup instead of rearming it on pointer release', async () => {
+  const app = setup();
+  const { shadow, context, click, advance } = app;
+  await click(shadow.querySelector('.item'));
+  const definition = shadow.querySelector('.definition');
+  const range = { startContainer: definition, endContainer: definition, collapsed: false, toString: () => 'beta' };
+  setSelection(app, range);
+  context.document.listeners.selectionchange.listener();
+  const control = findButton(shadow, '查询');
+  shadow.listeners.pointerdown.listener({ button: 0, composedPath: () => [control] });
+  shadow.listeners.pointerup.listener({ button: 0 });
+  context.document.listeners.selectionchange.listener();
+  advance(250);
+  await new Promise(setImmediate);
+  assert.equal(shadow.querySelector('.word').textContent, 'alpha');
   assert.equal(historyOf(app).length, 3);
 });
 
@@ -792,7 +891,7 @@ test('internal lookup failures can retry or return, and late cancelled responses
   context.GM_xmlhttpRequest = request => { requests.push(request); return { abort() { aborted++; } }; };
   await click(shadow.querySelector('.item'));
   const pane = shadow.querySelector('.detail-pane');
-  await click(selectInside(app, pane.querySelector('.definition'), 'missing'));
+  await selectInside(app, pane.querySelector('.definition'), 'missing');
   assert.ok(textOf(pane).includes('正在查词'));
   requests[0].onerror();
   await new Promise(setImmediate);
@@ -803,7 +902,7 @@ test('internal lookup failures can retry or return, and late cancelled responses
   assert.equal(pane.querySelector('.word').textContent, 'missing');
   assert.equal(historyOf(app).length, 4);
   await click(findButton(pane, '← 返回 alpha'));
-  await click(selectInside(app, pane.querySelector('.definition'), 'cancelled'));
+  await selectInside(app, pane.querySelector('.definition'), 'cancelled');
   await click(findButton(pane, '← 返回 alpha'));
   assert.equal(aborted, 1);
   requests[1].onload({ status: 200, responseText: JSON.stringify([{ word: 'cancelled',
@@ -819,18 +918,16 @@ test('internal selections use composed ranges when a browser retargets shadow se
   const { shadow, click, context } = app;
   await click(shadow.querySelector('.item'));
   const definition = shadow.querySelector('.definition');
-  selectInside(app, definition, 'beta');
-  const range = context.window.getSelection().getRangeAt(0);
+  const range = { startContainer: definition, endContainer: definition, collapsed: false, toString: () => 'beta' };
   context.document.createRange = () => ({ ...range, setStart() {}, setEnd() {} });
-  context.window.getSelection = () => ({ rangeCount: 1, getRangeAt: () => ({ startContainer: context.document }),
-    getComposedRanges: ({ shadowRoots }) => {
-      assert.equal(shadowRoots[0], shadow);
-      return [{ startContainer: definition, endContainer: definition, startOffset: 0, endOffset: 4 }];
-    } });
+  const selection = setSelection(app, { startContainer: context.document });
+  selection.getComposedRanges = ({ shadowRoots }) => {
+    assert.equal(shadowRoots[0], shadow);
+    return selection.rangeCount ? [{ startContainer: definition, endContainer: definition, startOffset: 0, endOffset: 4 }] : [];
+  };
   context.document.listeners.selectionchange.listener();
   app.advance(250);
-  assert.equal(shadow.querySelector('.selection-lookup').hidden, false);
-  await click(shadow.querySelector('.selection-lookup'));
+  await new Promise(setImmediate);
   assert.equal(shadow.querySelector('.detail-pane').querySelector('.word').textContent, 'beta');
 });
 
