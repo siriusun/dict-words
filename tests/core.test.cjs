@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const test = require('node:test');
 const fs = require('node:fs');
 const { createHash } = require('node:crypto');
-const { normalize, schedule, scheduleAll, migrateStudy, createStudy, reviewInterval, csv, dictionary, validateBackup, mergeBackup, ordered, audioUrl, translationSource, translationChunks, youdaoPhonetic, youdaoWordForms,
+const { normalize, schedule, scheduleAll, migrateStudy, createStudy, reviewInterval, csv, dictionary, validateBackup, mergeBackup, ordered, audioUrl, translationSource, translationChunks, youdaoTranslation, youdaoPhonetic, datamusePhonetic, youdaoWordForms,
   dayStart, nextDayStart, availableAt, planReview, retentionStats, contextParts, isLeech } = require('../lexi.user.js');
 const now = Date.UTC(2026, 10, 12);
 const DAY = 86400000;
@@ -182,6 +182,37 @@ test('supplemental phonetics survive backup/import and a newer definition withou
   data.words[0].phoneticSource = 'unknown';
   assert.throws(() => validateBackup(data));
 });
+
+test('Datamuse phonetics accept only exact-word IPA metadata, not near matches or ARPAbet', () => {
+  const result = (word, tags) => [{ word, tags }];
+  assert.equal(datamusePhonetic(result('plopped', ['pron:P L AA1 P T ', 'ipa_pron:pɫˈɑpt']), 'plopped'), '/pɫˈɑpt/');
+  assert.equal(datamusePhonetic(result('ALPHA', ['ipa_pron: /ˈælfə/ ']), 'alpha'), '/ˈælfə/');
+  for (const raw of [null, {}, [], [null], result('plop', ['ipa_pron:plɑp']),
+    result('plopped', ['pron:P L AA1 P T']), result('plopped', ['ipa_pron:   ']),
+    result('plopped', ['ipa_pron:' + 'a'.repeat(149)]), result('plopped', [true]), result('plopped', {})]) {
+    assert.throws(() => datamusePhonetic(raw, 'plopped'));
+  }
+});
+
+test('Datamuse phonetics retain their reference source in backups and definition-only merges', () => {
+  const data = backup();
+  Object.assign(data.words[0], { phonetic: '/pɫˈɑpt/', phoneticSource: 'datamuse' });
+  const current = validateBackup(JSON.parse(JSON.stringify(data)));
+  assert.equal(current.words[0].phoneticSource, 'datamuse');
+  const incoming = backup();
+  incoming.words[0].fetchedAt++;
+  incoming.words[0].phonetic = '';
+  const merged = mergeBackup(current, validateBackup(incoming));
+  assert.equal(merged.words[0].phonetic, '/pɫˈɑpt/');
+  assert.equal(merged.words[0].phoneticSource, 'datamuse');
+  incoming.words[0].phonetic = '/main/';
+  const refreshed = mergeBackup(current, validateBackup(incoming));
+  assert.equal(refreshed.words[0].phonetic, '/main/');
+  assert.equal(refreshed.words[0].phoneticSource, undefined);
+  data.words[0].phonetic = '';
+  assert.throws(() => validateBackup(data));
+});
+
 test('word forms read exact-word prototypes, categories and alternative spellings without guessing', () => {
   const response = (word, extra) => ({ ec: { word: [{ 'return-phrase': { l: { i: word } }, ...extra }] } });
   assert.deepEqual(youdaoWordForms(response('took', { prototype: 'take' }), 'took'), { base: 'take', forms: [] });
@@ -302,6 +333,43 @@ test('rich translations survive backups and invalidate when a later definition c
   delete incoming.words[0].translationSource;
   assert.equal(mergeBackup(current, incoming).words[0].translation, undefined);
   data.words[0].translationSource = 123;
+  assert.throws(() => validateBackup(data));
+});
+
+test('Youdao Chinese definitions require the exact word and usable bounded Chinese text', () => {
+  const response = (phrase, values) => ({ ec: { word: [{
+    'return-phrase': { l: { i: phrase } }, trs: [{ tr: [{ l: { i: values } }] }]
+  }] } });
+  assert.equal(youdaoTranslation(response('test', ['n. 测试', 'v. 检验', 'n. 测试']), 'test'), 'n. 测试\nv. 检验');
+  for (const raw of [null, {}, response('other', ['测试']), response('test', []),
+    response('test', [null, true, '  ', 'English only']), response('test', ['中'.repeat(16001)])]) {
+    assert.throws(() => youdaoTranslation(raw, 'test'));
+  }
+});
+
+test('fallback provider survives backup and definition refresh without relabeling legacy MyMemory text', () => {
+  const data = backup();
+  Object.assign(data.words[0], { translation: 'n. 测试', translatedAt: now, translationProvider: 'youdao' });
+  const current = validateBackup(JSON.parse(JSON.stringify(data)));
+  assert.equal(current.words[0].translationProvider, 'youdao');
+  assert.equal(current.words[0].translationSource, undefined);
+  const incoming = backup();
+  incoming.words[0].fetchedAt++;
+  incoming.words[0].meanings[0].definitions[0].definition = 'A changed English definition.';
+  const merged = mergeBackup(current, validateBackup(incoming));
+  assert.equal(merged.words[0].translation, 'n. 测试');
+  assert.equal(merged.words[0].translationProvider, 'youdao');
+  Object.assign(incoming.words[0], { translation: '新版中文', translatedAt: now + 1,
+    translationSource: translationSource(incoming.words[0]), translationProvider: 'mymemory' });
+  const refreshed = mergeBackup(current, validateBackup(incoming));
+  assert.equal(refreshed.words[0].translationProvider, 'mymemory');
+  assert.equal(refreshed.words[0].translation, '新版中文');
+  delete data.words[0].translationProvider;
+  assert.equal(validateBackup(data).words[0].translationProvider, undefined);
+  data.words[0].translationProvider = 'unknown';
+  assert.throws(() => validateBackup(data));
+  delete data.words[0].translation;
+  data.words[0].translationProvider = 'youdao';
   assert.throws(() => validateBackup(data));
 });
 

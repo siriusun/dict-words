@@ -444,6 +444,7 @@ test('Youdao failure keeps main phonetics and playback available with explicit r
   assert.equal(phonetic.children[1].attributes['aria-label'], '播放单词发音');
   assert.ok(phonetic.querySelectorAll('span').some(node => node.textContent === '有道音标暂不可用'));
   assert.ok(phonetic.title.includes('网络连接失败'));
+  assert.equal(requests.length, 1, 'existing main IPA is kept without a third-party fallback request');
   await click(findButton(phonetic, '重试'));
   requests[1].onload({ status: 200, responseText: JSON.stringify({ simple: { word: [{ 'return-phrase': 'alpha', ukphone: 'ˈælfə' }] } }) });
   await new Promise(setImmediate);
@@ -473,8 +474,127 @@ test('missing cached phonetics fill once, merge concurrent translation, and are 
   assert.equal(requests.length, 1, 'review reuses the saved phonetic');
 });
 
+test('phonetic fallback fills plopped IPA when Youdao and the main dictionary have none', async () => {
+  const { shadow, storage, prefix, context, click } = setup('');
+  const entry = { ...storage.get(prefix + 'word:alpha'), word: 'plopped',
+    wordForms: { base: 'plop', forms: [] } };
+  storage.set(prefix + 'word:plopped', entry);
+  storage.set(prefix + 'event:plopped-event', { id: 'plopped-event', word: 'plopped', at: context.Date.now() });
+  const requests = [];
+  context.GM_xmlhttpRequest = request => { requests.push(request); return { abort() {} }; };
+  await click(shadow.querySelector('.item'));
+  await respondYoudao(requests[0], 'plopped', { prototype: 'plop' });
+  assert.equal(requests.length, 2, 'missing exact-word IPA must request the configured fallback, not use the root IPA');
+  assert.equal(new URL(requests[1].url).hostname, 'api.datamuse.com');
+  assert.equal(new URL(requests[1].url).searchParams.get('sp'), 'plopped');
+  requests[1].onload({ status: 200, responseText: JSON.stringify([
+    { word: 'plopped', tags: ['pron:P L AA1 P T ', 'ipa_pron:pɫˈɑpt'] }
+  ]) });
+  await new Promise(setImmediate);
+  assert.equal(shadow.querySelector('.phonetic').children[0].textContent, '/pɫˈɑpt/');
+  assert.equal(storage.get(prefix + 'word:plopped').phoneticSource, 'datamuse');
+  assert.ok(textOf(shadow.querySelector('.phonetic')).includes('Datamuse'));
+  assert.ok(shadow.querySelector('.phonetic').title.includes('推测'));
+  await click(shadow.querySelector('.item'));
+  assert.equal(requests.length, 2, 'the cached reference IPA avoids repeated requests');
+});
+
+for (const [label, fail] of [
+  ['network errors', request => request.onerror()],
+  ['HTTP 429', request => request.onload({ status: 429, responseText: '{}' })],
+  ['timeouts', request => request.ontimeout()]
+]) {
+  test('phonetic fallback handles Youdao ' + label + ' without changing history or study progress', async () => {
+    const { shadow, storage, prefix, context, click } = setup('');
+    const before = structuredClone(storage.get(prefix + 'study:alpha'));
+    const requests = [];
+    context.GM_xmlhttpRequest = request => { requests.push(request); return { abort() {} }; };
+    await click(shadow.querySelector('.item'));
+    fail(requests[0]);
+    await new Promise(setImmediate);
+    assert.equal(requests.length, 2);
+    storage.set(prefix + 'word:alpha', { ...storage.get(prefix + 'word:alpha'), translation: '并发更新的中文' });
+    requests[1].onload({ status: 200, responseText: JSON.stringify([{ word: 'alpha', tags: ['ipa_pron:ˈælfə'] }]) });
+    await new Promise(setImmediate);
+    assert.equal(storage.get(prefix + 'word:alpha').phonetic, '/ˈælfə/');
+    assert.equal(storage.get(prefix + 'word:alpha').translation, '并发更新的中文');
+    assert.deepEqual(storage.get(prefix + 'study:alpha'), before);
+    assert.equal([...storage.keys()].filter(key => key.startsWith(prefix + 'event:')).length, 3);
+  });
+}
+
+test('phonetic fallback setting saves independently, reports write errors and can disable additional requests', async () => {
+  const { shadow, storage, prefix, context, click } = setup('');
+  const requests = [];
+  context.GM_xmlhttpRequest = request => { requests.push(request); return { abort() {} }; };
+  await click(shadow.querySelectorAll('.tab')[3]);
+  const select = shadow.querySelector('.phonetic-fallback');
+  assert.ok(select);
+  assert.equal(select.value, 'datamuse');
+  select.value = 'none';
+  select.listeners.change.listener();
+  assert.equal(storage.get(prefix + 'settings').phoneticFallback, 'none');
+  assert.equal(storage.get(prefix + 'settings').translationFallback, 'youdao');
+  context.GM_setValue = () => { throw new Error('storage blocked'); };
+  select.value = 'datamuse';
+  select.listeners.change.listener();
+  assert.equal(select.value, 'none');
+  assert.ok(shadow.querySelector('.toast').textContent.includes('storage blocked'));
+  context.GM_setValue = (key, value) => storage.set(key, value);
+  await click(shadow.querySelectorAll('.tab')[0]);
+  await click(shadow.querySelector('.item'));
+  await respondYoudao(requests[0], 'alpha');
+  assert.equal(requests.length, 1);
+  assert.equal(shadow.querySelector('.phonetic').children[0].textContent, '音标暂不可用');
+  assert.ok(findButton(shadow.querySelector('.phonetic'), '重试'));
+});
+
+test('phonetic fallback failures show both services and retry without saving a near-match IPA', async () => {
+  const { shadow, storage, prefix, context, click } = setup('');
+  const requests = [];
+  context.GM_xmlhttpRequest = request => { requests.push(request); return { abort() {} }; };
+  await click(shadow.querySelector('.item'));
+  await respondYoudao(requests[0], 'alpha');
+  requests[1].onload({ status: 200, responseText: JSON.stringify([{ word: 'other', tags: ['ipa_pron:ʌðə'] }]) });
+  await new Promise(setImmediate);
+  const phonetic = shadow.querySelector('.phonetic');
+  assert.equal(storage.get(prefix + 'word:alpha').phonetic, '');
+  assert.ok(phonetic.title.includes('有道：'));
+  assert.ok(phonetic.title.includes('Datamuse：'));
+  await click(findButton(phonetic, '重试'));
+  await respondYoudao(requests[2], 'alpha', { ukphone: 'ˈælfə' });
+  assert.equal(storage.get(prefix + 'word:alpha').phoneticSource, 'youdao');
+  assert.equal(findButton(phonetic, '重试'), undefined);
+  assert.equal(requests.length, 3, 'retry still prefers Youdao instead of forcing the previous fallback');
+});
+
+test('phonetic fallback shares pending requests and cannot restore deleted words or overwrite preferred IPA', async () => {
+  for (const remove of [true, false]) {
+    const { shadow, storage, prefix, context, click } = setup('');
+    const requests = [];
+    context.GM_xmlhttpRequest = request => { requests.push(request); return { abort() {} }; };
+    await click(shadow.querySelector('.item'));
+    await click(shadow.querySelector('.item'));
+    assert.equal(requests.length, 1);
+    await respondYoudao(requests[0], 'alpha');
+    assert.equal(requests.length, 2);
+    if (remove) storage.delete(prefix + 'word:alpha');
+    else storage.set(prefix + 'word:alpha', { ...storage.get(prefix + 'word:alpha'), phonetic: '/preferred/', phoneticSource: 'youdao' });
+    requests[1].onload({ status: 200, responseText: JSON.stringify([{ word: 'alpha', tags: ['ipa_pron:ˈælfə'] }]) });
+    await new Promise(setImmediate);
+    if (remove) {
+      assert.equal(storage.has(prefix + 'word:alpha'), false);
+      assert.ok(shadow.querySelector('.phonetic').title.includes('词条已删除'));
+    } else {
+      assert.equal(storage.get(prefix + 'word:alpha').phonetic, '/preferred/');
+      assert.equal(storage.get(prefix + 'word:alpha').phoneticSource, 'youdao');
+    }
+  }
+});
+
 test('failed phonetics can be retried, and a late response cannot recreate a deleted word', async () => {
   const { shadow, storage, prefix, context, click } = setup('');
+  storage.set(prefix + 'settings', { phoneticFallback: 'none' });
   const requests = [];
   context.GM_xmlhttpRequest = request => { requests.push(request); return { abort() {} }; };
   await click(shadow.querySelector('.item'));
@@ -1158,7 +1278,152 @@ test('the answer side fills a missing Chinese translation', async () => {
   requests[0].onload({ status: 200, responseText: JSON.stringify({ responseStatus: 200, responseData: { translatedText: '阿尔法' } }) });
   await new Promise(setImmediate);
   assert.equal(storage.get(prefix + 'word:alpha').translation, '阿尔法');
+  assert.equal(storage.get(prefix + 'word:alpha').translationProvider, 'mymemory');
+  assert.equal(requests.length, 1, 'successful MyMemory translation does not use the fallback');
   assert.ok(textOf(shadow.querySelector('.review-answer')).includes('阿尔法'));
+});
+
+test('Chinese fallback displays and caches Youdao definitions after MyMemory returns HTTP 429', async () => {
+  const { shadow, storage, prefix, context, click } = setup();
+  const entry = { ...storage.get(prefix + 'word:alpha') };
+  delete entry.translation;
+  delete entry.translationSource;
+  storage.set(prefix + 'word:alpha', entry);
+  const requests = [];
+  context.GM_xmlhttpRequest = request => { requests.push(request); return { abort() {} }; };
+  await click(shadow.querySelector('.item'));
+  requests[0].onload({ status: 429, responseText: '{}' });
+  await new Promise(setImmediate);
+  assert.equal(requests.length, 2, 'a rate-limited primary service must automatically request the fallback');
+  assert.ok(requests[1].url.startsWith('https://dict.youdao.com/jsonapi?'));
+  await respondYoudao(requests[1], 'alpha', { trs: [{ tr: [{ l: { i: ['n. 阿尔法；开端'] } }] }] });
+  assert.equal(shadow.querySelector('.translation-copy').textContent, 'n. 阿尔法；开端');
+  assert.ok(textOf(shadow.querySelector('.translation')).includes('有道词典'));
+  assert.equal(storage.get(prefix + 'word:alpha').translationProvider, 'youdao');
+  await click(shadow.querySelectorAll('.tab')[1]);
+  await click(shadow.querySelector('.item'));
+  assert.equal(requests.length, 2, 'opening the cached fallback does not retry MyMemory');
+});
+
+for (const [label, fail] of [
+  ['quota exhaustion', request => request.onload({ status: 200, responseText: JSON.stringify({
+    responseStatus: 200, quotaFinished: true, responseData: { translatedText: 'quota error' }
+  }) })],
+  ['timeout', request => request.ontimeout()],
+  ['invalid JSON', request => request.onload({ status: 200, responseText: '<html>error</html>' })]
+]) {
+  test('Chinese fallback handles ' + label + ' in a review answer without changing study progress', async () => {
+    const app = setup();
+    const { shadow, storage, prefix, context, click } = app;
+    delete storage.get(prefix + 'word:alpha').translation;
+    delete storage.get(prefix + 'word:alpha').translationSource;
+    const before = structuredClone(storage.get(prefix + 'study:alpha'));
+    const requests = [];
+    context.GM_xmlhttpRequest = request => { requests.push(request); return { abort() {} }; };
+    await openReview(app);
+    await click(findButton(shadow, '显示释义'));
+    fail(requests[0]);
+    await new Promise(setImmediate);
+    assert.equal(requests.length, 2);
+    await respondYoudao(requests[1], 'alpha', { trs: [{ tr: [{ l: { i: ['n. 阿尔法'] } }] }] });
+    assert.ok(textOf(shadow.querySelector('.review-answer')).includes('n. 阿尔法'));
+    assert.deepEqual(storage.get(prefix + 'study:alpha'), before);
+    assert.equal([...storage.keys()].filter(key => key.startsWith(prefix + 'event:')).length, 3);
+  });
+}
+
+test('Chinese fallback setting persists, can disable extra requests, and reports save failures', async () => {
+  const app = setup();
+  const { shadow, storage, prefix, context, click } = app;
+  const requests = [];
+  context.GM_xmlhttpRequest = request => { requests.push(request); return { abort() {} }; };
+  await click(shadow.querySelectorAll('.tab')[3]);
+  const select = shadow.querySelector('.translation-fallback');
+  assert.ok(select);
+  assert.equal(select.value, 'youdao');
+  select.value = 'none';
+  select.listeners.change.listener();
+  assert.equal(storage.get(prefix + 'settings').translationFallback, 'none');
+  context.GM_setValue = () => { throw new Error('storage blocked'); };
+  select.value = 'youdao';
+  select.listeners.change.listener();
+  assert.equal(select.value, 'none');
+  assert.ok(shadow.querySelector('.toast').textContent.includes('storage blocked'));
+  context.GM_setValue = (key, value) => storage.set(key, value);
+  delete storage.get(prefix + 'word:alpha').translation;
+  delete storage.get(prefix + 'word:alpha').translationSource;
+  await click(shadow.querySelectorAll('.tab')[0]);
+  await click(shadow.querySelector('.item'));
+  requests[0].onload({ status: 429, responseText: '{}' });
+  await new Promise(setImmediate);
+  assert.equal(requests.length, 1);
+  assert.ok(textOf(shadow.querySelector('.detail')).includes('MyMemory'));
+  assert.ok(findButton(shadow, '重试中文释义'));
+});
+
+test('Chinese fallback failures preserve old text and retry using the latest setting', async () => {
+  const app = setup();
+  const { shadow, storage, prefix, context, click } = app;
+  delete storage.get(prefix + 'word:alpha').translationSource;
+  const requests = [];
+  context.GM_xmlhttpRequest = request => { requests.push(request); return { abort() {} }; };
+  await click(shadow.querySelector('.item'));
+  requests[0].onerror();
+  await new Promise(setImmediate);
+  await respondYoudao(requests[1], 'other', { trs: [{ tr: [{ l: { i: ['错误词条'] } }] }] });
+  assert.equal(shadow.querySelector('.translation-copy').textContent, '中文');
+  assert.ok(textOf(shadow.querySelector('.detail')).includes('MyMemory：网络连接失败'));
+  assert.ok(textOf(shadow.querySelector('.detail')).includes('有道词典：'));
+  storage.set(prefix + 'settings', { translationFallback: 'none' });
+  await click(findButton(shadow, '重试中文释义'));
+  requests[2].onerror();
+  await new Promise(setImmediate);
+  assert.equal(requests.length, 3, 'retry honors disabling fallback after the previous failure');
+  assert.equal(storage.get(prefix + 'word:alpha').translation, '中文');
+  assert.equal(storage.get(prefix + 'word:alpha').translationProvider, undefined);
+});
+
+test('Chinese fallback shares in-flight Youdao requests and preserves concurrent phonetic updates', async () => {
+  const { shadow, storage, prefix, context, click } = setup('/main/', '');
+  const entry = storage.get(prefix + 'word:alpha');
+  delete entry.translation;
+  delete entry.translationSource;
+  delete entry.wordForms;
+  const requests = [];
+  context.GM_xmlhttpRequest = request => { requests.push(request); return { abort() {} }; };
+  await click(shadow.querySelector('.item'));
+  await click(shadow.querySelector('.item'));
+  assert.equal(requests.length, 2, 'repeated views share both primary and supplemental requests');
+  const primary = requests.find(request => request.url.includes('mymemory'));
+  primary.onload({ status: 429, responseText: '{}' });
+  await new Promise(setImmediate);
+  assert.equal(requests.length, 2, 'fallback reuses the pending phonetic and word-form request');
+  await respondYoudao(requests.find(request => request.url.includes('youdao')), 'alpha', {
+    ukphone: 'ælfə', trs: [{ tr: [{ l: { i: ['n. 阿尔法'] } }] }]
+  });
+  assert.equal(storage.get(prefix + 'word:alpha').translationProvider, 'youdao');
+  assert.equal(storage.get(prefix + 'word:alpha').phoneticSource, 'youdao');
+  assert.equal(storage.get(prefix + 'word:alpha').phonetic, '/ælfə/');
+  assert.deepEqual(json(storage.get(prefix + 'word:alpha').wordForms), { base: 'alpha', forms: [] });
+});
+
+test('Chinese fallback cannot restore a deleted word or save against a changed English definition', async () => {
+  for (const remove of [true, false]) {
+    const { shadow, storage, prefix, context, click } = setup();
+    delete storage.get(prefix + 'word:alpha').translation;
+    delete storage.get(prefix + 'word:alpha').translationSource;
+    const requests = [];
+    context.GM_xmlhttpRequest = request => { requests.push(request); return { abort() {} }; };
+    await click(shadow.querySelector('.item'));
+    requests[0].onload({ status: 429, responseText: '{}' });
+    await new Promise(setImmediate);
+    if (remove) storage.delete(prefix + 'word:alpha');
+    else storage.get(prefix + 'word:alpha').meanings[0].definitions[0].definition = 'changed';
+    await respondYoudao(requests[1], 'alpha', { trs: [{ tr: [{ l: { i: ['n. 阿尔法'] } }] }] });
+    assert.equal(storage.get(prefix + 'word:alpha')?.translation, undefined);
+    assert.ok(findButton(shadow, '重试中文释义'));
+    assert.ok(textOf(shadow.querySelector('.detail')).includes(remove ? '词条已删除' : '词典释义已更新'));
+  }
 });
 
 test('optional reverse cards start after the meaning card graduates and keep separate progress', async () => {

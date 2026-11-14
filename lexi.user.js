@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Lexi · 划词词典与复习
 // @namespace    lexi-local
-// @version      0.3.2
+// @version      0.3.4
 // @description  英文划词、发音、跨网站历史、生词复习与本地备份。无需账号。
 // @match        http://*/*
 // @match        https://*/*
@@ -18,6 +18,7 @@
 // @connect      api.dictionaryapi.dev
 // @connect      api.mymemory.translated.net
 // @connect      dict.youdao.com
+// @connect      api.datamuse.com
 // @license      MIT
 // ==/UserScript==
 
@@ -2083,11 +2084,13 @@ SOFTWARE.
   };
   const GRADES = { again: 1, hard: 2, good: 3, easy: 4 };
   const STUDY_STATES = ['新词', '学习中', '间隔复习', '重新学习'];
-  const DEFAULTS = { auto: true, autoBook: false, context: false, newPerDay: 20, retention: 0.9, reverse: false };
+  const DEFAULTS = { auto: true, autoBook: false, context: false, newPerDay: 20, retention: 0.9, reverse: false, translationFallback: 'youdao', phoneticFallback: 'datamuse' };
   const cleanSettings = raw => {
     const value = { ...DEFAULTS, ...(raw && typeof raw === 'object' ? raw : {}) };
     if (!Number.isInteger(value.newPerDay) || value.newPerDay < 0 || value.newPerDay > 200) value.newPerDay = DEFAULTS.newPerDay;
     if (!RETENTIONS.includes(value.retention)) value.retention = DEFAULTS.retention;
+    if (!['none', 'youdao'].includes(value.translationFallback)) value.translationFallback = DEFAULTS.translationFallback;
+    if (!['none', 'datamuse'].includes(value.phoneticFallback)) value.phoneticFallback = DEFAULTS.phoneticFallback;
     return value;
   };
   const normalize = value => {
@@ -2286,9 +2289,10 @@ SOFTWARE.
     if (chunk) chunks.push(chunk);
     return chunks;
   }
-  const translationMatches = (cached, entry) => cached.translationSource
-    ? cached.translationSource === translationSource(entry)
-    : cached.meanings[0].definitions[0].definition === entry.meanings[0].definitions[0].definition;
+  const translationMatches = (cached, entry) => cached.translationProvider === 'youdao'
+    ? cached.word === entry.word
+    : cached.translationSource ? cached.translationSource === translationSource(entry)
+      : cached.meanings[0].definitions[0].definition === entry.meanings[0].definitions[0].definition;
   function youdaoRecords(raw, word) {
     return [raw?.simple?.word, raw?.ec?.word].flatMap(items => Array.isArray(items) ? items : []).filter(item => {
       const phrase = item?.['return-phrase'];
@@ -2303,6 +2307,27 @@ SOFTWARE.
       if (value) return '/' + value.trim().replace(/^\/|\/$/g, '') + '/';
     }
     throw new Error('暂未找到该词的音标，可稍后重试');
+  }
+  function datamusePhonetic(raw, word) {
+    const records = Array.isArray(raw) ? raw.filter(item => normalize(item?.word) === word && Array.isArray(item?.tags)) : [];
+    for (const item of records) {
+      const value = item.tags.filter(tag => typeof tag === 'string' && tag.startsWith('ipa_pron:'))
+        .map(tag => tag.slice(9).trim()).find(value => value && value.length <= 148);
+      if (value) return '/' + value.replace(/^\/|\/$/g, '') + '/';
+    }
+    throw new Error('暂未找到该词的备用 IPA 音标，可稍后重试');
+  }
+  function youdaoTranslation(raw, word) {
+    const definitions = youdaoRecords(raw, word)
+      .flatMap(item => Array.isArray(item.trs) ? item.trs : [])
+      .flatMap(item => Array.isArray(item?.tr) ? item.tr : [])
+      .flatMap(item => Array.isArray(item?.l?.i) ? item.l.i : [])
+      .filter(value => typeof value === 'string' && value.trim() && /[\u3400-\u9fff]/.test(value))
+      .map(value => value.trim());
+    const translation = [...new Set(definitions)].slice(0, 6).join('\n');
+    if (!translation) throw new Error('暂未找到该词的中文释义，可稍后重试');
+    if (translation.length > 16000) throw new Error('中文响应过长，请稍后重试');
+    return translation;
   }
   const validWordForms = value => value && typeof value === 'object' &&
     typeof value.base === 'string' && !!value.base && normalize(value.base) === value.base &&
@@ -2372,7 +2397,8 @@ SOFTWARE.
       });
       if (item.translation !== undefined && (!string(item.translation, 16000) || !timestamp(item.translatedAt))) fail();
       if (item.translationSource !== undefined && (!item.translation || !string(item.translationSource, 8000))) fail();
-      if (item.phoneticSource !== undefined && (item.phoneticSource !== 'youdao' || !item.phonetic.trim())) fail();
+      if (item.translationProvider !== undefined && (!item.translation || !['mymemory', 'youdao'].includes(item.translationProvider))) fail();
+      if (item.phoneticSource !== undefined && (!['youdao', 'datamuse'].includes(item.phoneticSource) || !item.phonetic.trim())) fail();
       if (item.wordForms !== undefined && !validWordForms(item.wordForms)) fail();
       return {
         word: item.word, fetchedAt: item.fetchedAt, phonetic: item.phonetic.trim(), meanings,
@@ -2384,7 +2410,8 @@ SOFTWARE.
         license: { name: text(item.license?.name, 120), url: safeUrl(item.license?.url) },
         ...(item.translation ? {
           translation: item.translation, translatedAt: item.translatedAt,
-          ...(item.translationSource ? { translationSource: item.translationSource } : {})
+          ...(item.translationSource ? { translationSource: item.translationSource } : {}),
+          ...(item.translationProvider ? { translationProvider: item.translationProvider } : {})
         } : {})
       };
     });
@@ -2473,10 +2500,12 @@ SOFTWARE.
       delete combined.translation;
       delete combined.translatedAt;
       delete combined.translationSource;
+      delete combined.translationProvider;
       words.set(item.word, {
         ...combined, ...(translation ? {
           translation: translation.translation, translatedAt: translation.translatedAt,
-          ...(translation.translationSource ? { translationSource: translation.translationSource } : {})
+          ...(translation.translationSource ? { translationSource: translation.translationSource } : {}),
+          ...(translation.translationProvider ? { translationProvider: translation.translationProvider } : {})
         } : {})
       });
     }
@@ -2512,7 +2541,7 @@ SOFTWARE.
   const ordered = (events, oldest = false) => [...events].sort((a, b) =>
     (oldest ? 1 : -1) * (a.at - b.at || a.id.localeCompare(b.id)));
   if (typeof window === 'undefined') {
-    module.exports = { normalize, schedule, scheduleAll, migrateStudy, createStudy, reviewInterval, csv, dictionary, validateBackup, mergeBackup, ordered, audioUrl, translationSource, translationChunks, youdaoPhonetic, youdaoWordForms,
+    module.exports = { normalize, schedule, scheduleAll, migrateStudy, createStudy, reviewInterval, csv, dictionary, validateBackup, mergeBackup, ordered, audioUrl, translationSource, translationChunks, youdaoTranslation, youdaoPhonetic, datamusePhonetic, youdaoWordForms,
       dayStart, nextDayStart, availableAt, planReview, retentionStats, contextParts, isLeech };
     return;
   }
@@ -2641,6 +2670,7 @@ SOFTWARE.
     .spell{font-weight:650}.spell.ok{color:var(--accent)}.spell.bad,.leech{color:var(--error)}
     .review-actions{justify-content:center;margin-top:14px}.review .actions{justify-content:center}
     .setting input.number{width:80px;height:auto;text-align:right;border:1px solid var(--line)}
+    .fallback-setting{flex-wrap:wrap}.fallback-setting select{max-width:100%}
     .lookup-back{min-width:0;max-width:100%;overflow:hidden;text-overflow:ellipsis}.lookup-bar{margin-bottom:16px;gap:8px}
   `;
   const launcher = button('L', () => openStudio(), 'launcher', '打开 Lexi 学习中心');
@@ -2946,7 +2976,8 @@ SOFTWARE.
           if (entry?.translation && translationMatches(entry, fresh)) {
             Object.assign(fresh, {
               translation: entry.translation, translatedAt: entry.translatedAt,
-              ...(entry.translationSource ? { translationSource: entry.translationSource } : {})
+              ...(entry.translationSource ? { translationSource: entry.translationSource } : {}),
+              ...(entry.translationProvider ? { translationProvider: entry.translationProvider } : {})
             });
           }
           entry = fresh;
@@ -3025,30 +3056,53 @@ SOFTWARE.
       if (!translations.has(key)) {
         const pending = (async () => {
           const translated = [];
+          let primaryError;
           for (const chunk of translationChunks(source)) {
             if (!get('word:' + entry.word)) throw new Error('词条已删除，请重新查询');
-            const result = await request('https://api.mymemory.translated.net/get?langpair=en%7Czh-CN&q=' + encodeURIComponent(chunk));
-            const value = result?.responseData?.translatedText;
-            if (Number(result?.responseStatus) !== 200 || result?.quotaFinished || typeof value !== 'string' || !value.trim()) {
-              throw new Error('中文服务暂不可用或额度已用尽，可稍后重试');
+            try {
+              const result = await request('https://api.mymemory.translated.net/get?langpair=en%7Czh-CN&q=' + encodeURIComponent(chunk));
+              const value = result?.responseData?.translatedText;
+              if (Number(result?.responseStatus) !== 200 || result?.quotaFinished || typeof value !== 'string' || !value.trim()) {
+                throw new Error('中文服务暂不可用或额度已用尽，可稍后重试');
+              }
+              translated.push(value.trim());
+            } catch (error) {
+              primaryError = error;
+              break;
             }
-            translated.push(value.trim());
+          }
+          let translation = translated.join('\n');
+          let translationProvider = 'mymemory';
+          if (!primaryError && translation.length > 16000) primaryError = new Error('中文响应过长，请稍后重试');
+          if (primaryError) {
+            if (cleanSettings(get('settings', {})).translationFallback !== 'youdao') throw new Error('MyMemory：' + primaryError.message);
+            const current = get('word:' + entry.word);
+            if (!current) throw new Error('词条已删除，请重新查询');
+            if (translationSource(current) !== source) throw new Error('词典释义已更新，请重新获取中文');
+            target.replaceChildren(el('p', 'notice', `MyMemory：${primaryError.message}；正在尝试有道备用释义…`));
+            try {
+              translation = youdaoTranslation(await requestYoudao(entry.word), entry.word);
+              translationProvider = 'youdao';
+            } catch (error) {
+              throw new Error(`MyMemory：${primaryError.message}；有道词典：${error.message}`);
+            }
           }
           const current = get('word:' + entry.word);
           if (!current) throw new Error('词条已删除，请重新查询');
           if (translationSource(current) !== source) throw new Error('词典释义已更新，请重新获取中文');
-          const translation = translated.join('\n');
-          if (translation.length > 16000) throw new Error('中文响应过长，请稍后重试');
-          const updated = { ...current, translation, translationSource: source, translatedAt: Date.now() };
+          const updated = { ...current, translation, translationProvider, translatedAt: Date.now() };
+          delete updated.translationSource;
+          if (translationProvider === 'mymemory') updated.translationSource = source;
           put('word:' + entry.word, updated);
           notify();
-          return updated;
+          return { updated, primaryError };
         })();
         translations.set(key, pending);
         pending.finally(() => translations.delete(key)).catch(() => { });
       }
-      const updated = await translations.get(key);
+      const { updated, primaryError } = await translations.get(key);
       target.replaceChildren(translationBlock(updated));
+      if (primaryError) target.append(el('p', 'notice', `MyMemory：${primaryError.message}；已使用有道备用释义。`));
     } catch (error) {
       target.replaceChildren();
       if (entry.translation) target.append(translationBlock(entry));
@@ -3058,7 +3112,9 @@ SOFTWARE.
   function translationBlock(entry) {
     const node = el('div', 'translation');
     node.append(el('div', 'translation-copy', entry.translation),
-      el('div', 'meta', entry.translationSource ? '多条释义 · MyMemory 机器翻译' : 'MyMemory 机器翻译'));
+      el('div', 'meta', entry.translationProvider === 'youdao' ? '有道词典 · 中文备用释义（不与英文逐条对应）'
+        : entry.translationSource ? '多条释义 · MyMemory 机器翻译' : 'MyMemory 机器翻译'));
+    if (entry.translationProvider === 'youdao') node.append(link('有道词典', 'https://www.youdao.com/result?word=' + encodeURIComponent(entry.word) + '&lang=en'));
     return node;
   }
   function toggleStar(word, rerender = true) {
@@ -3160,29 +3216,50 @@ SOFTWARE.
   function phoneticBlock(entry) {
     const node = el('div', 'phonetic');
     const show = current => {
-      node.title = '';
+      node.title = current.phoneticSource === 'datamuse' ? 'Datamuse 美式参考音标；罕见词可能由服务按拼写推测，并非人工校验。' : '';
       node.replaceChildren(el('span', '', current.phonetic), button('▷', () => speak(entry), 'icon', '播放单词发音'));
       if (current.phoneticSource === 'youdao') node.append(link('有道音标', 'https://www.youdao.com/result?word=' + encodeURIComponent(entry.word) + '&lang=en'));
+      if (current.phoneticSource === 'datamuse') node.append(link('Datamuse 音标（参考）', 'https://www.datamuse.com/api/'));
     };
     async function load() {
       show(entry.phonetic.trim() ? entry : { ...entry, phonetic: '正在获取有道音标…' });
       try {
         if (!pronunciations.has(entry.word)) {
           const pending = (async () => {
-            const raw = await requestYoudao(entry.word);
-            const phonetic = youdaoPhonetic(raw, entry.word);
+            let phonetic;
+            let phoneticSource = 'youdao';
+            let primaryError;
+            try {
+              phonetic = youdaoPhonetic(await requestYoudao(entry.word), entry.word);
+            } catch (error) {
+              primaryError = error;
+              const current = get('word:' + entry.word);
+              if (!current) throw new Error('词条已删除，请重新查询');
+              if (current.phonetic.trim() || cleanSettings(get('settings', {})).phoneticFallback !== 'datamuse') throw error;
+              show({ ...entry, phonetic: '正在获取备用音标…' });
+              node.title = '有道：' + error.message;
+              try {
+                phonetic = datamusePhonetic(await request('https://api.datamuse.com/words?sp='
+                  + encodeURIComponent(entry.word) + '&md=r&ipa=1&max=1'), entry.word);
+                phoneticSource = 'datamuse';
+              } catch (fallbackError) {
+                throw new Error(`有道：${error.message}；Datamuse：${fallbackError.message}`);
+              }
+            }
             const current = get('word:' + entry.word);
             if (!current) throw new Error('词条已删除，请重新查询');
-            if (current.phonetic.trim() && current.phoneticSource === 'youdao') return current;
-            const updated = { ...current, phonetic, phoneticSource: 'youdao' };
+            if (current.phonetic.trim() && (current.phoneticSource === 'youdao' || phoneticSource === 'datamuse')) return { updated: current, primaryError };
+            const updated = { ...current, phonetic, phoneticSource };
             put('word:' + entry.word, updated);
             notify();
-            return updated;
+            return { updated, primaryError };
           })();
           pronunciations.set(entry.word, pending);
           pending.finally(() => pronunciations.delete(entry.word)).catch(() => { });
         }
-        show(await pronunciations.get(entry.word));
+        const { updated, primaryError } = await pronunciations.get(entry.word);
+        show(updated);
+        if (primaryError && updated.phoneticSource === 'datamuse') node.title = `有道：${primaryError.message}；已使用备用音标。` + node.title;
       } catch (error) {
         const current = get('word:' + entry.word) || entry;
         show(current.phonetic.trim() ? current : { ...current, phonetic: '音标暂不可用' });
@@ -3191,7 +3268,7 @@ SOFTWARE.
         node.title = error.message;
       }
     }
-    if (entry.phonetic.trim() && entry.phoneticSource === 'youdao') show(entry); else load();
+    if (entry.phonetic.trim() && ['youdao', 'datamuse'].includes(entry.phoneticSource)) show(entry); else load();
     return node;
   }
   function wordDetail(entry, event = null, allowStar = true) {
@@ -3211,7 +3288,7 @@ SOFTWARE.
     node.append(senses(entry));
     const chinese = el('div');
     node.append(chinese);
-    if (entry.translation && entry.translationSource === translationSource(entry)) chinese.append(translationBlock(entry));
+    if (entry.translation && (entry.translationProvider === 'youdao' || entry.translationSource === translationSource(entry))) chinese.append(translationBlock(entry));
     else translate(entry, chinese);
     if (event?.context || event?.sourceUrl) {
       const context = el('details', 'context');
@@ -3627,7 +3704,7 @@ SOFTWARE.
       if (!recall) {
         const chinese = el('div');
         back.append(chinese);
-        if (wordEntry.translation && wordEntry.translationSource === translationSource(wordEntry)) chinese.append(translationBlock(wordEntry));
+        if (wordEntry.translation && (wordEntry.translationProvider === 'youdao' || wordEntry.translationSource === translationSource(wordEntry))) chinese.append(translationBlock(wordEntry));
         else translate(wordEntry, chinese);
       }
       const actions = el('div', 'actions');
@@ -3697,6 +3774,13 @@ SOFTWARE.
   }
   function renderSettings() {
     view.append(el('h1', 'heading', '设置与数据'), el('p', 'subheading', '跨网站共用，数据保存在本机油猴存储'));
+    const save = (key, value, revert, resetReview = true) => {
+      try {
+        const next = cleanSettings({ ...get('settings', {}), [key]: value });
+        put('settings', next); settings = next; notify();
+        if (resetReview) { round = null; answer = null; }
+      } catch (error) { revert(); showError(error); }
+    };
     const preferences = el('section', 'section');
     preferences.append(el('h3', '', '阅读偏好'));
     for (const [key, label] of [['auto', '自动划词查询'], ['autoBook', '查词直接进入生词本'], ['context', '保存阅读上下文与来源（仅本地）']]) {
@@ -3713,12 +3797,6 @@ SOFTWARE.
     preferences.append(el('p', 'notice', '外观自动跟随系统深浅色。发音仅在点击后播放。'));
     const study = el('section', 'section');
     study.append(el('h3', '', '复习'));
-    const save = (key, value, revert) => {
-      try {
-        settings = cleanSettings({ ...get('settings', {}), [key]: value });
-        put('settings', settings); notify(); round = null; answer = null;
-      } catch (error) { revert(); showError(error); }
-    };
     const limitRow = el('label', 'setting');
     const limit = el('input', 'number');
     Object.assign(limit, { type: 'number', min: '0', max: '200', step: '1', value: String(settings.newPerDay) });
@@ -3744,6 +3822,29 @@ SOFTWARE.
     reverseRow.append(el('span', '', '加入反向卡（看中文想英文）'), reverse);
     study.append(limitRow, retentionRow, reverseRow, el('p', 'notice',
       '每天凌晨 4:00 开始新的学习日。记得率越高，间隔越短、复习越多，只影响之后的安排。反向卡在该词进入长期复习后加入，计入新词上限，进度独立保存；关闭后暂停反向卡，进度保留。'));
+    const chinese = el('section', 'section');
+    chinese.append(el('h3', '', '中文释义'));
+    const fallbackRow = el('label', 'setting fallback-setting');
+    const fallback = el('select', 'translation-fallback');
+    for (const [value, label] of [['youdao', '有道词典（默认）'], ['none', '关闭备用来源']]) {
+      const option = el('option', '', label); option.value = value; fallback.append(option);
+    }
+    fallback.value = settings.translationFallback;
+    fallback.addEventListener('change', () => save('translationFallback', fallback.value, () => { fallback.value = settings.translationFallback; }, false));
+    fallbackRow.append(el('span', '', '失败时的备用来源（fallback）'), fallback);
+    chinese.append(fallbackRow, el('p', 'notice', '优先用 MyMemory 翻译英文释义；限流、额度用尽、超时或响应异常时，自动尝试有道中文词典释义（不与英文逐条对应）。成功后缓存并标注来源。关闭仅停止之后的备用请求，不删除已有中文。'));
+    const phonetics = el('section', 'section');
+    phonetics.append(el('h3', '', '音标'));
+    const phoneticRow = el('label', 'setting fallback-setting');
+    const phoneticFallback = el('select', 'phonetic-fallback');
+    for (const [value, label] of [['datamuse', 'Datamuse（默认）'], ['none', '关闭额外备用来源']]) {
+      const option = el('option', '', label); option.value = value; phoneticFallback.append(option);
+    }
+    phoneticFallback.value = settings.phoneticFallback;
+    phoneticFallback.addEventListener('change', () => save('phoneticFallback', phoneticFallback.value, () => { phoneticFallback.value = settings.phoneticFallback; }, false));
+    phoneticRow.append(el('span', '', '缺少音标时的备用来源（fallback）'), phoneticFallback);
+    phonetics.append(phoneticRow, el('p', 'notice', '优先获取有道音标，失败时保留主词典音标；两者都没有时，自动向 Datamuse 查询当前词的美式参考 IPA，不使用原形或相近词。成功后缓存并标注来源。罕见词可能由服务按拼写推测；关闭只停止新增备用请求。'),
+      el('p', 'notice', 'Datamuse 官方公告自 2027-02-01 起要求 API key；本版未配置 key，届时该备用接口可能不可用。仍保留缓存、主词典音标及浏览器朗读。'));
     const data = el('section', 'section');
     data.append(el('h3', '', '备份与迁移'));
     const actions = el('div', 'actions');
@@ -3754,10 +3855,11 @@ SOFTWARE.
     actions.append(button('导入 JSON 合并', () => upload.click()));
     data.append(actions, upload, el('p', 'notice', 'JSON 包含完整历史与复习进度，CSV 便于表格查看。导入保留当前设置，按时间合并。'));
     const privacy = el('section', 'section');
-    privacy.append(el('h3', '', '服务与隐私'), el('p', 'notice', '查词会向 Free Dictionary API 发送当前单词，并自动向 MyMemory 发送最多 6 条词典释义以补全中文；缺少音标时向有道词典发送当前单词补全。成功后本地保存，再次打开直接读取。网页上下文不会发送。在线音频和浏览器朗读可能联网。服务可用性、内容与额度由提供方决定。'),
+    privacy.append(el('h3', '', '服务与隐私'), el('p', 'notice', '查词会向 Free Dictionary API 发送当前单词，并自动向 MyMemory 发送最多 6 条词典释义以补全中文；获取音标、词形或启用中文备用来源后切换到有道时，向有道词典发送单词，词形补全可能另查原形。启用额外音标备用来源后，在有道失败且主词典无音标时向 Datamuse 发送当前单词。成功后本地保存，再次打开直接读取。网页上下文不会发送。在线音频和浏览器朗读可能联网。服务可用性、内容与额度由提供方决定。'),
       link('Free Dictionary API', 'https://dictionaryapi.dev/'), document.createTextNode(' · '),
       link('MyMemory', 'https://mymemory.translated.net/doc/spec.php'), document.createTextNode(' · '),
-      link('有道词典', 'https://www.youdao.com/'));
+      link('有道词典', 'https://www.youdao.com/'), document.createTextNode(' · '),
+      link('Datamuse', 'https://www.datamuse.com/api/'));
     const cleanup = el('section', 'section');
     cleanup.append(el('h3', '', '清理数据'));
     const cleanActions = el('div', 'actions');
@@ -3773,7 +3875,7 @@ SOFTWARE.
       notify(); render(); message('Lexi 数据已删除');
     }, 'button danger'));
     cleanup.append(cleanActions);
-    view.append(preferences, study, data, privacy, cleanup);
+    view.append(preferences, study, chinese, phonetics, data, privacy, cleanup);
   }
 
   let selectionTimer;
