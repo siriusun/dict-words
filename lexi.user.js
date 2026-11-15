@@ -2089,9 +2089,10 @@ SOFTWARE.
   };
   const GRADES = { again: 1, hard: 2, good: 3, easy: 4 };
   const STUDY_STATES = ['新词', '学习中', '间隔复习', '重新学习'];
-  const DEFAULTS = { auto: true, autoBook: false, context: false, newPerDay: 20, retention: 0.9, reverse: false, phoneticFallback: 'datamuse' };
+  const DEFAULTS = { auto: true, autoBook: false, context: false, readingMarkerSeconds: 3, newPerDay: 20, retention: 0.9, reverse: false, phoneticFallback: 'datamuse' };
   const cleanSettings = raw => {
     const value = { ...DEFAULTS, ...(raw && typeof raw === 'object' ? raw : {}) };
+    if (!Number.isInteger(value.readingMarkerSeconds) || value.readingMarkerSeconds < 0 || value.readingMarkerSeconds > 300) value.readingMarkerSeconds = DEFAULTS.readingMarkerSeconds;
     if (!Number.isInteger(value.newPerDay) || value.newPerDay < 0 || value.newPerDay > 200) value.newPerDay = DEFAULTS.newPerDay;
     if (!RETENTIONS.includes(value.retention)) value.retention = DEFAULTS.retention;
     delete value.translationFallback;
@@ -2809,7 +2810,9 @@ SOFTWARE.
     .spelling{display:block;width:min(320px,100%);margin:6px auto 14px;text-align:center;font:20px Georgia,serif;background:var(--surface);border:1px solid var(--line)}
     .spell{font-weight:650}.spell.ok{color:var(--accent)}.spell.bad,.leech{color:var(--error)}
     .review-actions{justify-content:center;margin-top:14px}.review .actions{justify-content:center}
-    .setting input.number{width:80px;height:auto;text-align:right;border:1px solid var(--line)}
+    .setting input.number,.setting input.reading-marker-seconds{width:80px;height:auto;text-align:right;border:1px solid var(--line)}
+    .reading-marks{pointer-events:none;position:fixed;inset:0}.reading-mark{position:absolute;border-radius:3px}
+    .reading-return{pointer-events:auto;position:fixed;left:12px;bottom:24px;z-index:1;box-shadow:0 5px 25px #0002}
     .fallback-setting{flex-wrap:wrap}.fallback-setting select{max-width:100%}
     .lookup-back{min-width:0;max-width:100%;overflow:hidden;text-overflow:ellipsis}.lookup-bar{margin-bottom:16px;gap:8px}
     .scope-menu{position:relative}.scope-menu summary{list-style:none;cursor:pointer}.scope-menu summary::-webkit-details-marker{display:none}
@@ -2868,10 +2871,20 @@ SOFTWARE.
   toast.setAttribute('role', 'status');
   toast.setAttribute('aria-live', 'polite');
   toast.hidden = true;
+  const readingMarks = el('div', 'reading-marks');
+  readingMarks.setAttribute('aria-hidden', 'true');
+  const readingReturn = button('回到原文', returnToReading, 'button reading-return');
+  readingReturn.hidden = true;
+  const readingStyle = el('style');
+  const readingHighlightName = 'lexi-reading-origin';
+  let readingMarker = null;
+  let readingMarkerTimer;
+  let readingFadeTimer;
+  const readingObserver = typeof MutationObserver === 'function' ? new MutationObserver(updateReadingMarker) : null;
   main.append(top, view);
   studio.append(sidebar, main);
   overlay.append(studio);
-  app.append(launcher, popover, overlay, toast);
+  app.append(readingMarks, launcher, readingReturn, popover, overlay, toast);
   shadow.append(style, app);
   let toastTimer;
   function message(value) {
@@ -2884,6 +2897,116 @@ SOFTWARE.
     const value = error?.message || '操作失败，请重试';
     if (host.isConnected) message(value); else alert(value);
   };
+  function clearReadingMarker() {
+    clearTimeout(readingMarkerTimer);
+    clearTimeout(readingFadeTimer);
+    readingObserver?.disconnect();
+    if (readingMarker?.native) window.CSS.highlights.delete(readingHighlightName);
+    readingMarker = null;
+    readingStyle.remove();
+    readingMarks.replaceChildren();
+    readingReturn.hidden = true;
+  }
+  function paintReadingMarker(opacity) {
+    if (!readingMarker) return;
+    const color = `rgba(245,185,45,${opacity})`;
+    if (readingMarker.native) readingStyle.textContent = `::highlight(${readingHighlightName}){background-color:${color}}`;
+    else {
+      readingMarker.color = color;
+      for (const mark of readingMarks.children) mark.style.backgroundColor = color;
+    }
+  }
+  function updateReadingMarker() {
+    if (!readingMarker) return;
+    const { range, text: original, native } = readingMarker;
+    if (!range.startContainer.isConnected || !range.endContainer.isConnected || range.collapsed || range.toString() !== original) {
+      clearReadingMarker();
+      return;
+    }
+    let bounds = { left: 0, top: 0, right: window.innerWidth, bottom: window.innerHeight };
+    for (let node = range.startContainer.parentElement; node; node = node.parentElement) {
+      const css = getComputedStyle(node);
+      const rect = node.getBoundingClientRect();
+      if (/(auto|scroll|hidden|clip)/.test(css.overflowX)) {
+        bounds.left = Math.max(bounds.left, rect.left);
+        bounds.right = Math.min(bounds.right, rect.right);
+      }
+      if (/(auto|scroll|hidden|clip)/.test(css.overflowY)) {
+        bounds.top = Math.max(bounds.top, rect.top);
+        bounds.bottom = Math.min(bounds.bottom, rect.bottom);
+      }
+    }
+    const rects = [...range.getClientRects()].map(rect => ({
+      left: Math.max(bounds.left, rect.left), top: Math.max(bounds.top, rect.top),
+      right: Math.min(bounds.right, rect.right), bottom: Math.min(bounds.bottom, rect.bottom)
+    })).filter(rect => rect.right > rect.left && rect.bottom > rect.top);
+    readingReturn.hidden = !overlay.hidden || rects.length > 0;
+    if (native) return;
+    readingMarks.replaceChildren(...rects.map(rect => {
+      const mark = el('span', 'reading-mark');
+      Object.assign(mark.style, {
+        left: rect.left + 'px', top: rect.top + 'px', width: (rect.right - rect.left) + 'px',
+        height: (rect.bottom - rect.top) + 'px', backgroundColor: readingMarker.color
+      });
+      return mark;
+    }));
+  }
+  function holdReadingMarker() {
+    if (!readingMarker) return;
+    clearTimeout(readingMarkerTimer);
+    clearTimeout(readingFadeTimer);
+    paintReadingMarker(0.3);
+    updateReadingMarker();
+  }
+  function captureReadingMarker(range) {
+    clearReadingMarker();
+    const native = Boolean(window.CSS?.highlights && typeof window.Highlight === 'function');
+    readingMarker = { range: range.cloneRange(), text: range.toString(), native };
+    if (native) {
+      window.CSS.highlights.set(readingHighlightName, new window.Highlight(readingMarker.range));
+      document.documentElement.append(readingStyle);
+    }
+    holdReadingMarker();
+    readingObserver?.observe(document.documentElement, { childList: true, subtree: true, characterData: true });
+  }
+  function releaseReadingMarker() {
+    if (!readingMarker) return;
+    const duration = cleanSettings(get('settings', {})).readingMarkerSeconds * 1000;
+    if (!duration) { clearReadingMarker(); return; }
+    holdReadingMarker();
+    paintReadingMarker(0.5);
+    const expires = Date.now() + duration;
+    const fade = () => {
+      if (!readingMarker) return;
+      paintReadingMarker(0.5 * Math.max(0, Math.min(1, (expires - Date.now()) / 240)));
+      readingFadeTimer = setTimeout(fade, 40);
+    };
+    readingFadeTimer = setTimeout(fade, Math.max(0, duration - 240));
+    readingMarkerTimer = setTimeout(clearReadingMarker, duration);
+  }
+  function returnToReading() {
+    updateReadingMarker();
+    if (!readingMarker) { message('原文内容已变化，无法定位查词位置'); return; }
+    const { range } = readingMarker;
+    const element = range.startContainer.parentElement;
+    element.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'instant' });
+    // Center the actual word even inside a long paragraph or nested reading pane.
+    for (let node = element; node && node !== document.body && node !== document.documentElement; node = node.parentElement) {
+      const css = getComputedStyle(node);
+      const bounds = node.getBoundingClientRect(), rect = range.getBoundingClientRect();
+      if (/(auto|scroll)/.test(css.overflowY)) node.scrollTop += rect.top + rect.height / 2 - bounds.top - bounds.height / 2;
+      if (/(auto|scroll)/.test(css.overflowX)) node.scrollLeft += rect.left + rect.width / 2 - bounds.left - bounds.width / 2;
+    }
+    const rect = range.getBoundingClientRect();
+    window.scrollBy({
+      top: rect.top + rect.height / 2 - window.innerHeight / 2,
+      left: rect.left < 0 || rect.right > window.innerWidth ? rect.left + rect.width / 2 - window.innerWidth / 2 : 0,
+      behavior: 'instant'
+    });
+    if (!popover.hidden) closePopover();
+    else releaseReadingMarker();
+    updateReadingMarker();
+  }
   function positionLauncher(position = launcherPosition) {
     if (!position) {
       launcher.style.left = launcher.style.top = launcher.style.right = launcher.style.bottom = '';
@@ -2948,12 +3071,17 @@ SOFTWARE.
     if (ownSpeech) window.speechSynthesis?.cancel();
     ownSpeech = false;
   }
-  function closePopover() { resetInternalLookup(); cancelInternalSelection(); popover.hidden = true; stopQuery(); stopAudio(); }
+  function closePopover(keepReading = false) {
+    const wasOpen = !popover.hidden;
+    resetInternalLookup(); cancelInternalSelection(); popover.hidden = true; stopQuery(); stopAudio();
+    if (wasOpen && !keepReading) releaseReadingMarker();
+  }
   function openStudio(nextScreen) {
     returnFocus = shadow.activeElement || document.activeElement;
-    closePopover();
+    closePopover(true);
     if (nextScreen) screen = nextScreen;
     overlay.hidden = false;
+    holdReadingMarker();
     render();
     if (nextScreen === 'settings' || nextScreen === 'sites') view.scrollTop = 0;
     if (!studio.contains(shadow.activeElement)) input.focus();
@@ -2962,6 +3090,7 @@ SOFTWARE.
     resetInternalLookup();
     cancelInternalSelection();
     overlay.hidden = true;
+    releaseReadingMarker();
     clearTimeout(reviewTimer);
     stopQuery();
     stopAudio();
@@ -2976,6 +3105,7 @@ SOFTWARE.
     clearTimeout(toastTimer);
     clearTimeout(reviewTimer);
     closePopover();
+    clearReadingMarker();
     stopAudio();
     for (const request of requests) request.abort();
     toast.hidden = true;
@@ -4143,7 +4273,20 @@ SOFTWARE.
       });
       row.append(el('span', '', label), toggle); preferences.append(row);
     }
-    preferences.append(el('p', 'notice', '外观自动跟随系统深浅色。发音仅在点击后播放。'));
+    const markerRow = el('label', 'setting');
+    const markerSeconds = el('input', 'reading-marker-seconds');
+    Object.assign(markerSeconds, { type: 'number', min: '0', max: '300', step: '1', value: String(settings.readingMarkerSeconds) });
+    markerSeconds.addEventListener('change', () => {
+      const value = Number(markerSeconds.value);
+      if (!markerSeconds.value.trim() || !Number.isInteger(value) || value < 0 || value > 300) {
+        markerSeconds.value = String(settings.readingMarkerSeconds);
+        message('原文高亮保留时间需为 0–300 的整数秒');
+        return;
+      }
+      save('readingMarkerSeconds', value, () => { markerSeconds.value = String(settings.readingMarkerSeconds); }, false);
+    });
+    markerRow.append(el('span', '', '关闭查词后原文高亮保留时间（秒）'), markerSeconds);
+    preferences.append(markerRow, el('p', 'notice', '查词期间持续标记原文，关闭后按设定时间淡出，默认 3 秒；0 秒表示关闭后立即移除。原词滚出屏幕时可点击“回到原文”，不会自动滚动页面。外观跟随系统深浅色，发音仅在点击后播放。'));
     const study = el('section', 'section');
     study.append(el('h3', '', '复习'));
     const limitRow = el('label', 'setting');
@@ -4247,7 +4390,13 @@ SOFTWARE.
       if (anchor?.closest('input,textarea,[contenteditable]:not([contenteditable="false"])')) return;
       const raw = selection.toString();
       const word = normalize(raw);
-      if (!word || (word === lastSelection && Date.now() - lastSelectionAt < 1200)) return;
+      if (!word) return;
+      const range = selection.getRangeAt(0);
+      if (word === lastSelection && Date.now() - lastSelectionAt < 1200) {
+        captureReadingMarker(range);
+        if (popover.hidden) releaseReadingMarker();
+        return;
+      }
       lastSelection = word; lastSelectionAt = Date.now();
       let context = null;
       if (settings.context) {
@@ -4260,15 +4409,18 @@ SOFTWARE.
           title: text(document.title, 120), sourceUrl: safeUrl(url.href)
         };
       }
-      lookup(word, selection.getRangeAt(0).getBoundingClientRect(), context).catch(showError);
+      captureReadingMarker(range);
+      lookup(word, range.getBoundingClientRect(), context).catch(showError);
     }, 220);
   });
   window.addEventListener('resize', () => {
     finishLauncherDrag();
     positionLauncher();
     cancelInternalSelection();
+    updateReadingMarker();
     if (!popover.hidden) positionPopover();
   });
+  document.addEventListener('scroll', updateReadingMarker, true);
   document.addEventListener('pointerdown', event => {
     if (!event.composedPath().includes(host)) {
       internalPointerDown = false;

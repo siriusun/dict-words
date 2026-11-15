@@ -82,6 +82,7 @@ function setup(phonetic = '/test/', phoneticSource = 'youdao', options = {}) {
   window.getSelection = () => null;
   const prefix = 'lexi:v1:';
   const storage = new Map();
+  if (options.settings !== undefined) storage.set(prefix + 'settings', options.settings);
   if (options.launcherPosition !== undefined) storage.set(prefix + 'launcher-position', options.launcherPosition);
   const menus = new Map();
   const valueListeners = new Map();
@@ -146,11 +147,17 @@ const openReview = async app => {
 function selectWebsite(app, word) {
   const node = new app.Element('p');
   node.textContent = word;
+  const text = { isConnected: true, parentElement: node };
+  const range = { startContainer: text, endContainer: text, collapsed: false,
+    toString: () => word, getBoundingClientRect: () => node.getBoundingClientRect() };
+  range.getClientRects = () => [range.getBoundingClientRect()];
+  range.cloneRange = () => ({ ...range });
   app.context.window.getSelection = () => ({
     isCollapsed: false, rangeCount: 1, anchorNode: { parentElement: node },
-    toString: () => word, getRangeAt: () => ({ getBoundingClientRect: () => node.getBoundingClientRect() })
+    toString: () => word, getRangeAt: () => range
   });
   app.context.document.listeners.pointerup.listener({ button: 0, target: node, composedPath: () => [node] });
+  return { node, range };
 }
 
 function launcherPointer(app, type, clientX, clientY, extra = {}) {
@@ -1300,14 +1307,9 @@ test('same-word selection preserves the review answer and keeps grading availabl
 
 test('same-word selection in the website card does not open a child lookup', async () => {
   const app = setup();
-  const { shadow, context } = app;
+  const { shadow } = app;
   await press(app, 'Escape');
-  const node = new app.Element('p');
-  const range = { startContainer: node, endContainer: node, collapsed: false,
-    toString: () => 'alpha', getBoundingClientRect: () => node.getBoundingClientRect() };
-  const selection = setSelection(app, range);
-  selection.toString = range.toString;
-  context.document.listeners.pointerup.listener({ button: 0, target: node, composedPath: () => [node] });
+  selectWebsite(app, 'alpha');
   app.advance(250);
   await new Promise(setImmediate);
   const popover = shadow.querySelector('.popover');
@@ -1318,6 +1320,148 @@ test('same-word selection in the website card does not open a child lookup', asy
   assert.ok(!popover.querySelector('.lookup-back'));
   assert.equal(popover.querySelector('article'), original);
   assert.equal(historyOf(app).length, 4, 'only the website lookup adds history');
+});
+
+test('original reading marker survives lost selection, nested lookup and studio, then expires at the configured duration', async () => {
+  const app = setup('/test/', 'youdao', { open: false, settings: { readingMarkerSeconds: 7 } });
+  selectWebsite(app, 'alpha');
+  app.advance(220);
+  await new Promise(setImmediate);
+  const popover = app.shadow.querySelector('.popover');
+  const marks = app.shadow.querySelector('.reading-marks');
+  assert.equal(marks.children.length, 1);
+  app.context.window.getSelection = () => null;
+  await app.click(popover.querySelector('.detail-star'));
+  assert.equal(marks.children.length, 1, 'interacting with the card does not lose the origin');
+  await selectInside(app, popover.querySelector('.definition'), 'beta');
+  assert.equal(popover.querySelector('.word').textContent, 'beta');
+  assert.equal(marks.children.length, 1, 'child lookup keeps the original webpage marker');
+  await app.click(app.shadow.querySelector('.launcher'));
+  app.advance(8000);
+  assert.equal(marks.children.length, 1, 'the studio is still part of the lookup');
+  await app.click(app.shadow.querySelectorAll('button').find(node => node.attributes['aria-label'] === '关闭学习中心'));
+  app.advance(6999);
+  assert.equal(marks.children.length, 1);
+  app.advance(1);
+  assert.equal(marks.children.length, 0);
+  assert.equal(app.shadow.querySelector('.reading-return').hidden, true);
+});
+
+test('new webpage selections replace old markers and cancelled expiry timers cannot remove the new origin', async () => {
+  const app = setup('/test/', 'youdao', { open: false });
+  const baselineTimers = app.timers.size;
+  selectWebsite(app, 'alpha');
+  app.advance(220);
+  await new Promise(setImmediate);
+  await app.click(findButton(app.shadow.querySelector('.popover'), '×'));
+  app.advance(1000);
+  const { node } = selectWebsite(app, 'beta');
+  node.getBoundingClientRect = () => ({ left: 210, right: 280, top: 90, bottom: 110, width: 70, height: 20 });
+  app.advance(220);
+  await new Promise(setImmediate);
+  app.advance(5000);
+  const marks = app.shadow.querySelector('.reading-marks');
+  assert.equal(marks.children.length, 1);
+  assert.equal(marks.children[0].style.left, '210px');
+  await app.menus.get('禁用此页面')();
+  assert.equal(marks.children.length, 0, 'disabling the page immediately clears the marker');
+  assert.equal(app.timers.size, baselineTimers, 'only the existing address watcher remains after disabling');
+});
+
+test('reading marker duration validates, persists, restores and supports zero without changing review settings', async () => {
+  const app = setup();
+  await app.click(findButton(app.shadow, '设置'));
+  const input = app.shadow.querySelector('.reading-marker-seconds');
+  assert.equal(input.value, '3');
+  for (const invalid of ['', '-1', '301', '1.5', 'not a number']) {
+    input.value = invalid;
+    input.listeners.change.listener();
+    assert.equal(input.value, '3');
+    assert.equal(app.storage.has(app.prefix + 'settings'), false);
+    assert.ok(app.shadow.querySelector('.toast').textContent.includes('0–300'));
+  }
+  input.value = '7';
+  input.listeners.change.listener();
+  const saved = app.storage.get(app.prefix + 'settings');
+  const restored = setup('/test/', 'youdao', { settings: saved });
+  await restored.click(findButton(restored.shadow, '设置'));
+  assert.equal(restored.shadow.querySelector('.reading-marker-seconds').value, '7');
+  input.value = '0';
+  input.listeners.change.listener();
+  await press(app, 'Escape');
+  selectWebsite(app, 'alpha');
+  app.advance(220);
+  await new Promise(setImmediate);
+  assert.equal(app.shadow.querySelector('.reading-marks').children.length, 1, 'zero still highlights during lookup');
+  await app.click(findButton(app.shadow.querySelector('.popover'), '×'));
+  assert.equal(app.shadow.querySelector('.reading-marks').children.length, 0);
+  assert.equal(app.storage.get(app.prefix + 'settings').newPerDay, 20);
+});
+
+test('same-word debounce still updates the reading origin and expires when no card is open', async () => {
+  const app = setup('/test/', 'youdao', { open: false });
+  selectWebsite(app, 'alpha');
+  app.advance(220);
+  await new Promise(setImmediate);
+  await app.click(findButton(app.shadow.querySelector('.popover'), '×'));
+  const { node } = selectWebsite(app, 'alpha');
+  node.getBoundingClientRect = () => ({ left: 210, right: 280, top: 90, bottom: 110, width: 70, height: 20 });
+  app.advance(220);
+  await new Promise(setImmediate);
+  const marks = app.shadow.querySelector('.reading-marks');
+  assert.equal(marks.children[0].style.left, '210px', 'the marker follows the newly selected occurrence');
+  assert.equal(historyOf(app).length, 4, 'existing duplicate-query suppression is unchanged');
+  assert.equal(app.shadow.querySelector('.popover').hidden, true);
+  app.advance(3000);
+  assert.equal(marks.children.length, 0, 'duplicate suppression cannot leave an indefinite marker');
+});
+
+test('offscreen reading marker returns only on request; detached origins are cleared instead of scrolling elsewhere', async () => {
+  const app = setup('/test/', 'youdao', { open: false });
+  const { node, range } = selectWebsite(app, 'alpha');
+  app.advance(220);
+  await new Promise(setImmediate);
+  const marks = app.shadow.querySelector('.reading-marks');
+  const back = app.shadow.querySelector('.reading-return');
+  let scrolled = 0;
+  node.getBoundingClientRect = () => ({ left: 20, right: 100, top: -80, bottom: -60, width: 80, height: 20 });
+  node.scrollIntoView = () => { scrolled++; };
+  app.context.window.scrollBy = () => {
+    scrolled++;
+    node.getBoundingClientRect = () => ({ left: 20, right: 100, top: 390, bottom: 410, width: 80, height: 20 });
+  };
+  app.context.document.listeners.scroll.listener();
+  assert.equal(back.hidden, false);
+  assert.equal(marks.children.length, 0);
+  assert.equal(scrolled, 0, 'scroll tracking never scrolls on its own');
+  await app.click(back);
+  assert.equal(scrolled, 2);
+  assert.equal(back.hidden, true);
+  assert.equal(app.shadow.querySelector('.popover').hidden, true);
+  assert.equal(marks.children.length, 1);
+  range.startContainer.isConnected = false;
+  app.context.document.listeners.scroll.listener();
+  assert.equal(marks.children.length, 0);
+  assert.equal(back.hidden, true);
+});
+
+test('native CSS highlights use a cloned original range and clean up without changing page text', async () => {
+  const app = setup('/test/', 'youdao', { open: false });
+  const registry = new Map();
+  app.context.window.CSS = { highlights: registry };
+  app.context.window.Highlight = class { constructor(range) { this.range = range; } };
+  const { node, range } = selectWebsite(app, 'alpha');
+  app.advance(220);
+  await new Promise(setImmediate);
+  const highlight = registry.get('lexi-reading-origin');
+  assert.notEqual(highlight.range, range);
+  assert.equal(highlight.range.toString(), 'alpha');
+  assert.equal(node.textContent, 'alpha');
+  assert.equal(app.shadow.querySelector('.reading-marks').children.length, 0, 'no overlay needed with native support');
+  await app.click(findButton(app.shadow.querySelector('.popover'), '×'));
+  app.advance(3000);
+  assert.equal(registry.size, 0);
+  assert.equal(app.context.document.documentElement.querySelectorAll('style').length, 0);
 });
 
 test('automatic internal lookup works with website selection paused, saves history and stars, and restores nested views', async () => {
