@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Lexi · 划词词典与复习
 // @namespace    lexi-local
-// @version      0.4.1
+// @version      0.4.3
 // @description  英文划词、发音、跨网站历史、生词复习与本地备份。无需账号。
 // @match        http://*/*
 // @match        https://*/*
@@ -2751,7 +2751,8 @@ SOFTWARE.
     .app{font:14px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif;color:var(--ink);letter-spacing:0;text-align:left;direction:ltr}
     button,input,select{font:inherit}button,a,input,select{touch-action:manipulation}button{cursor:pointer}button:disabled{cursor:wait;opacity:.55}button,select{flex-shrink:0;white-space:nowrap}.search input,.row>input{flex:1;width:0}select{min-width:76px}
     button:focus-visible,a:focus-visible{outline:3px solid #75ac8c;outline-offset:3px}input:focus-visible,select:focus-visible{outline:none;background:var(--tint)}
-    .launcher{pointer-events:auto;position:fixed;right:24px;bottom:24px;width:46px;height:46px;border:1px solid #ffffff40;border-radius:16px;background:var(--accent);color:white;box-shadow:0 6px 25px #102a2025;font:italic 28px Georgia,serif}
+    .launcher{pointer-events:auto;position:fixed;right:24px;bottom:24px;width:46px;height:46px;border:1px solid #ffffff40;border-radius:16px;background:var(--accent);color:white;box-shadow:0 6px 25px #102a2025;font:italic 28px Georgia,serif;touch-action:none;user-select:none;cursor:grab}
+    .launcher.dragging{cursor:grabbing}
     .popover{pointer-events:auto;position:fixed;width:min(380px,calc(100vw - 24px));max-height:70vh;overflow:auto;background:var(--surface);border:1px solid var(--line);border-radius:18px;box-shadow:0 16px 65px #102a2026;padding:22px}
     .bar,.row,.actions{display:flex;align-items:center;gap:10px}.bar{justify-content:space-between}.actions{flex-wrap:wrap}.brand{font-weight:750;letter-spacing:3px;font-size:12px}.muted,.meta{color:var(--muted);font-size:12px}.meta{margin-top:4px}.word{font:42px/1.2 Georgia,"Times New Roman",serif;overflow-wrap:anywhere;margin:20px 0 6px}.phonetic{color:var(--muted);font-size:14px;margin-bottom:14px}
     .button,.icon,.tab{border:1px solid var(--line);background:var(--surface);color:var(--ink);border-radius:10px;padding:8px 13px;transition:background .12s}.button:hover,.icon:hover{background:var(--tint)}.primary{background:var(--accent);color:white;border-color:var(--accent)}.primary:hover{filter:brightness(1.1);background:var(--accent)}.icon{padding:5px 9px;font-size:16px}.danger{color:var(--error)}.active{background:var(--tint);border-color:var(--accent);color:var(--accent)}
@@ -2821,7 +2822,13 @@ SOFTWARE.
     .scope-kind{flex-shrink:0;font-size:11px;color:var(--muted);background:var(--tint);border-radius:4px;padding:1px 5px}.scope-address{min-width:0;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:12px}
     .scope-remove{font-size:12px;padding:3px 8px;border-color:transparent}.scope-pagination{display:flex;align-items:center;gap:8px;flex-shrink:0}.scope-pagination .meta{flex:1}.scope-pagination .button{font-size:12px;padding:5px 10px}.scope-pagination .button:disabled{cursor:default}
   `;
-  const launcher = button('L', () => openStudio(), 'launcher', '打开 Lexi 学习中心');
+  let launcherPosition = get('launcher-position', null);
+  if (!launcherPosition || !['x', 'y'].every(axis => Number.isFinite(launcherPosition[axis]) &&
+    launcherPosition[axis] >= 0 && launcherPosition[axis] <= 1)) launcherPosition = null;
+  let launcherDrag = null;
+  let suppressLauncherClick = false;
+  const launcher = button('L', () => { if (!suppressLauncherClick) openStudio(); }, 'launcher', '打开 Lexi 学习中心');
+  launcher.title = '单击打开学习中心，拖动调整位置';
   const popover = el('section', 'popover');
   popover.tabIndex = -1;
   popover.setAttribute('role', 'region');
@@ -2877,6 +2884,62 @@ SOFTWARE.
     const value = error?.message || '操作失败，请重试';
     if (host.isConnected) message(value); else alert(value);
   };
+  function positionLauncher(position = launcherPosition) {
+    if (!position) {
+      launcher.style.left = launcher.style.top = launcher.style.right = launcher.style.bottom = '';
+      return;
+    }
+    if (!host.isConnected || launcher.hidden) return;
+    const rect = launcher.getBoundingClientRect();
+    launcher.style.left = Math.max(0, window.innerWidth - rect.width) * position.x + 'px';
+    launcher.style.top = Math.max(0, window.innerHeight - rect.height) * position.y + 'px';
+    launcher.style.right = launcher.style.bottom = 'auto';
+  }
+  function finishLauncherDrag(event) {
+    if (!launcherDrag || event && event.pointerId !== launcherDrag.pointerId) return;
+    const drag = launcherDrag;
+    launcherDrag = null;
+    launcher.classList.toggle('dragging', false);
+    if (launcher.hasPointerCapture(drag.pointerId)) launcher.releasePointerCapture(drag.pointerId);
+    if (!drag.position) return;
+    if (event?.type === 'pointerup') {
+      try {
+        put('launcher-position', drag.position);
+        launcherPosition = drag.position;
+      } catch (error) {
+        positionLauncher();
+        showError(new Error('入口位置保存失败：' + (error?.message || '请重试')));
+      }
+    } else positionLauncher();
+  }
+  launcher.addEventListener('pointerdown', event => {
+    if (event.button !== 0 || event.isPrimary === false || launcherDrag) return;
+    suppressLauncherClick = false;
+    const rect = launcher.getBoundingClientRect();
+    launcher.setPointerCapture(event.pointerId);
+    launcherDrag = { pointerId: event.pointerId, x: event.clientX, y: event.clientY, rect };
+  });
+  launcher.addEventListener('pointermove', event => {
+    const drag = launcherDrag;
+    if (!drag || event.pointerId !== drag.pointerId) return;
+    const dx = event.clientX - drag.x, dy = event.clientY - drag.y;
+    if (!drag.position && Math.hypot(dx, dy) < 5) return;
+    event.preventDefault();
+    suppressLauncherClick = true;
+    launcher.classList.toggle('dragging', true);
+    const maxX = Math.max(0, window.innerWidth - drag.rect.width);
+    const maxY = Math.max(0, window.innerHeight - drag.rect.height);
+    drag.position = {
+      x: maxX ? Math.max(0, Math.min(maxX, drag.rect.left + dx)) / maxX : 0,
+      y: maxY ? Math.max(0, Math.min(maxY, drag.rect.top + dy)) / maxY : 0
+    };
+    positionLauncher(drag.position);
+  });
+  for (const type of ['pointerup', 'pointercancel', 'lostpointercapture']) launcher.addEventListener(type, finishLauncherDrag);
+  launcher.addEventListener('keydown', event => {
+    if (event.key === 'Enter' || event.key === ' ') suppressLauncherClick = false;
+  });
+  positionLauncher();
   function stopQuery() { queryEpoch++; activeRequest?.abort(); activeRequest = null; }
   function stopAudio() {
     audioEpoch++;
@@ -2907,6 +2970,7 @@ SOFTWARE.
     if (currentSite.disabled) host.remove();
   }
   function stopActivity() {
+    finishLauncherDrag();
     activityEpoch++;
     clearTimeout(selectionTimer);
     clearTimeout(toastTimer);
@@ -2927,6 +2991,7 @@ SOFTWARE.
       } else if (!overlay.hidden) render();
     }
     if (!currentSite.disabled && !host.isConnected) document.documentElement.append(host);
+    if (!currentSite.disabled) positionLauncher();
   }
   function refresh(force = false) {
     settings = cleanSettings(get('settings', {}));
@@ -3921,10 +3986,8 @@ SOFTWARE.
       const actions = el('div', 'actions');
       for (const [index, [grade, label, hint]] of [['again', '忘记', '没想起来，或答案不正确'], ['hard', '困难', '想对了，但回忆很吃力'],
       ['good', '记得', '能够正确回忆'], ['easy', '轻松', '无需费力就想起来了']].entries()) {
-        const next = answer.results[grade];
-        const caption = `${label} · ${reviewInterval(next.dueAt - answer.now)}`;
-        const action = button(caption, () => gradeCard(entry, grade), grade === 'good' ? 'button primary' : 'button',
-          `${caption}；${hint}；快捷键 ${index + 1}；下次复习：${when(next)}`);
+        const action = button(label, () => gradeCard(entry, grade), grade === 'good' ? 'button primary' : 'button',
+          `${label}；${hint}；快捷键 ${index + 1}`);
         if (grade === 'good') focusTarget = action;
         actions.append(action);
       }
@@ -4152,6 +4215,7 @@ SOFTWARE.
       stopActivity();
       for (const key of GM_listValues().filter(key => key.startsWith(PREFIX))) GM_deleteValue(key);
       settings = { ...DEFAULTS }; selectedWord = ''; selectedEvent = null; round = null; answer = null;
+      launcherPosition = null; positionLauncher();
       scopeFilter = ''; scopePage = 0;
       syncSite(); put('scope-revision', crypto.randomUUID());
       notify(); render(); message('Lexi 数据已删除');
@@ -4199,7 +4263,12 @@ SOFTWARE.
       lookup(word, selection.getRangeAt(0).getBoundingClientRect(), context).catch(showError);
     }, 220);
   });
-  window.addEventListener('resize', () => { cancelInternalSelection(); if (!popover.hidden) positionPopover(); });
+  window.addEventListener('resize', () => {
+    finishLauncherDrag();
+    positionLauncher();
+    cancelInternalSelection();
+    if (!popover.hidden) positionPopover();
+  });
   document.addEventListener('pointerdown', event => {
     if (!event.composedPath().includes(host)) {
       internalPointerDown = false;
