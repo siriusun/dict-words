@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Lexi · 划词词典与复习
 // @namespace    lexi-local
-// @version      0.4.3
+// @version      0.4.4
 // @description  英文划词、发音、跨网站历史、生词复习与本地备份。无需账号。
 // @match        http://*/*
 // @match        https://*/*
