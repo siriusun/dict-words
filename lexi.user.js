@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Lexi · 划词词典与复习
 // @namespace    lexi-local
-// @version      0.4.4
+// @version      0.4.5
 // @description  英文划词、发音、跨网站历史、生词复习与本地备份。无需账号。
 // @match        http://*/*
 // @match        https://*/*
@@ -18,6 +18,7 @@
 // @grant        GM_info
 // @connect      api.dictionaryapi.dev
 // @connect      api.mymemory.translated.net
+// @connect      translate.googleapis.com
 // @connect      dict.youdao.com
 // @connect      api.datamuse.com
 // @license      MIT
@@ -2089,13 +2090,13 @@ SOFTWARE.
   };
   const GRADES = { again: 1, hard: 2, good: 3, easy: 4 };
   const STUDY_STATES = ['新词', '学习中', '间隔复习', '重新学习'];
-  const DEFAULTS = { auto: true, autoBook: false, context: false, readingMarkerSeconds: 3, newPerDay: 20, retention: 0.9, reverse: false, phoneticFallback: 'datamuse' };
+  const DEFAULTS = { auto: true, autoBook: false, context: false, readingMarkerSeconds: 3, newPerDay: 20, retention: 0.9, reverse: false, translationFallback: 'google', phoneticFallback: 'datamuse' };
   const cleanSettings = raw => {
     const value = { ...DEFAULTS, ...(raw && typeof raw === 'object' ? raw : {}) };
     if (!Number.isInteger(value.readingMarkerSeconds) || value.readingMarkerSeconds < 0 || value.readingMarkerSeconds > 300) value.readingMarkerSeconds = DEFAULTS.readingMarkerSeconds;
     if (!Number.isInteger(value.newPerDay) || value.newPerDay < 0 || value.newPerDay > 200) value.newPerDay = DEFAULTS.newPerDay;
     if (!RETENTIONS.includes(value.retention)) value.retention = DEFAULTS.retention;
-    delete value.translationFallback;
+    if (!['none', 'google'].includes(value.translationFallback)) value.translationFallback = DEFAULTS.translationFallback;
     if (!['none', 'datamuse'].includes(value.phoneticFallback)) value.phoneticFallback = DEFAULTS.phoneticFallback;
     return value;
   };
@@ -2447,7 +2448,7 @@ SOFTWARE.
       });
       if (item.translation !== undefined && (!string(item.translation, 16000) || !timestamp(item.translatedAt))) fail();
       if (item.translationSource !== undefined && (!item.translation || !string(item.translationSource, 8000))) fail();
-      if (item.translationProvider !== undefined && (!item.translation || !['mymemory', 'youdao'].includes(item.translationProvider))) fail();
+      if (item.translationProvider !== undefined && (!item.translation || !['mymemory', 'google', 'youdao'].includes(item.translationProvider))) fail();
       if ((item.youdaoTranslation !== undefined || item.youdaoTranslatedAt !== undefined) &&
         (!string(item.youdaoTranslation, 16000) || !item.youdaoTranslation.trim() || !timestamp(item.youdaoTranslatedAt))) fail();
       if (item.phoneticSource !== undefined && (!['youdao', 'datamuse'].includes(item.phoneticSource) || !item.phonetic.trim())) fail();
@@ -3454,6 +3455,34 @@ SOFTWARE.
     });
   }
   const translations = new Map();
+  async function machineTranslation(source, provider, check) {
+    const translated = [];
+    for (const chunk of translationChunks(source)) {
+      check();
+      let value;
+      if (provider === 'google') {
+        if (cleanSettings(get('settings', {})).translationFallback !== 'google') throw new Error('备用翻译已关闭');
+        const result = await request('https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=zh-CN&dt=t&q=' + encodeURIComponent(chunk));
+        const segments = result?.[0];
+        if (!Array.isArray(segments) || !segments.length ||
+          !segments.every(segment => Array.isArray(segment) && typeof segment[0] === 'string')) {
+          throw new Error('备用翻译返回格式异常，请稍后重试');
+        }
+        value = segments.map(segment => segment[0]).join('');
+      } else {
+        const result = await request('https://api.mymemory.translated.net/get?langpair=en%7Czh-CN&q=' + encodeURIComponent(chunk));
+        value = result?.responseData?.translatedText;
+        if (Number(result?.responseStatus) !== 200 || result?.quotaFinished) {
+          throw new Error('中文服务暂不可用或额度已用尽，可稍后重试');
+        }
+      }
+      if (typeof value !== 'string' || !value.trim()) throw new Error('中文服务未返回有效翻译，请稍后重试');
+      translated.push(value.trim());
+    }
+    const translation = translated.join('\n');
+    if (translation.length > 16000) throw new Error('中文响应过长，请稍后重试');
+    return translation;
+  }
   function translate(entry, provider) {
     const source = translationSource(entry);
     const key = provider + '\n' + entry.word + (provider === 'mymemory' ? '\n' + source : '');
@@ -3462,22 +3491,30 @@ SOFTWARE.
         const epoch = activityEpoch;
         if (!get('word:' + entry.word)) throw new Error('词条已删除，请重新查询');
         let translation;
+        let translationProvider = 'mymemory';
+        let primaryError;
         if (provider === 'youdao') {
           translation = youdaoTranslation(await requestYoudao(entry.word), entry.word);
         } else {
-          const translated = [];
-          for (const chunk of translationChunks(source)) {
+          const check = () => {
             checkActivity(epoch);
-            if (!get('word:' + entry.word)) throw new Error('词条已删除，请重新查询');
-            const result = await request('https://api.mymemory.translated.net/get?langpair=en%7Czh-CN&q=' + encodeURIComponent(chunk));
-            const value = result?.responseData?.translatedText;
-            if (Number(result?.responseStatus) !== 200 || result?.quotaFinished || typeof value !== 'string' || !value.trim()) {
-              throw new Error('中文服务暂不可用或额度已用尽，可稍后重试');
+            const current = get('word:' + entry.word);
+            if (!current) throw new Error('词条已删除，请重新查询');
+            if (translationSource(current) !== source) throw new Error('词典释义已更新，请重新获取中文');
+          };
+          try {
+            translation = await machineTranslation(source, 'mymemory', check);
+          } catch (error) {
+            check();
+            if (cleanSettings(get('settings', {})).translationFallback !== 'google') throw error;
+            primaryError = error;
+            try {
+              translation = await machineTranslation(source, 'google', check);
+              translationProvider = 'google';
+            } catch (fallbackError) {
+              throw new Error(`${error.message}；Google Translate：${fallbackError.message}`);
             }
-            translated.push(value.trim());
           }
-          translation = translated.join('\n');
-          if (translation.length > 16000) throw new Error('中文响应过长，请稍后重试');
         }
         checkActivity(epoch);
         const current = get('word:' + entry.word);
@@ -3485,10 +3522,10 @@ SOFTWARE.
         if (provider === 'mymemory' && translationSource(current) !== source) throw new Error('词典释义已更新，请重新获取中文');
         const updated = { ...current, ...(provider === 'youdao'
           ? { youdaoTranslation: translation, youdaoTranslatedAt: Date.now() }
-          : { translation, translationSource: source, translationProvider: 'mymemory', translatedAt: Date.now() }) };
+          : { translation, translationSource: source, translationProvider, translatedAt: Date.now() }) };
         put('word:' + entry.word, updated);
         notify();
-        return updated;
+        return { updated, primaryError };
       })();
       translations.set(key, pending);
       pending.finally(() => translations.delete(key)).catch(() => { });
@@ -3498,19 +3535,29 @@ SOFTWARE.
   function translationBlock(entry, provider) {
     const node = el('section', 'translation translation-' + provider);
     const label = provider === 'youdao' ? '有道词典' : 'MyMemory';
-    const show = current => {
-      node.replaceChildren(el('div', 'pos', label));
+    const show = (current, primaryError, retry = true) => {
+      const fallback = provider === 'mymemory' && current.translationProvider === 'google';
+      node.replaceChildren(el('div', 'pos', fallback ? 'Google Translate（备用）' : label));
       const value = provider === 'youdao' ? current.youdaoTranslation : current.translation;
       if (value) node.append(el('div', 'translation-copy', value));
       node.append(el('div', 'meta', provider === 'youdao' ? '中文词典释义 · 不与英文逐条对应' : '英文释义的机器翻译'));
       if (provider === 'youdao') node.append(link('有道词典', 'https://www.youdao.com/result?word=' + encodeURIComponent(entry.word) + '&lang=en'));
+      if (fallback) {
+        node.append(el('p', 'notice', primaryError
+          ? `MyMemory：${primaryError.message}；已使用 Google Translate 备用翻译`
+          : 'MyMemory 不可用时获取的备用翻译 · 已缓存'));
+        if (retry) node.append(button('重试 MyMemory 中文释义', load));
+      }
     };
     async function load() {
-      show(get('word:' + entry.word) || entry);
+      show(get('word:' + entry.word) || entry, null, false);
       node.append(el('p', 'muted', '正在获取 ' + label + ' 中文释义…'));
-      try { show(await translate(entry, provider)); }
+      try {
+        const { updated, primaryError } = await translate(entry, provider);
+        show(updated, primaryError);
+      }
       catch (error) {
-        show(get('word:' + entry.word) || entry);
+        show(get('word:' + entry.word) || entry, null, false);
         node.append(el('p', 'notice', label + '：' + error.message), button('重试 ' + label + ' 中文释义', load));
       }
     }
@@ -4315,7 +4362,16 @@ SOFTWARE.
     study.append(limitRow, retentionRow, reverseRow, el('p', 'notice',
       '每天凌晨 4:00 开始新的学习日。记得率越高，间隔越短、复习越多，只影响之后的安排。反向卡在该词进入长期复习后加入，计入新词上限，进度独立保存；关闭后暂停反向卡，进度保留。'));
     const chinese = el('section', 'section');
-    chinese.append(el('h3', '', '中文释义'), el('p', 'notice', 'MyMemory 机器翻译与有道中文词典释义同时显示、分别缓存，不再互为备用。有道释义不与英文逐条对应；每路独立显示加载、失败与重试状态，一路失败不影响另一路。旧有道备用缓存自动保留，原中文 fallback 设置不再生效。'));
+    chinese.append(el('h3', '', '中文释义'), el('p', 'notice', '英文释义的机器翻译与有道中文词典释义同时显示、分别缓存。有道释义不与英文逐条对应；每路独立显示加载、失败与重试状态，一路失败不影响另一路。'));
+    const translationRow = el('label', 'setting fallback-setting');
+    const translationFallback = el('select', 'translation-fallback');
+    for (const [value, label] of [['google', 'Google Translate（默认）'], ['none', '关闭备用翻译']]) {
+      const option = el('option', '', label); option.value = value; translationFallback.append(option);
+    }
+    translationFallback.value = settings.translationFallback;
+    translationFallback.addEventListener('change', () => save('translationFallback', translationFallback.value, () => { translationFallback.value = settings.translationFallback; }, false));
+    translationRow.append(el('span', '', 'MyMemory 不可用时的回落来源（fallback）'), translationFallback);
+    chinese.append(translationRow, el('p', 'notice', 'MyMemory 限流、额度耗尽、超时或返回异常时，自动向 Google Translate 发送相同的英文释义。成功后标注备用来源并缓存，可手动重试 MyMemory；关闭只停止新增备用请求，已有缓存保留。有道始终独立显示。Google 无密钥接口不保证可用性，部分网络可能无法访问。'));
     const phonetics = el('section', 'section');
     phonetics.append(el('h3', '', '音标'));
     const phoneticRow = el('label', 'setting fallback-setting');
@@ -4341,9 +4397,10 @@ SOFTWARE.
     actions.append(button('导入 JSON 合并', () => upload.click()));
     data.append(actions, upload, restoreRow, el('p', 'notice', 'JSON 包含完整历史、复习进度和网页禁用规则。导入默认保留本机设置与禁用规则，CSV 便于表格查看。'));
     const privacy = el('section', 'section');
-    privacy.append(el('h3', '', '服务与隐私'), el('p', 'notice', '查词会向 Free Dictionary API 发送当前单词；缺少对应缓存时，向 MyMemory 发送最多 6 条英文释义、向有道发送当前单词，分别获取并同时显示两路中文。获取音标和词形同样向有道发送单词，词形补全可能另查原形；进行中的有道请求复用。启用额外音标备用来源后，在有道失败且主词典无音标时向 Datamuse 发送当前单词。成功后本地保存，再次打开直接读取。网页上下文不会发送。在线音频和浏览器朗读可能联网。服务可用性、内容与额度由提供方决定。'),
+    privacy.append(el('h3', '', '服务与隐私'), el('p', 'notice', '查词会向 Free Dictionary API 发送当前单词；缺少对应缓存时，向 MyMemory 发送最多 6 条英文释义、向有道发送当前单词，分别获取并同时显示两路中文。启用翻译回落后，MyMemory 失败时向 Google Translate 发送相同释义。获取音标和词形同样向有道发送单词，词形补全可能另查原形；进行中的有道请求复用。启用额外音标备用来源后，在有道失败且主词典无音标时向 Datamuse 发送当前单词。成功后本地保存，再次打开直接读取。网页上下文不会发送。在线音频和浏览器朗读可能联网。服务可用性、内容与额度由提供方决定。'),
       link('Free Dictionary API', 'https://dictionaryapi.dev/'), document.createTextNode(' · '),
       link('MyMemory', 'https://mymemory.translated.net/doc/spec.php'), document.createTextNode(' · '),
+      link('Google Translate', 'https://translate.google.com/'), document.createTextNode(' · '),
       link('有道词典', 'https://www.youdao.com/'), document.createTextNode(' · '),
       link('Datamuse', 'https://www.datamuse.com/api/'));
     const cleanup = el('section', 'section');

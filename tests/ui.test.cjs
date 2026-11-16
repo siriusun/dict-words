@@ -1874,7 +1874,7 @@ test('Chinese definitions request both sources immediately and display each resu
 });
 
 test('Chinese definitions keep Youdao visible when MyMemory returns HTTP 429 and retry only MyMemory', async () => {
-  const { shadow, storage, prefix, context, click } = setup();
+  const { shadow, storage, prefix, context, click } = setup('/test/', 'youdao', { settings: { translationFallback: 'none' } });
   const entry = { ...storage.get(prefix + 'word:alpha') };
   delete entry.translation;
   delete entry.translationSource;
@@ -1915,7 +1915,7 @@ for (const [label, fail] of [
   ['invalid JSON', request => request.onload({ status: 200, responseText: '<html>error</html>' })]
 ]) {
   test('Chinese definitions preserve cached Youdao after MyMemory ' + label + ' in review', async () => {
-    const app = setup();
+    const app = setup('/test/', 'youdao', { settings: { translationFallback: 'none' } });
     const { shadow, storage, prefix, context, click } = app;
     delete storage.get(prefix + 'word:alpha').translation;
     delete storage.get(prefix + 'word:alpha').translationSource;
@@ -1934,7 +1934,7 @@ for (const [label, fail] of [
   });
 }
 
-test('Chinese definitions ignore the retired fallback setting and remove its selector', async () => {
+test('Chinese definitions keep Youdao independent when machine translation fallback is disabled', async () => {
   const app = setup();
   const { shadow, storage, prefix, context, click } = app;
   const requests = [];
@@ -1943,7 +1943,7 @@ test('Chinese definitions ignore the retired fallback setting and remove its sel
   delete storage.get(prefix + 'word:alpha').youdaoTranslation;
   delete storage.get(prefix + 'word:alpha').youdaoTranslatedAt;
   await click(findButton(shadow, '设置'));
-  assert.equal(shadow.querySelector('.translation-fallback'), null);
+  assert.equal(shadow.querySelector('.translation-fallback').value, 'none');
   assert.ok(textOf(shadow.querySelector('.view')).includes('同时显示、分别缓存'));
   await click(shadow.querySelectorAll('.tab')[0]);
   await click(shadow.querySelector('.item'));
@@ -1955,7 +1955,7 @@ test('Chinese definitions ignore the retired fallback setting and remove its sel
 });
 
 test('Chinese definitions preserve old MyMemory text and retry it without touching cached Youdao', async () => {
-  const app = setup();
+  const app = setup('/test/', 'youdao', { settings: { translationFallback: 'none' } });
   const { shadow, storage, prefix, context, click } = app;
   delete storage.get(prefix + 'word:alpha').translationSource;
   const requests = [];
@@ -1973,6 +1973,198 @@ test('Chinese definitions preserve old MyMemory text and retry it without touchi
   assert.equal(storage.get(prefix + 'word:alpha').translation, '中文');
   assert.equal(storage.get(prefix + 'word:alpha').youdaoTranslation, '有道中文');
   assert.equal(shadow.querySelector('.translation-youdao').querySelector('.translation-copy').textContent, '有道中文');
+});
+
+for (const [label, fail] of [
+  ['HTTP 429', request => request.onload({ status: 429, responseText: '{}' })],
+  ['quota exhaustion', request => request.onload({ status: 200, responseText: JSON.stringify({
+    responseStatus: 200, quotaFinished: true, responseData: { translatedText: 'quota error' }
+  }) })],
+  ['service error', request => request.onload({ status: 200, responseText: JSON.stringify({
+    responseStatus: 429, responseData: { translatedText: 'quota error' }
+  }) })],
+  ['network error', request => request.onerror()],
+  ['timeout', request => request.ontimeout()],
+  ['invalid JSON', request => request.onload({ status: 200, responseText: '<html>error</html>' })]
+]) {
+  test('machine translation fallback uses Google after MyMemory ' + label + ' and reuses its labeled cache', async () => {
+    const app = setup();
+    const { shadow, storage, prefix, context, click } = app;
+    delete storage.get(prefix + 'word:alpha').translation;
+    delete storage.get(prefix + 'word:alpha').translationSource;
+    const before = structuredClone(storage.get(prefix + 'study:alpha'));
+    const requests = [];
+    context.GM_xmlhttpRequest = request => { requests.push(request); return { abort() {} }; };
+    await openReview(app);
+    await click(findButton(shadow, '显示释义'));
+    assert.equal(requests.length, 1);
+    fail(requests[0]);
+    await new Promise(setImmediate);
+    assert.equal(requests.length, 2);
+    const url = new URL(requests[1].url);
+    assert.equal(url.origin, 'https://translate.googleapis.com');
+    assert.equal(url.searchParams.get('q'), translationSource(storage.get(prefix + 'word:alpha')));
+    assert.equal(url.searchParams.get('sl'), 'en');
+    assert.equal(url.searchParams.get('tl'), 'zh-CN');
+    requests[1].onload({ status: 200, responseText: JSON.stringify([[['1. 名词：', '1. noun:'], ['阿尔法', 'alpha']], null, 'en']) });
+    await new Promise(setImmediate);
+    const cached = storage.get(prefix + 'word:alpha');
+    assert.equal(cached.translation, '1. 名词：阿尔法');
+    assert.equal(cached.translationProvider, 'google');
+    assert.equal(cached.translationSource, translationSource(cached));
+    const block = shadow.querySelector('.translation-mymemory');
+    assert.equal(block.querySelector('.translation-copy').textContent, '1. 名词：阿尔法');
+    assert.ok(textOf(block).includes('Google Translate'));
+    assert.ok(textOf(block).includes('MyMemory'));
+    assert.ok(textOf(shadow.querySelector('.translation-youdao')).includes('有道中文'));
+    await click(shadow.querySelectorAll('.tab')[0]);
+    await click(shadow.querySelector('.item'));
+    assert.equal(requests.length, 2, 'Google cache avoids repeatedly hitting the unavailable primary');
+    assert.ok(textOf(shadow.querySelector('.translation-mymemory')).includes('Google Translate'));
+    assert.deepEqual(storage.get(prefix + 'study:alpha'), before);
+    assert.equal([...storage.keys()].filter(key => key.startsWith(prefix + 'event:')).length, 3);
+    await click(findButton(shadow, '重试 MyMemory 中文释义'));
+    assert.equal(requests.length, 3);
+    assert.ok(requests[2].url.includes('mymemory'));
+    requests[2].onload({ status: 200, responseText: JSON.stringify({
+      responseStatus: 200, responseData: { translatedText: '恢复的主服务翻译' }
+    }) });
+    await new Promise(setImmediate);
+    assert.equal(storage.get(prefix + 'word:alpha').translationProvider, 'mymemory');
+    assert.equal(shadow.querySelector('.translation-mymemory').querySelector('.pos').textContent, 'MyMemory');
+  });
+}
+
+test('machine translation fallback setting persists, restores and reports storage failures', async () => {
+  const app = setup();
+  const { shadow, storage, prefix, context, click } = app;
+  await click(findButton(shadow, '设置'));
+  const select = shadow.querySelector('.translation-fallback');
+  assert.ok(select);
+  assert.equal(select.value, 'google');
+  select.value = 'none';
+  select.listeners.change.listener();
+  assert.equal(storage.get(prefix + 'settings').translationFallback, 'none');
+  const restored = setup('/test/', 'youdao', { settings: storage.get(prefix + 'settings') });
+  await restored.click(findButton(restored.shadow, '设置'));
+  assert.equal(restored.shadow.querySelector('.translation-fallback').value, 'none');
+  context.GM_setValue = () => { throw new Error('storage blocked'); };
+  select.value = 'google';
+  select.listeners.change.listener();
+  assert.equal(select.value, 'none');
+  assert.ok(shadow.querySelector('.toast').textContent.includes('storage blocked'));
+});
+
+for (const response of [null, [], [[['']]], [[['中文'], [null]]], [[['中'.repeat(16001)]]]]) {
+  test('machine translation fallback rejects unusable Google response ' + JSON.stringify(response)?.slice(0, 45), async () => {
+    const { shadow, storage, prefix, context, click } = setup();
+    delete storage.get(prefix + 'word:alpha').translationSource;
+    const requests = [];
+    context.GM_xmlhttpRequest = request => { requests.push(request); return { abort() {} }; };
+    await click(shadow.querySelector('.item'));
+    requests[0].onload({ status: 429, responseText: '{}' });
+    await new Promise(setImmediate);
+    assert.equal(requests.length, 2);
+    requests[1].onload({ status: 200, responseText: JSON.stringify(response) });
+    await new Promise(setImmediate);
+    const block = shadow.querySelector('.translation-mymemory');
+    assert.ok(textOf(block).includes('429'));
+    assert.ok(textOf(block).includes('Google Translate：'));
+    assert.ok(findButton(block, '重试 MyMemory 中文释义'));
+    assert.equal(storage.get(prefix + 'word:alpha').translation, '中文', 'failure keeps the existing translation');
+    assert.equal(storage.get(prefix + 'word:alpha').translationProvider, undefined);
+  });
+}
+
+test('machine translation fallback restarts all chunks instead of mixing providers after partial success', async () => {
+  const { shadow, storage, prefix, context, click } = setup();
+  const entry = storage.get(prefix + 'word:alpha');
+  delete entry.translation;
+  delete entry.translationSource;
+  entry.meanings[0].definitions[0].definition = 'A lengthy definition. '.repeat(35);
+  const requests = [];
+  context.GM_xmlhttpRequest = request => { requests.push(request); return { abort() {} }; };
+  await click(shadow.querySelector('.item'));
+  requests[0].onload({ status: 200, responseText: JSON.stringify({
+    responseStatus: 200, responseData: { translatedText: '不应混入的主服务片段' }
+  }) });
+  await new Promise(setImmediate);
+  requests[1].onload({ status: 429, responseText: '{}' });
+  await new Promise(setImmediate);
+  assert.equal(requests.length, 3);
+  assert.equal(new URL(requests[2].url).searchParams.get('q'), new URL(requests[0].url).searchParams.get('q'));
+  requests[2].onload({ status: 200, responseText: JSON.stringify([[['备用第一段']]]) });
+  await new Promise(setImmediate);
+  requests[3].onload({ status: 200, responseText: JSON.stringify([[['备用第二段']]]) });
+  await new Promise(setImmediate);
+  assert.equal(storage.get(prefix + 'word:alpha').translation, '备用第一段\n备用第二段');
+  assert.equal(storage.get(prefix + 'word:alpha').translationProvider, 'google');
+});
+
+test('machine translation fallback keeps its cache with one retry control when both services fail', async () => {
+  const { shadow, storage, prefix, context, click } = setup();
+  storage.get(prefix + 'word:alpha').translationProvider = 'google';
+  const requests = [];
+  context.GM_xmlhttpRequest = request => { requests.push(request); return { abort() {} }; };
+  await click(shadow.querySelector('.item'));
+  await click(findButton(shadow, '重试 MyMemory 中文释义'));
+  requests[0].onload({ status: 429, responseText: '{}' });
+  await new Promise(setImmediate);
+  requests[1].onerror();
+  await new Promise(setImmediate);
+  const block = shadow.querySelector('.translation-mymemory');
+  assert.ok(textOf(block).includes('429'));
+  assert.ok(textOf(block).includes('Google Translate：网络连接失败'));
+  assert.equal(block.querySelectorAll('button').length, 1);
+  assert.equal(storage.get(prefix + 'word:alpha').translation, '中文');
+  assert.equal(storage.get(prefix + 'word:alpha').translationProvider, 'google');
+  await click(findButton(block, '重试 MyMemory 中文释义'));
+  requests[2].onload({ status: 200, responseText: JSON.stringify({
+    responseStatus: 200, responseData: { translatedText: '主服务已恢复' }
+  }) });
+  await new Promise(setImmediate);
+  assert.equal(block.querySelectorAll('button').length, 0);
+  assert.equal(storage.get(prefix + 'word:alpha').translationProvider, 'mymemory');
+});
+
+test('machine translation fallback cannot write late Google results after deletion, English changes or site disable', async () => {
+  for (const change of ['deleted', 'changed', 'site-disabled']) {
+    const app = setup();
+    const { shadow, storage, prefix, context, click } = app;
+    delete storage.get(prefix + 'word:alpha').translation;
+    delete storage.get(prefix + 'word:alpha').translationSource;
+    const requests = [];
+    context.GM_xmlhttpRequest = request => { requests.push(request); return { abort() {} }; };
+    await click(shadow.querySelector('.item'));
+    requests[0].onload({ status: 429, responseText: '{}' });
+    await new Promise(setImmediate);
+    if (change === 'deleted') storage.delete(prefix + 'word:alpha');
+    else if (change === 'changed') storage.get(prefix + 'word:alpha').meanings[0].definitions[0].definition = 'Changed.';
+    else await app.menus.get('禁用此页面')();
+    requests[1].onload({ status: 200, responseText: JSON.stringify([[['不应写入的译文']]]) });
+    await new Promise(setImmediate);
+    assert.equal(storage.get(prefix + 'word:alpha')?.translation, undefined, change);
+    assert.equal(requests.length, 2);
+  }
+});
+
+test('machine translation fallback respects disabling while MyMemory is pending and cannot restore deleted or changed words', async () => {
+  for (const change of ['disabled', 'deleted', 'changed']) {
+    const app = setup();
+    const { shadow, storage, prefix, context, click } = app;
+    delete storage.get(prefix + 'word:alpha').translation;
+    delete storage.get(prefix + 'word:alpha').translationSource;
+    const requests = [];
+    context.GM_xmlhttpRequest = request => { requests.push(request); return { abort() {} }; };
+    await click(shadow.querySelector('.item'));
+    if (change === 'disabled') useSettings(app, { translationFallback: 'none' });
+    else if (change === 'deleted') storage.delete(prefix + 'word:alpha');
+    else storage.get(prefix + 'word:alpha').meanings[0].definitions[0].definition = 'Changed.';
+    requests[0].onload({ status: 429, responseText: '{}' });
+    await new Promise(setImmediate);
+    assert.equal(requests.length, 1, change + ' prevents a fallback request');
+    assert.equal(storage.get(prefix + 'word:alpha')?.translation, undefined);
+  }
 });
 
 test('Chinese definitions share Youdao with phonetics and forms while keeping both concurrent translations', async () => {

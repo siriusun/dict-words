@@ -451,6 +451,24 @@ test('parallel Chinese caches roundtrip and merge each provider by its own times
   assert.equal(refreshed.words[0].youdaoTranslation, '新有道中文');
 });
 
+test('Google fallback caches survive backups and merges without surviving changed English definitions', () => {
+  const data = backup();
+  Object.assign(data.words[0], { translation: 'Google 中文', translatedAt: now,
+    translationSource: translationSource(data.words[0]), translationProvider: 'google',
+    youdaoTranslation: '有道中文', youdaoTranslatedAt: now });
+  const current = validateBackup(JSON.parse(JSON.stringify(data)));
+  assert.equal(current.words[0].translationProvider, 'google');
+  const incoming = structuredClone(current);
+  Object.assign(incoming.words[0], { translation: '较早的主服务翻译', translatedAt: now - 1, translationProvider: 'mymemory' });
+  const merged = mergeBackup(current, incoming);
+  assert.equal(merged.words[0].translation, 'Google 中文');
+  assert.equal(merged.words[0].translationProvider, 'google');
+  incoming.words[0].fetchedAt++;
+  incoming.words[0].meanings[0].definitions[0].definition = 'A changed definition.';
+  assert.equal(mergeBackup(current, incoming).words[0].translation, undefined);
+  assert.equal(mergeBackup(current, incoming).words[0].youdaoTranslation, '有道中文');
+});
+
 test('Youdao cache backup validation rejects malformed text and timestamps', () => {
   for (const fields of [{ youdaoTranslation: '' }, { youdaoTranslation: true, youdaoTranslatedAt: now },
     { youdaoTranslation: '中'.repeat(16001), youdaoTranslatedAt: now },

@@ -19,6 +19,7 @@
 - **网页划词与手动查询**：选中单个英文词自动查词，也可在学习中心输入；支持 `don't`、`mother-in-law` 等形式，不支持整句翻译。
 - **英文释义与例句**：查看词义、音标、例句，点击音标旁的播放按钮听发音。
 - **双来源中文辅助**：同时展示 MyMemory 对英文释义的翻译与有道中文词典释义，分别加载、缓存和重试，一路失败不影响另一路。
+- **机器翻译自动回落**：MyMemory 限流（429）、额度耗尽、超时或响应异常时，默认改用 Google Translate 翻译相同的英文释义，并标注备用来源、保存缓存。可在设置 → 中文释义中关闭回落；已有缓存保留，也可手动重试 MyMemory。有道词典继续独立显示，不充当机器翻译。
 - **词形变化**：展示原形、复数、时态等词形信息，查询变形词时可追溯原形，例如 `took` 对应 `take / takes / taking / took / taken`。
 - **音标补全与发音备用**：优先获取有道音标，失败时保留主词典音标；两者都缺失时，可使用 Datamuse 美式参考音标并标注来源。在线音频缺失或播放失败时尝试浏览器英语朗读。
 
@@ -72,6 +73,6 @@
 ## 服务与隐私
 
 - **数据本地保存**：使用 Tampermonkey 存储，不含账号系统、云同步、广告或分析上报。
-- **查词需要联网**：[Free Dictionary API](https://dictionaryapi.dev/) 提供英文释义与音频；[有道词典](https://www.youdao.com/) 提供音标、词形和中文释义；[MyMemory](https://mymemory.translated.net/doc/spec.php) 翻译英文释义；[Datamuse](https://www.datamuse.com/api/) 提供可关闭的备用参考音标。
-- **按需发送查询内容**：词典服务接收查询词，补全词形时可能查询原形；MyMemory 接收词典释义。阅读上下文与来源仅保存在本地，不随查词请求发送。在线音频和浏览器朗读也可能联网。
-- **服务存在限制**：释义、词形、音标和音频不保证齐全，第三方服务可能限流或不可用；Datamuse 参考音标可能按拼写推测。已有缓存可复用，失败可重试。
+- **查词需要联网**：[Free Dictionary API](https://dictionaryapi.dev/) 提供英文释义与音频；[有道词典](https://www.youdao.com/) 提供音标、词形和中文释义；[MyMemory](https://mymemory.translated.net/doc/spec.php) 翻译英文释义，[Google Translate](https://translate.google.com/) 提供可关闭的备用翻译；[Datamuse](https://www.datamuse.com/api/) 提供可关闭的备用参考音标。更新脚本后，Tampermonkey 可能提示新增 `translate.googleapis.com` 联网权限。
+- **按需发送查询内容**：词典服务接收查询词，补全词形时可能查询原形；MyMemory 接收词典释义，启用回落时，失败后会将相同释义发送给 Google Translate。阅读上下文与来源仅保存在本地，不随查词请求发送。在线音频和浏览器朗读也可能联网。
+- **服务存在限制**：释义、词形、音标和音频不保证齐全，第三方服务可能限流或不可用；Google 无密钥翻译接口不保证可用性，部分网络可能无法访问；Datamuse 参考音标可能按拼写推测。已有缓存可复用，失败可重试。
