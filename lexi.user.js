@@ -2419,6 +2419,10 @@ SOFTWARE.
       license: { name: text(first?.license?.name, 120), url: safeUrl(first?.license?.url) }
     };
   }
+  const BACKUP_MIB = 32;
+  function checkBackupSize(bytes) {
+    if (bytes > BACKUP_MIB * 1024 * 1024) throw new Error(`Lexi JSON 备份超过 ${BACKUP_MIB} MiB，无法生成或导入可恢复的完整备份`);
+  }
   function validateBackup(raw) {
     const fail = () => { throw new Error('备份格式无效或版本不兼容，未导入数据'); };
     const object = value => value && typeof value === 'object' && !Array.isArray(value);
@@ -2429,7 +2433,9 @@ SOFTWARE.
     if (raw.schemaVersion === 3 ? !Array.isArray(raw.recall) : raw.recall !== undefined) fail();
     const recall = raw.recall || [];
     const siteRules = validateSiteRules(raw.siteRules === undefined ? [] : raw.siteRules);
-    if (raw.words.length > 10000 || raw.history.length > 30000 || raw.book.length > 10000 || recall.length > 10000) fail();
+    if (raw.words.length > 10000 || raw.history.length > 30000 || raw.book.length > 10000 || recall.length > 10000) {
+      throw new Error('备份超过记录上限：词条、正向和反向进度各最多 10,000 条，查询历史最多 30,000 条');
+    }
     const unique = (items, key) => new Set(items.map(item => item[key])).size === items.length;
     if (![...raw.words, ...raw.history, ...raw.book, ...recall].every(object)) fail();
     if (!unique(raw.words, 'word') || !unique(raw.book, 'word') || !unique(recall, 'word') || !unique(raw.history, 'id')) fail();
@@ -4179,13 +4185,20 @@ SOFTWARE.
     view.append(card);
     focusTarget.focus({ preventScroll: true });
   }
-  function download(name, body, type) {
-    const url = URL.createObjectURL(new Blob([body], { type }));
+  function download(name, blob) {
+    const url = URL.createObjectURL(blob);
     const anchor = el('a');
     anchor.href = url; anchor.download = name;
     shadow.append(anchor); anchor.click(); anchor.remove();
     setTimeout(() => URL.revokeObjectURL(url), 10000);
     message('已发起导出，请确认浏览器下载记录');
+  }
+  function exportBackup() {
+    const data = snapshot();
+    validateBackup(data);
+    const file = new Blob([JSON.stringify(data)], { type: 'application/json' });
+    checkBackupSize(file.size);
+    download(`lexi-backup-${new Date().toISOString().slice(0, 10)}.json`, file);
   }
   function exportCsv(isBook) {
     const data = snapshot();
@@ -4202,11 +4215,12 @@ SOFTWARE.
         item.reviews, item.fsrs.lapses, reverse ? STUDY_STATES[reverse.fsrs.state] : '', reverse ? new Date(reverse.dueAt).toISOString() : '']
         : [new Date(item.at).toISOString(), item.word, definition, chineseText(entry), item.context, item.sourceUrl]);
     }
-    download(`lexi-${isBook ? 'book' : 'history'}-${new Date().toISOString().slice(0, 10)}.csv`, csv(rows), 'text/csv;charset=utf-8');
+    download(`lexi-${isBook ? 'book' : 'history'}-${new Date().toISOString().slice(0, 10)}.csv`,
+      new Blob([csv(rows)], { type: 'text/csv;charset=utf-8' }));
   }
   async function importFile(file, restoreRules = false) {
     if (!file) return;
-    if (file.size > 5 * 1024 * 1024) throw new Error('备份超过 5 MiB，请选择较小的 Lexi JSON 文件');
+    checkBackupSize(file.size);
     let parsed;
     try { parsed = JSON.parse(await file.text()); } catch { throw new Error('无法读取 JSON 备份，未导入数据'); }
     const incoming = validateBackup(parsed);
@@ -4387,7 +4401,7 @@ SOFTWARE.
     const data = el('section', 'section');
     data.append(el('h3', '', '备份与迁移'));
     const actions = el('div', 'actions');
-    actions.append(button('导出 JSON 备份', () => download(`lexi-backup-${new Date().toISOString().slice(0, 10)}.json`, JSON.stringify(snapshot(), null, 2), 'application/json')),
+    actions.append(button('导出 JSON 备份', exportBackup),
       button('导出历史 CSV', () => exportCsv(false)), button('导出生词 CSV', () => exportCsv(true)));
     const upload = el('input'); upload.type = 'file'; upload.accept = '.json,application/json'; upload.hidden = true;
     const restoreRow = el('label', 'setting');
@@ -4395,7 +4409,7 @@ SOFTWARE.
     restoreRow.append(el('span', '', '导入时添加备份中的网页禁用规则（另行确认）'), restoreRules);
     upload.addEventListener('change', () => { importFile(upload.files?.[0], restoreRules.checked).catch(showError); upload.value = ''; });
     actions.append(button('导入 JSON 合并', () => upload.click()));
-    data.append(actions, upload, restoreRow, el('p', 'notice', 'JSON 包含完整历史、复习进度和网页禁用规则。导入默认保留本机设置与禁用规则，CSV 便于表格查看。'));
+    data.append(actions, upload, restoreRow, el('p', 'notice', `JSON 包含完整历史、复习进度和网页禁用规则，导出与导入上限均为 ${BACKUP_MIB} MiB。导入默认保留本机设置与禁用规则，CSV 便于表格查看。`));
     const privacy = el('section', 'section');
     privacy.append(el('h3', '', '服务与隐私'), el('p', 'notice', '查词会向 Free Dictionary API 发送当前单词；缺少对应缓存时，向 MyMemory 发送最多 6 条英文释义、向有道发送当前单词，分别获取并同时显示两路中文。启用翻译回落后，MyMemory 失败时向 Google Translate 发送相同释义。获取音标和词形同样向有道发送单词，词形补全可能另查原形；进行中的有道请求复用。启用额外音标备用来源后，在有道失败且主词典无音标时向 Datamuse 发送当前单词。成功后本地保存，再次打开直接读取。网页上下文不会发送。在线音频和浏览器朗读可能联网。服务可用性、内容与额度由提供方决定。'),
       link('Free Dictionary API', 'https://dictionaryapi.dev/'), document.createTextNode(' · '),

@@ -73,6 +73,18 @@ function setup(phonetic = '/test/', phoneticSource = 'youdao', options = {}) {
     querySelector(selector) { return this.querySelectorAll(selector)[0] || null; }
   }
   const document = new Element('document');
+  const downloads = new Map();
+  const blobs = new Map();
+  class BrowserURL extends URL {
+    static createObjectURL(blob) { const url = URL.createObjectURL(blob); blobs.set(url, blob); return url; }
+    static revokeObjectURL(url) { blobs.delete(url); URL.revokeObjectURL(url); }
+  }
+  Element.prototype.click = function () {
+    if (this.tag === 'a' && this.download) {
+      downloads.set(this.download, blobs.get(this.href));
+      BrowserURL.revokeObjectURL(this.href);
+    }
+  };
   document.documentElement = new Element('html');
   document.createElement = tag => new Element(tag);
   document.createTextNode = text => { const node = new Element('#text'); node.textContent = text; return node; };
@@ -106,7 +118,7 @@ function setup(phonetic = '/test/', phoneticSource = 'youdao', options = {}) {
   }
   let uuid = 0;
   const context = {
-    window, document, Element, Date: ClockDate, TextEncoder, URL, location: { href: options.url || 'https://docs.example.com/reading' },
+    window, document, Element, Date: ClockDate, TextEncoder, URL: BrowserURL, Blob, location: { href: options.url || 'https://docs.example.com/reading' },
     crypto: { randomUUID: () => 'test-uuid-' + ++uuid },
     confirm: () => true,
     alert: message => alerts.push(message),
@@ -135,7 +147,7 @@ function setup(phonetic = '/test/', phoneticSource = 'youdao', options = {}) {
       if (timer.at <= clockNow && timers.has(id)) { timers.delete(id); timer.callback(); }
     }
   };
-  return { get shadow() { return shadow; }, storage, events, context, Element, click, prefix, advance, timers, menus, valueListeners, alerts };
+  return { get shadow() { return shadow; }, storage, events, context, Element, click, prefix, advance, timers, menus, valueListeners, alerts, downloads };
 }
 
 const findButton = (shadow, label) => shadow.querySelectorAll('button').find(node => node.textContent.startsWith(label));
@@ -545,6 +557,86 @@ test('rule limits reject new bans and oversized backup unions before any vocabul
   assert.equal(app.storage.has(app.prefix + 'disabled:domain:another.example.com'), false);
 });
 
+test('JSON backups above the old 5 MiB limit restore vocabulary, repeated history and both card directions', async () => {
+  const original = setup();
+  const { storage, prefix } = original;
+  const at = original.context.Date.now();
+  const meaning = schedule(createStudy('alpha', at - 86400000), 'easy', at - 86400000);
+  const recall = schedule(createStudy('alpha', at), 'good', at);
+  storage.set(prefix + 'study:alpha', meaning);
+  storage.set(prefix + 'recall:alpha', recall);
+  await original.click(findButton(original.shadow, '设置'));
+
+  for (const large of [false, true]) {
+    if (large) {
+      for (let i = 0; i < 3000; i++) {
+        const word = 'fixture' + String.fromCharCode(97 + Math.floor(i / 676), 97 + Math.floor(i / 26) % 26, 97 + i % 26);
+        storage.set(prefix + 'word:' + word, { word, fetchedAt: at, phonetic: '', meanings: [{
+          partOfSpeech: 'noun', definitions: [
+            { definition: '释义'.repeat(450), example: '' },
+            { definition: '例句'.repeat(450), example: '' }
+          ]
+        }] });
+      }
+    }
+    await original.click(findButton(original.shadow, '导出 JSON 备份'));
+    const file = [...original.downloads.values()][0];
+    assert.ok(file, 'export starts a file download');
+    assert.equal(file.size > 5 * 1024 * 1024, large);
+
+    const localSettings = { newPerDay: 3, reverse: true };
+    const restored = setup('/test/', 'youdao', { settings: localSettings });
+    for (const key of restored.storage.keys()) if (key !== prefix + 'settings') restored.storage.delete(key);
+    await restored.click(findButton(restored.shadow, '设置'));
+    const upload = restored.shadow.querySelectorAll('input').find(node => node.type === 'file');
+    upload.files = [file];
+    upload.listeners.change.listener();
+    await new Promise(setImmediate);
+    assert.match(restored.shadow.querySelector('.toast').textContent, /合并完成/);
+    assert.equal([...restored.storage.keys()].filter(key => key.startsWith(prefix + 'word:')).length, large ? 3002 : 2);
+    for (const event of original.events) {
+      const actual = restored.storage.get(prefix + 'event:' + event.id);
+      assert.deepEqual([actual.id, actual.word, actual.at], [event.id, event.word, event.at]);
+    }
+    for (const [key, expected] of [['study:alpha', meaning], ['recall:alpha', recall]]) {
+      assert.deepEqual(JSON.parse(JSON.stringify(restored.storage.get(prefix + key))), expected);
+    }
+    assert.deepEqual(restored.storage.get(prefix + 'settings'), localSettings);
+  }
+});
+
+test('JSON export refuses a collection beyond the restore record limit without downloading a backup', async () => {
+  const app = setup();
+  await app.click(findButton(app.shadow, '设置'));
+  const template = app.storage.get(app.prefix + 'word:alpha');
+  for (let i = 0; i < 9999; i++) {
+    const word = 'fixture' + String.fromCharCode(97 + Math.floor(i / 676), 97 + Math.floor(i / 26) % 26, 97 + i % 26);
+    app.storage.set(app.prefix + 'word:' + word, { ...template, word });
+  }
+  await app.click(findButton(app.shadow, '导出 JSON 备份'));
+  assert.match(app.shadow.querySelector('.toast').textContent, /备份超过记录上限/);
+  assert.equal(app.downloads.size, 0);
+});
+
+test('settings can still import v1 and v2 progress backups', async () => {
+  for (const version of [1, 2]) {
+    const app = setup();
+    const word = app.storage.get(app.prefix + 'word:alpha');
+    const legacy = app.storage.get(app.prefix + 'study:alpha');
+    app.storage.delete(app.prefix + 'study:alpha');
+    const data = { schemaVersion: version, words: [word], history: [], book: [version === 1 ? legacy : migrateStudy(legacy)] };
+    await app.click(findButton(app.shadow, '设置'));
+    const upload = app.shadow.querySelectorAll('input').find(node => node.type === 'file');
+    upload.files = [new Blob([JSON.stringify(data)])];
+    upload.listeners.change.listener();
+    await new Promise(setImmediate);
+    assert.match(app.shadow.querySelector('.toast').textContent, /合并完成/);
+    const progress = app.storage.get(app.prefix + 'study:alpha');
+    assert.equal(progress.fsrs.due, legacy.dueAt);
+    assert.equal(progress.reviews, legacy.reviews);
+  }
+});
+
 function seedTook(app) {
   const entry = { ...app.storage.get(app.prefix + 'word:alpha'), word: 'took', phonetic: '/tʊk/',
     meanings: [{ partOfSpeech: 'verb', definitions: [{ definition: 'simple past tense of take', example: '' }] }] };
@@ -913,7 +1005,10 @@ test('phonetic fallback fills plopped IPA when Youdao and the main dictionary ha
   storage.set(prefix + 'event:plopped-event', { id: 'plopped-event', word: 'plopped', at: context.Date.now() });
   const requests = [];
   context.GM_xmlhttpRequest = request => { requests.push(request); return { abort() {} }; };
-  await click(shadow.querySelector('.item'));
+  const search = shadow.querySelectorAll('input').find(node => node.getAttribute('aria-label') === '筛选已保存单词');
+  search.value = 'plopped';
+  search.listeners.input.listener();
+  await click(shadow.querySelectorAll('.item').find(node => node.querySelector('.term').textContent === 'plopped'));
   await respondYoudao(requests[0], 'plopped', { prototype: 'plop' });
   assert.equal(requests.length, 2, 'missing exact-word IPA must request the configured fallback, not use the root IPA');
   assert.equal(new URL(requests[1].url).hostname, 'api.datamuse.com');
