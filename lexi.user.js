@@ -15,7 +15,7 @@
 // @grant        GM_registerMenuCommand
 // @grant        GM_unregisterMenuCommand
 // @grant        GM_xmlhttpRequest
-// @grant        GM_info第一阶段：恢复测试基线与备份可恢复性
+// @grant        GM_info
 // @connect      api.dictionaryapi.dev
 // @connect      api.mymemory.translated.net
 // @connect      translate.googleapis.com
@@ -3757,7 +3757,7 @@ SOFTWARE.
       node.setAttribute('aria-label', node.title);
     }
   }
-  function senses(entry) {
+  function senses(entry, autoLoad = true) {
     const container = el('div');
     for (const meaning of entry.meanings) {
       const section = el('section', 'sense');
@@ -3768,7 +3768,7 @@ SOFTWARE.
       });
       container.append(section);
     }
-    container.append(wordFormsBlock(entry));
+    container.append(wordFormsBlock(entry, autoLoad));
     return container;
   }
   const youdaoRequests = new Map();
@@ -3782,7 +3782,7 @@ SOFTWARE.
     return youdaoRequests.get(word);
   }
   const inflections = new Map();
-  function wordFormsBlock(entry) {
+  function wordFormsBlock(entry, autoLoad) {
     const node = el('section', 'word-forms sense');
     const show = wordForms => {
       node.replaceChildren();
@@ -3826,7 +3826,9 @@ SOFTWARE.
           button('重试词形变化', load));
       }
     }
-    if (entry.wordForms) show(entry.wordForms); else load();
+    if (entry.wordForms) show(entry.wordForms);
+    else if (autoLoad) load();
+    else node.append(button('补全词形变化', load));
     return node;
   }
   const pronunciations = new Map();
@@ -4327,7 +4329,7 @@ SOFTWARE.
           : `✗ 你写的是“${review.typed.trim()}”，答错请选“忘记”`));
       }
       const back = el('div', 'review-answer');
-      back.append(senses(wordEntry));
+      back.append(senses(wordEntry, autoLoad));
       if (!recall) back.append(chineseDefinitions(wordEntry, autoLoad));
       const actions = el('div', 'actions');
       for (const [index, [grade, label, hint]] of [['again', '忘记', '没想起来，或答案不正确'], ['hard', '困难', '想对了，但回忆很吃力'],
@@ -4542,7 +4544,7 @@ SOFTWARE.
     cacheOnly.addEventListener('change', () => save('reviewCacheOnly', cacheOnly.checked, () => { cacheOnly.checked = settings.reviewCacheOnly; }, false));
     cacheRow.append(el('span', '', '复习仅用缓存'), cacheOnly);
     study.append(limitRow, retentionRow, reverseRow, cacheRow, el('p', 'notice',
-      '开启后，复习卡不自动联网补全音标或中文释义；仍可手动获取。发音可能联网，不影响查词。'), el('p', 'notice',
+      '开启后，复习卡不自动联网补全音标、词形或中文释义；仍可手动获取。发音可能联网，不影响查词。'), el('p', 'notice',
       '每天凌晨 4:00 开始新的学习日。记得率越高，间隔越短、复习越多，只影响之后的安排。反向卡在该词进入长期复习后加入，计入新词上限，进度独立保存；关闭后暂停反向卡，进度保留。'));
     const chinese = el('section', 'section');
     chinese.append(el('h3', '', '中文释义'), el('p', 'notice', '英文释义的机器翻译与有道中文词典释义同时显示、分别缓存。有道释义不与英文逐条对应；每路独立显示加载、失败与重试状态，一路失败不影响另一路。'));

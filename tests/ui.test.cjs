@@ -2108,6 +2108,7 @@ test('cache-only review keeps cached hints, lets users fetch missing hints, and 
   const { storage, prefix, context, shadow, click } = app;
   const alpha = storage.get(prefix + 'word:alpha');
   delete alpha.youdaoTranslation;
+  delete alpha.wordForms;
   const requests = [];
   context.GM_xmlhttpRequest = request => { requests.push(request); return { abort() {} }; };
   await click(findButton(shadow, '设置'));
@@ -2122,6 +2123,7 @@ test('cache-only review keeps cached hints, lets users fetch missing hints, and 
   assert.ok(findButton(shadow, '补全音标'));
   await click(findButton(shadow, '显示释义'));
   assert.equal(requests.length, 0);
+  assert.ok(findButton(shadow, '补全词形变化'));
   assert.match(textOf(shadow.querySelector('.translation-mymemory')), /中文/);
   await click(findButton(shadow, '获取有道中文释义'));
   assert.equal(requests.length, 1);
