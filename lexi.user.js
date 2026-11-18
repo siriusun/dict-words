@@ -2090,12 +2090,13 @@ SOFTWARE.
   };
   const GRADES = { again: 1, hard: 2, good: 3, easy: 4 };
   const STUDY_STATES = ['新词', '学习中', '间隔复习', '重新学习'];
-  const DEFAULTS = { auto: true, autoBook: false, context: false, readingMarkerSeconds: 3, newPerDay: 20, retention: 0.9, reverse: false, translationFallback: 'google', phoneticFallback: 'datamuse' };
+  const DEFAULTS = { auto: true, autoBook: false, context: false, readingMarkerSeconds: 3, newPerDay: 20, retention: 0.9, reverse: false, reviewCacheOnly: false, translationFallback: 'google', phoneticFallback: 'datamuse' };
   const cleanSettings = raw => {
     const value = { ...DEFAULTS, ...(raw && typeof raw === 'object' ? raw : {}) };
     if (!Number.isInteger(value.readingMarkerSeconds) || value.readingMarkerSeconds < 0 || value.readingMarkerSeconds > 300) value.readingMarkerSeconds = DEFAULTS.readingMarkerSeconds;
     if (!Number.isInteger(value.newPerDay) || value.newPerDay < 0 || value.newPerDay > 200) value.newPerDay = DEFAULTS.newPerDay;
     if (!RETENTIONS.includes(value.retention)) value.retention = DEFAULTS.retention;
+    if (typeof value.reviewCacheOnly !== 'boolean') value.reviewCacheOnly = DEFAULTS.reviewCacheOnly;
     if (!['none', 'google'].includes(value.translationFallback)) value.translationFallback = DEFAULTS.translationFallback;
     if (!['none', 'datamuse'].includes(value.phoneticFallback)) value.phoneticFallback = DEFAULTS.phoneticFallback;
     return value;
@@ -2851,7 +2852,10 @@ SOFTWARE.
   let selectedWord = '';
   let selectedEvent = null;
   let screen = 'history';
-  let filter = '';
+  const libraryState = {
+    history: { filter: '', page: 0 },
+    book: { filter: '', page: 0 }
+  };
   let scopeFilter = '';
   let scopePage = 0;
   let oldest = false;
@@ -2937,7 +2941,7 @@ SOFTWARE.
     @supports not selector(::-webkit-scrollbar){*{scrollbar-width:thin;scrollbar-color:color-mix(in srgb,var(--muted) 42%,transparent) transparent}}
     .studio{grid-template-rows:minmax(0,1fr)}.main,.sidebar{min-height:0}.main{overflow:hidden}.sidebar{overflow:auto}.top{flex-shrink:0}
     .view.library{display:flex;flex-direction:column;overflow:hidden}.library>.heading,.library>.subheading{flex-shrink:0}
-    .library .split{flex:1;min-height:0;grid-template-rows:minmax(0,1fr)}.library-list{display:flex;flex-direction:column;min-width:0;min-height:0}.library-list>.row{flex-shrink:0}
+    .library .split{flex:1;min-height:0;grid-template-rows:minmax(0,1fr)}.library-list{display:flex;flex-direction:column;min-width:0;min-height:0}.library-list>.row{flex-shrink:0}.library-pagination{margin-top:8px}
     .library .list{flex:1;min-height:0;max-height:none}.detail-pane{overflow:auto;min-height:0;padding:3px 8px 3px 3px}
     .list:focus-visible,.detail-pane:focus-visible{outline:2px solid #75ac8c;outline-offset:-2px}
     .library-row{position:relative;flex-shrink:0}.library-row>.item{padding-right:42px}.history-row>.item{padding-right:70px}
@@ -3002,7 +3006,7 @@ SOFTWARE.
   sidebar.append(logo, el('div', 'muted', '个人词汇库'));
   const navButtons = {};
   for (const [key, label] of [['history', '查词历史'], ['book', '生词本'], ['review', '复习'], ['sites', '网页管理'], ['settings', '设置']]) {
-    navButtons[key] = button(label, () => { screen = key; filter = ''; render(); }, 'tab');
+    navButtons[key] = button(label, () => { screen = key; render(); }, 'tab');
     sidebar.append(navButtons[key]);
   }
   sidebar.append(el('div', 'footnote', '本地保存 · 无需账号'));
@@ -3565,7 +3569,9 @@ SOFTWARE.
         positionPopover(rect);
       } else {
         if (toast.textContent === `正在查询 ${word}…`) toast.hidden = true;
-        screen = 'history'; filter = ''; render();
+        screen = 'history';
+        Object.assign(libraryState.history, { filter: '', page: 0 });
+        render();
         if (stale) message('使用离线缓存 · 暂未能更新释义');
       }
     } catch (error) {
@@ -3683,7 +3689,7 @@ SOFTWARE.
     }
     return translations.get(key);
   }
-  function translationBlock(entry, provider) {
+  function translationBlock(entry, provider, autoLoad) {
     const node = el('section', 'translation translation-' + provider);
     const label = provider === 'youdao' ? '有道词典' : 'MyMemory';
     const show = (current, primaryError, retry = true) => {
@@ -3713,12 +3719,16 @@ SOFTWARE.
       }
     }
     if (provider === 'youdao' ? entry.youdaoTranslation : entry.translation && entry.translationSource === translationSource(entry)) show(entry);
-    else load();
+    else if (autoLoad) load();
+    else {
+      show(entry, null, false);
+      node.append(button(provider === 'youdao' ? '获取有道中文释义' : '获取 MyMemory 中文释义', load));
+    }
     return node;
   }
-  function chineseDefinitions(entry) {
+  function chineseDefinitions(entry, autoLoad = true) {
     const node = el('div', 'chinese-definitions');
-    node.append(translationBlock(entry, 'mymemory'), translationBlock(entry, 'youdao'));
+    node.append(translationBlock(entry, 'mymemory', autoLoad), translationBlock(entry, 'youdao', autoLoad));
     return node;
   }
   function toggleStar(word, rerender = true) {
@@ -3820,7 +3830,7 @@ SOFTWARE.
     return node;
   }
   const pronunciations = new Map();
-  function phoneticBlock(entry) {
+  function phoneticBlock(entry, autoLoad = true) {
     const node = el('div', 'phonetic');
     const show = current => {
       node.title = current.phoneticSource === 'datamuse' ? 'Datamuse 美式参考音标；罕见词可能由服务按拼写推测，并非人工校验。' : '';
@@ -3878,7 +3888,12 @@ SOFTWARE.
         node.title = error.message;
       }
     }
-    if (entry.phonetic.trim() && ['youdao', 'datamuse'].includes(entry.phoneticSource)) show(entry); else load();
+    if (entry.phonetic.trim() && ['youdao', 'datamuse'].includes(entry.phoneticSource)) show(entry);
+    else if (autoLoad) load();
+    else {
+      show(entry);
+      node.append(button('补全音标', load));
+    }
     return node;
   }
   function wordDetail(entry, event = null, allowStar = true) {
@@ -3929,8 +3944,29 @@ SOFTWARE.
     if (screen === 'review') { renderReview(); return; }
     renderLibrary();
   }
+  const PAGE_SIZE = 50;
+  function createPager(className, move) {
+    const node = el('div', 'scope-pagination' + (className ? ' ' + className : ''));
+    const label = el('span', 'meta');
+    label.setAttribute('role', 'status');
+    const previous = button('上一页', () => move(-1));
+    const next = button('下一页', () => move(1));
+    node.append(label, previous, next);
+    return {
+      node,
+      update(total, page) {
+        const pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+        page = Math.max(0, Math.min(page, pages - 1));
+        label.textContent = `${page + 1} / ${pages} 页`;
+        previous.disabled = page === 0;
+        next.disabled = page === pages - 1;
+        return page;
+      }
+    };
+  }
   function renderLibrary() {
     const isBook = screen === 'book';
+    const state = libraryState[isBook ? 'book' : 'history'];
     const subheading = el('p', 'subheading');
     view.append(el('h1', 'heading', isBook ? '生词本' : '查词历史'), subheading);
     const split = el('div', 'split');
@@ -3939,7 +3975,7 @@ SOFTWARE.
     const search = el('input');
     search.placeholder = '筛选单词…';
     search.setAttribute('aria-label', '筛选已保存单词');
-    search.value = filter;
+    search.value = state.filter;
     toolbar.append(search);
     if (!isBook) {
       const order = el('select');
@@ -3950,7 +3986,7 @@ SOFTWARE.
         order.append(option);
       }
       order.value = oldest ? 'old' : 'new';
-      order.addEventListener('change', () => { oldest = order.value === 'old'; render(); });
+      order.addEventListener('change', () => { oldest = order.value === 'old'; firstPage(); });
       toolbar.append(order);
     }
     const list = el('div', 'list');
@@ -3961,7 +3997,12 @@ SOFTWARE.
     detail.tabIndex = 0;
     detail.setAttribute('role', 'region');
     detail.setAttribute('aria-label', '单词释义');
-    left.append(toolbar, list);
+    const pager = createPager('library-pagination', direction => {
+      state.page += direction;
+      drawList();
+      list.scrollTop = 0;
+    });
+    left.append(toolbar, list, pager.node);
     split.append(left, detail);
     view.append(split);
     function drawDetail() {
@@ -3972,10 +4013,15 @@ SOFTWARE.
       const records = isBook ? all('study').sort((a, b) => b.addedAt - a.addedAt || a.word.localeCompare(b.word)) : ordered(all('event'), oldest);
       subheading.textContent = isBook ? `${records.length} 个词 · 收藏的词会进入复习` : `${records.length} 次查询 · 每次成功查询都留有记录`;
       list.replaceChildren();
-      const matches = records.filter(item => item.word.includes(filter.toLowerCase()));
+      const filter = state.filter.trim().toLowerCase();
+      const matches = records.filter(item => item.word.includes(filter));
+      state.page = pager.update(matches.length, state.page);
+      pager.node.hidden = matches.length <= PAGE_SIZE;
       if (!matches.length) { list.append(el('div', 'empty', records.length ? '没有匹配的单词' : isBook ? '遇到想记住的词，点一下收藏' : '你的第一条查词记录会出现在这里')); return; }
-      // shortcut: 一次显示最近的 300 条匹配记录，历史超过此数量时使用筛选或导出查看全量。
-      for (const [index, item] of matches.slice(0, 300).entries()) {
+      const start = state.page * PAGE_SIZE;
+      for (const [index, item] of matches.slice(start, start + PAGE_SIZE).entries()) {
+        const position = start + index;
+        const neighbor = matches[position + 1] || matches[position - 1];
         const row = button('', () => {
           resetInternalLookup(); cancelInternalSelection();
           selectedWord = item.word;
@@ -3994,14 +4040,11 @@ SOFTWARE.
             remove('event:' + item.id);
             const deletingSelected = selectedEvent?.id === item.id;
             if (deletingSelected) {
-              selectedEvent = matches[index + 1] || matches[index - 1] || null;
+              selectedEvent = neighbor || null;
               selectedWord = selectedEvent?.word || '';
             }
-            notify(); render();
-            view.querySelector('.list').scrollTop = scrollTop;
-            if (!deletingSelected) view.querySelector('.detail-pane').scrollTop = detailTop;
-            const deletes = view.querySelectorAll('.history-delete');
-            (deletes[index] || deletes[index - 1] || view.querySelector('input')).focus({ preventScroll: true });
+            notify();
+            redrawAfterRemoval('.history-delete', position, start, scrollTop, deletingSelected, detailTop);
           }, 'icon danger history-delete', `删除 ${item.word} 的这条查询记录`));
         }
         const star = button(starred ? '★' : '☆', () => {
@@ -4011,14 +4054,10 @@ SOFTWARE.
           if (isBook) {
             const deletingSelected = selectedWord === item.word;
             if (deletingSelected) {
-              selectedWord = (matches[index + 1] || matches[index - 1])?.word || '';
+              selectedWord = neighbor?.word || '';
               selectedEvent = null;
             }
-            render();
-            view.querySelector('.list').scrollTop = scrollTop;
-            if (!deletingSelected) view.querySelector('.detail-pane').scrollTop = detailTop;
-            const stars = view.querySelectorAll('.list-star');
-            (stars[index] || stars[index - 1] || view.querySelector('input')).focus({ preventScroll: true });
+            redrawAfterRemoval('.list-star', position, start, scrollTop, deletingSelected, detailTop);
           } else {
             drawList();
             list.scrollTop = scrollTop;
@@ -4031,9 +4070,22 @@ SOFTWARE.
         wrapper.append(row, actions);
         list.append(wrapper);
       }
-      if (matches.length > 300) list.append(el('p', 'notice', `显示前 300 / ${matches.length} 条，可继续筛选或导出全量`));
     }
-    search.addEventListener('input', () => { filter = search.value; drawList(); });
+    function redrawAfterRemoval(selector, position, previousStart, scrollTop, deletingSelected, detailTop) {
+      render();
+      const activeList = view.querySelector('.list');
+      const start = state.page * PAGE_SIZE;
+      if (start === previousStart) activeList.scrollTop = scrollTop;
+      if (!deletingSelected) view.querySelector('.detail-pane').scrollTop = detailTop;
+      const buttons = activeList.querySelectorAll(selector);
+      (buttons[Math.min(position - start, buttons.length - 1)] || view.querySelector('input')).focus({ preventScroll: start === previousStart });
+    }
+    function firstPage() {
+      state.page = 0;
+      drawList();
+      list.scrollTop = 0;
+    }
+    search.addEventListener('input', () => { state.filter = search.value; firstPage(); });
     refreshLibrary = () => {
       const scrollTop = list.scrollTop;
       drawList();
@@ -4224,6 +4276,7 @@ SOFTWARE.
     const record = entry.record;
     const answer = review.revealed;
     const recall = entry.kind === 'recall';
+    const autoLoad = !cleanSettings(get('settings', {})).reviewCacheOnly;
     const chinese = recall ? chineseText(wordEntry).trim() : '';
     const direction = !recall ? '看英文想含义' : chinese ? '反向 · 看中文想英文' : '反向 · 看英文释义想单词';
     const card = el('div', 'review');
@@ -4242,9 +4295,9 @@ SOFTWARE.
       }
       card.append(prompt);
       if (context) card.append(contextLine(context, !answer ? word : ''));
-      if (answer) card.append(el('h2', 'word', word), phoneticBlock(wordEntry));
+      if (answer) card.append(el('h2', 'word', word), phoneticBlock(wordEntry, autoLoad));
     } else {
-      card.append(el('h2', 'word', word), phoneticBlock(wordEntry));
+      card.append(el('h2', 'word', word), phoneticBlock(wordEntry, autoLoad));
       if (context) card.append(contextLine(context));
     }
     if (!answer) {
@@ -4275,7 +4328,7 @@ SOFTWARE.
       }
       const back = el('div', 'review-answer');
       back.append(senses(wordEntry));
-      if (!recall) back.append(chineseDefinitions(wordEntry));
+      if (!recall) back.append(chineseDefinitions(wordEntry, autoLoad));
       const actions = el('div', 'actions');
       for (const [index, [grade, label, hint]] of [['again', '忘记', '没想起来，或答案不正确'], ['hard', '困难', '想对了，但回忆很吃力'],
       ['good', '记得', '能够正确回忆'], ['easy', '轻松', '无需费力就想起来了']].entries()) {
@@ -4397,25 +4450,16 @@ SOFTWARE.
     ruleList.tabIndex = 0;
     ruleList.setAttribute('role', 'region');
     ruleList.setAttribute('aria-label', '已禁用的页面和域名');
-    const pagination = el('div', 'scope-pagination');
-    const pageLabel = el('span', 'meta');
-    pageLabel.setAttribute('role', 'status');
-    const previous = button('上一页', () => { scopePage--; renderRules(); });
-    const next = button('下一页', () => { scopePage++; renderRules(); });
-    pagination.append(pageLabel, previous, next);
+    const pager = createPager('', direction => { scopePage += direction; renderRules(); });
     const rules = readSiteRules();
     const renderRules = () => {
       const matches = rules.filter(rule => rule.value.toLowerCase().includes(scopeFilter.trim().toLowerCase()));
-      const pages = Math.max(1, Math.ceil(matches.length / 50));
-      scopePage = Math.max(0, Math.min(scopePage, pages - 1));
+      scopePage = pager.update(matches.length, scopePage);
       count.textContent = `${matches.length} / ${rules.length} 条`;
-      pageLabel.textContent = `${scopePage + 1} / ${pages} 页`;
-      previous.disabled = scopePage === 0;
-      next.disabled = scopePage === pages - 1;
       ruleList.replaceChildren();
       ruleList.scrollTop = 0;
       if (!matches.length) ruleList.append(el('p', 'notice', rules.length ? '没有匹配的禁用规则' : '还没有禁用规则'));
-      for (const rule of matches.slice(scopePage * 50, (scopePage + 1) * 50)) {
+      for (const rule of matches.slice(scopePage * PAGE_SIZE, (scopePage + 1) * PAGE_SIZE)) {
         const row = el('div', 'scope-rule');
         const address = el('span', 'scope-address', rule.value);
         address.title = rule.value;
@@ -4429,7 +4473,7 @@ SOFTWARE.
       try { renderRules(); } catch (error) { showError(error); }
     });
     renderRules();
-    scope.append(current, help, toolbar, ruleList, pagination);
+    scope.append(current, help, toolbar, ruleList, pager.node);
     view.append(scope);
   }
   function renderSettings() {
@@ -4493,7 +4537,12 @@ SOFTWARE.
     const reverse = el('input'); reverse.type = 'checkbox'; reverse.checked = settings.reverse;
     reverse.addEventListener('change', () => save('reverse', reverse.checked, () => { reverse.checked = settings.reverse; }));
     reverseRow.append(el('span', '', '加入反向卡（看中文想英文）'), reverse);
-    study.append(limitRow, retentionRow, reverseRow, el('p', 'notice',
+    const cacheRow = el('label', 'setting');
+    const cacheOnly = el('input'); cacheOnly.type = 'checkbox'; cacheOnly.checked = settings.reviewCacheOnly;
+    cacheOnly.addEventListener('change', () => save('reviewCacheOnly', cacheOnly.checked, () => { cacheOnly.checked = settings.reviewCacheOnly; }, false));
+    cacheRow.append(el('span', '', '复习仅用缓存'), cacheOnly);
+    study.append(limitRow, retentionRow, reverseRow, cacheRow, el('p', 'notice',
+      '开启后，复习卡不自动联网补全音标或中文释义；仍可手动获取。发音可能联网，不影响查词。'), el('p', 'notice',
       '每天凌晨 4:00 开始新的学习日。记得率越高，间隔越短、复习越多，只影响之后的安排。反向卡在该词进入长期复习后加入，计入新词上限，进度独立保存；关闭后暂停反向卡，进度保留。'));
     const chinese = el('section', 'section');
     chinese.append(el('h3', '', '中文释义'), el('p', 'notice', '英文释义的机器翻译与有道中文词典释义同时显示、分别缓存。有道释义不与英文逐条对应；每路独立显示加载、失败与重试状态，一路失败不影响另一路。'));
@@ -4551,6 +4600,7 @@ SOFTWARE.
       settings = { ...DEFAULTS }; selectedWord = ''; selectedEvent = null; review.reset();
       launcherPosition = null; positionLauncher();
       scopeFilter = ''; scopePage = 0;
+      for (const state of Object.values(libraryState)) Object.assign(state, { filter: '', page: 0 });
       syncSite(); put('scope-revision', crypto.randomUUID());
       notify(); render(); message('Lexi 数据已删除');
     }, 'button danger'));

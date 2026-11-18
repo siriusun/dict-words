@@ -1199,6 +1199,57 @@ test('definition refresh preserves preferred Youdao phonetics even when the main
   assert.equal(requests.length, 2, 'definition refresh reuses saved Youdao phonetics');
 });
 
+test('history and vocabulary reach beyond 300 filtered matches and clamp after removing the last page', async () => {
+  const app = setup();
+  const { shadow, storage, prefix, context, click } = app;
+  const at = context.Date.now();
+  const words = Array.from({ length: 301 }, (_, i) =>
+    'fixture' + String.fromCharCode(97 + Math.floor(i / 26), 97 + i % 26));
+  for (const [i, word] of words.entries()) {
+    storage.set(prefix + 'event:paging-event-' + i, { id: 'paging-event-' + i, word, at: at + i });
+    addWord(app, word, createStudy(word, at + i));
+  }
+  const search = () => shadow.querySelectorAll('input').find(node => node.getAttribute('aria-label') === '筛选已保存单词');
+  const filter = value => { search().value = value; search().listeners.input.listener(); };
+  const lastPage = async () => {
+    const next = findButton(shadow, '下一页');
+    assert.ok(next, 'pagination is offered');
+    for (let i = 0; i < 6; i++) await click(next);
+    assert.equal(next.disabled, true);
+  };
+  const visible = () => shadow.querySelectorAll('.item').map(row => row.querySelector('.term').textContent);
+  const status = () => shadow.querySelector('.library-pagination').querySelector('.meta').textContent;
+  const sort = () => shadow.querySelectorAll('select').find(node => node.getAttribute('aria-label') === '历史排序');
+  await click(findButton(shadow, '查词历史'));
+  filter('fixture');
+  assert.equal(visible()[0], words.at(-1));
+  sort().value = 'old';
+  sort().listeners.change.listener();
+  assert.equal(visible()[0], words[0]);
+  await lastPage();
+  assert.deepEqual(visible(), [words.at(-1)]);
+  await click(shadow.querySelector('.item'));
+  await click(shadow.querySelector('.history-delete'));
+  assert.match(status(), /6 \/ 6/);
+  assert.equal(search().value, 'fixture');
+  assert.equal(sort().value, 'old');
+  assert.equal(visible().at(-1), words.at(-2));
+  assert.equal(shadow.querySelector('.detail-pane').querySelector('.word').textContent, words.at(-2));
+
+  await click(findButton(shadow, '生词本'));
+  filter('fixture');
+  await lastPage();
+  assert.deepEqual(visible(), [words[0]]);
+  await click(shadow.querySelector('.item'));
+  await click(shadow.querySelector('.list-star'));
+  assert.match(status(), /6 \/ 6/);
+  assert.equal(search().value, 'fixture');
+  assert.equal(visible().at(-1), words[1]);
+  await click(findButton(shadow, '查词历史'));
+  assert.match(status(), /6 \/ 6/);
+  assert.equal(sort().value, 'old');
+});
+
 test('deleting an unselected filtered event preserves selection and scroll positions', async () => {
   const { shadow, storage, events, prefix, click } = setup();
   const search = shadow.querySelector('.library-list').querySelector('input');
@@ -2050,6 +2101,43 @@ test('keyboard reveals and grades the focused card, and undo restores progress a
   await click(findButton(shadow, '撤销上一次'));
   assert.equal(storage.get(prefix + 'study:' + first), elsewhere);
   assert.equal(shadow.querySelector('.toast').textContent, '该词已在其他页面更新，无法撤销');
+});
+
+test('cache-only review keeps cached hints, lets users fetch missing hints, and does not change library lookup', async () => {
+  const app = setup('/cached/', '');
+  const { storage, prefix, context, shadow, click } = app;
+  const alpha = storage.get(prefix + 'word:alpha');
+  delete alpha.youdaoTranslation;
+  const requests = [];
+  context.GM_xmlhttpRequest = request => { requests.push(request); return { abort() {} }; };
+  await click(findButton(shadow, '设置'));
+  const toggle = shadow.querySelectorAll('.setting').find(row => textOf(row).includes('复习仅用缓存')).querySelector('input');
+  assert.equal(toggle.checked, false);
+  toggle.checked = true;
+  toggle.listeners.change.listener();
+  assert.equal(storage.get(prefix + 'settings').reviewCacheOnly, true);
+
+  await openReview(app);
+  assert.match(textOf(shadow.querySelector('.phonetic')), /\/cached\//);
+  assert.ok(findButton(shadow, '补全音标'));
+  await click(findButton(shadow, '显示释义'));
+  assert.equal(requests.length, 0);
+  assert.match(textOf(shadow.querySelector('.translation-mymemory')), /中文/);
+  await click(findButton(shadow, '获取有道中文释义'));
+  assert.equal(requests.length, 1);
+  assert.equal(new URL(requests[0].url).hostname, 'dict.youdao.com');
+  await respondYoudao(requests[0], 'alpha', { trs: [{ tr: [{ l: { i: ['测试有道释义'] } }] }] });
+  assert.match(textOf(shadow.querySelector('.translation-youdao')), /测试有道释义/);
+  await click(findButton(shadow, '补全音标'));
+  assert.equal(requests.length, 2);
+  await respondYoudao(requests[1], 'alpha', { ukphone: 'ˈælfə' });
+  assert.match(textOf(shadow.querySelector('.phonetic')), /\/ˈælfə\//);
+  await click(findButton(shadow, '记得'));
+  assert.equal(storage.get(prefix + 'study:alpha').lastGrade, 'good');
+  await click(findButton(shadow, '查词历史'));
+  const beta = shadow.querySelectorAll('.item').find(row => row.querySelector('.term').textContent === 'beta');
+  await click(beta);
+  assert.ok(requests.some(req => new URL(req.url).searchParams.get('q') === 'beta'));
 });
 
 test('the answer side fills a missing Chinese translation', async () => {
