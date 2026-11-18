@@ -618,6 +618,42 @@ test('JSON export refuses a collection beyond the restore record limit without d
   assert.equal(app.downloads.size, 0);
 });
 
+test('import preview distinguishes replay from incomplete history and cancellation saves nothing', async () => {
+  const app = setup('/test/', 'youdao', { settings: { retention: 0.95 } });
+  const { storage, prefix, context, shadow, click } = app;
+  const now = context.Date.now();
+  const initial = schedule(createStudy('beta', now - 4 * DAY), 'easy', now - 4 * DAY);
+  const local = schedule(initial, 'good', now - 2 * DAY);
+  const incomingBeta = schedule(initial, 'again', now - DAY);
+  storage.set(prefix + 'study:beta', local);
+  const localAlpha = storage.get(prefix + 'study:alpha');
+  const incomingAlpha = schedule(localAlpha, 'good', now);
+  const data = { schemaVersion: 3, words: ['alpha', 'beta'].map(word => storage.get(prefix + 'word:' + word)),
+    history: [], book: [incomingAlpha, incomingBeta], recall: [] };
+  await click(findButton(shadow, '设置'));
+  let preview;
+  let confirmed = false;
+  context.confirm = text => { preview = text; return confirmed; };
+  async function uploadBackup() {
+    const upload = shadow.querySelectorAll('input').find(node => node.type === 'file');
+    upload.files = [new Blob([JSON.stringify(data)])];
+    upload.listeners.change.listener();
+    await new Promise(setImmediate);
+  }
+  await uploadBackup();
+  assert.match(preview, /合并并重放：1 张/);
+  assert.match(preview, /日志不全，保留较新进度：1 张/);
+  assert.match(preview, /95%.*可能改变下次复习日期/);
+  assert.equal(storage.get(prefix + 'study:alpha'), localAlpha);
+  assert.equal(storage.get(prefix + 'study:beta'), local);
+  confirmed = true;
+  await uploadBackup();
+  assert.deepEqual(json(storage.get(prefix + 'study:alpha')), incomingAlpha);
+  const replay = storage.get(prefix + 'study:beta');
+  assert.deepEqual(json(replay.log.map(({ at, rating }) => [at, rating])),
+    [[now - 4 * DAY, 4], [now - 2 * DAY, 3], [now - DAY, 1]]);
+});
+
 test('settings can still import v1 and v2 progress backups', async () => {
   for (const version of [1, 2]) {
     const app = setup();
@@ -1798,7 +1834,7 @@ test('internal selections use composed ranges when a browser retargets shadow se
   assert.equal(shadow.querySelector('.detail-pane').querySelector('.word').textContent, 'beta');
 });
 
-test('learning steps return within the same round, waiting for due cards before showing them early', async () => {
+test('learning steps return within the same round, preferring other ready cards before optional early review', async () => {
   const app = setup();
   const { shadow, storage, prefix, context, advance } = app;
   addWord(app, 'gamma', createStudy('gamma', context.Date.now() - 1000));
@@ -1814,13 +1850,44 @@ test('learning steps return within the same round, waiting for due cards before 
   assert.equal(currentWord(shadow), 'beta');
   assert.ok(shadow.querySelector('.review').querySelector('.muted').textContent.includes('学习中'));
   await answerWith(app, '记得');
+  assert.match(textOf(shadow.querySelector('.review')), /下一张.*到期/);
+  await app.click(findButton(shadow, '现在提前复习'));
   assert.equal(currentWord(shadow), 'gamma');
   await answerWith(app, '记得');
+  await app.click(findButton(shadow, '现在提前复习'));
   assert.equal(currentWord(shadow), 'beta');
   await answerWith(app, '记得');
   assert.ok(shadow.querySelector('.review').querySelector('h2').textContent.includes('本轮已完成'));
   for (const word of ['beta', 'gamma']) assert.equal(storage.get(prefix + 'study:' + word).fsrs.state, 2);
   assert.deepEqual(json(storage.get(prefix + 'study:beta').log.map(entry => entry.rating)), [1, 3, 3]);
+});
+
+test('a single learning card waits, returns at its due time, and cancels its wait when leaving', async () => {
+  const app = setup();
+  const { shadow, storage, prefix, context, click, advance, timers } = app;
+  const at = context.Date.now();
+  storage.set(prefix + 'study:alpha', createStudy('alpha', at));
+  await openReview(app);
+  await answerWith(app, '忘记');
+  assert.equal(currentWord(shadow), undefined);
+  assert.ok(findButton(shadow, '现在提前复习'));
+  const due = storage.get(prefix + 'study:alpha').dueAt;
+  advance(due - context.Date.now() - 1);
+  assert.equal(currentWord(shadow), undefined);
+  advance(1);
+  assert.equal(currentWord(shadow), 'alpha');
+  assert.ok(findButton(shadow, '显示释义'));
+  await answerWith(app, '记得');
+  await click(findButton(shadow, '现在提前复习'));
+  assert.equal(currentWord(shadow), 'alpha');
+  await click(findButton(shadow, '撤销上一次'));
+  assert.equal(currentWord(shadow), 'alpha');
+  assert.equal(storage.get(prefix + 'study:alpha').log.length, 1);
+  await answerWith(app, '记得');
+  const nextDue = storage.get(prefix + 'study:alpha').dueAt;
+  assert.ok([...timers.values()].some(timer => timer.at === nextDue));
+  await click(findButton(shadow, '生词本'));
+  assert.equal([...timers.values()].some(timer => timer.at === nextDue), false);
 });
 
 test('daily new-word limit caps rounds and explains when today\'s new words are used up', async () => {
@@ -2428,6 +2495,31 @@ test('Chinese definitions report a source-specific storage failure and leave the
   assert.equal(storage.get(prefix + 'word:alpha').translation, '中文');
 });
 
+test('reverse card titles match the prompt language and hide every target occurrence until reveal', async () => {
+  for (const chinese of [false, true]) {
+    const app = setup();
+    const { shadow, storage, prefix, context, click } = app;
+    const phrase = 'Alpha or alpha, not alphabet.';
+    const sentence = 'Alpha met alpha near Alphabet and ALPHA.';
+    const entry = storage.get(prefix + 'word:alpha');
+    entry.meanings[0].definitions[0].definition = phrase;
+    delete entry.translation;
+    delete entry.youdaoTranslation;
+    if (chinese) entry.youdaoTranslation = '释义：' + phrase;
+    storage.set(prefix + 'event:context-alpha', { word: 'alpha', id: 'context-alpha', at: 20, context: sentence });
+    storage.set(prefix + 'study:alpha', schedule(createStudy('alpha', context.Date.now() - DAY), 'easy', context.Date.now() - DAY));
+    useSettings(app, { reverse: true });
+    await openReview(app);
+    const readCard = () => shadow.querySelector('.review');
+    assert.match(readCard().querySelector('.muted').textContent, chinese ? /看中文想英文/ : /看英文释义想单词/);
+    assert.equal(textOf(readCard().querySelector('.recall-prompt')), (chinese ? '释义：' : '') + '＿＿＿ or ＿＿＿, not alphabet.');
+    assert.equal(textOf(readCard().querySelector('.context-line')), '＿＿＿ met ＿＿＿ near Alphabet and ＿＿＿.');
+    await click(findButton(shadow, '显示单词'));
+    assert.equal(textOf(readCard().querySelector('.context-line')), sentence);
+    assert.equal(textOf(readCard().querySelector('.recall-prompt')), (chinese ? '释义：' : '') + phrase);
+  }
+});
+
 test('optional reverse cards start after the meaning card graduates and keep separate progress', async () => {
   const app = setup();
   const { shadow, storage, prefix, context, click } = app;
@@ -2453,6 +2545,7 @@ test('optional reverse cards start after the meaning card graduates and keep sep
   await click(findButton(shadow, '记得'));
   assert.equal(storage.get(prefix + 'recall:alpha').fsrs.state, 1);
   assert.equal(storage.get(prefix + 'study:alpha'), meaning);
+  await click(findButton(shadow, '现在提前复习'));
   await answerWith(app, '记得');
   assert.equal(storage.get(prefix + 'recall:alpha').fsrs.state, 2);
   await click(shadow.querySelectorAll('.tab')[1]);
