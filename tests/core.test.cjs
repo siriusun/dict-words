@@ -4,7 +4,7 @@ const test = require('node:test');
 const fs = require('node:fs');
 const { createHash } = require('node:crypto');
 const { normalize, schedule, scheduleAll, migrateStudy, createStudy, reviewInterval, csv, dictionary, validateBackup, mergeBackup, ordered, audioUrl, translationSource, translationChunks, youdaoTranslation, youdaoPhonetic, datamusePhonetic, youdaoWordForms,
-  dayStart, nextDayStart, availableAt, planReview, retentionStats, contextParts, isLeech,
+  dayStart, nextDayStart, availableAt, planReview, createReviewSession, retentionStats, contextParts, isLeech,
   pageScope, siteState, validateSiteRules } = require('../lexi.user.js');
 const now = Date.UTC(2026, 10, 12);
 const DAY = 86400000;
@@ -500,6 +500,33 @@ test('one preview computes all four grades exactly as saving would, and every re
   assert.equal(scheduleAll(graduated, graduated.dueAt).again.log.at(-1).state, 2);
   assert.throws(() => scheduleAll(graduated, NaN));
 });
+test('long-term reviews preserve their learning day across DST while short steps preserve elapsed minutes', () => {
+  const previousZone = process.env.TZ;
+  process.env.TZ = 'America/New_York';
+  try {
+    for (const [at, due] of [
+      ['2026-03-07T04:05:00-05:00', '2026-03-09T04:00:00-04:00'],
+      ['2026-10-31T04:05:00-04:00', '2026-11-02T04:00:00-05:00']
+    ]) {
+      const start = Date.parse(at);
+      const learning = schedule(createStudy('alpha', start), 'good', start);
+      const graduated = schedule(learning, 'good', learning.dueAt);
+      assert.equal(graduated.fsrs.scheduled_days, 2);
+      assert.equal(availableAt(graduated), Date.parse(due));
+    }
+    for (const [at, due] of [
+      ['2026-03-08T01:59:30-05:00', '2026-03-08T03:00:30-04:00'],
+      ['2026-11-01T01:59:30-04:00', '2026-11-01T01:00:30-05:00']
+    ]) {
+      const start = Date.parse(at);
+      const next = schedule(createStudy('alpha', start), 'again', start);
+      assert.equal(availableAt(next), Date.parse(due));
+      const learning = schedule(next, 'good', next.dueAt);
+      assert.equal(availableAt(learning), next.dueAt + 600000);
+    }
+  } finally { process.env.TZ = previousZone; }
+});
+
 test('long-term reviews open at 4:00 on their due learning day while learning steps keep exact times', () => {
   const evening = new Date(2026, 10, 20, 23).getTime();
   assert.equal(dayStart(evening), new Date(2026, 10, 20, 4).getTime());
@@ -514,6 +541,45 @@ test('long-term reviews open at 4:00 on their due learning day while learning st
   const plan = planReview([meaning(tonight), meaning(tomorrow), meaning(learning)], morning);
   assert.deepEqual(plan.round.map(item => item.word), ['test', 'tonight']);
   assert.deepEqual(plan.upcoming.map(item => [item.word, item.at]), [['tomorrow', new Date(2026, 10, 21, 4).getTime()]]);
+});
+
+test('review session enforces a live zero limit and keeps a revealed card retryable after a failed write', () => {
+  const first = createStudy('alpha', now - DAY);
+  const second = createStudy('beta', now);
+  let time = now;
+  let newPerDay = 2;
+  let fail = true;
+  const data = new Map([['word:alpha', true], ['word:beta', true], ['study:alpha', first], ['study:beta', second]]);
+  const session = createReviewSession({
+    clock: () => time, options: () => ({ newPerDay }),
+    read: key => data.get(key), remove: key => data.delete(key),
+    inventory: () => ({ book: [data.get('study:alpha'), data.get('study:beta')], recalls: [] }),
+    write(key, value) { if (fail) throw new Error('test storage failure'); data.set(key, value); }
+  });
+  session.start();
+  const alpha = session.current();
+  session.reveal(alpha);
+  assert.throws(() => session.grade(alpha, 'easy'), /test storage failure/);
+  assert.equal(session.revealed, true);
+  assert.deepEqual(data.get('study:alpha'), first);
+  fail = false;
+  time += 15000;
+  assert.equal(session.grade(alpha, 'easy'), 'saved');
+  assert.equal(data.get('study:alpha').lastReviewedAt, time);
+  assert.equal(session.grade(alpha, 'easy'), null);
+  const beta = session.current();
+  session.reveal(beta);
+  newPerDay = 0;
+  assert.equal(session.grade(beta, 'easy'), 'limited');
+  assert.deepEqual(data.get('study:beta'), second);
+  assert.equal(session.current(), null);
+  time = availableAt(data.get('study:alpha'));
+  session.start();
+  const due = session.current();
+  assert.equal(due.word, 'alpha');
+  session.reveal(due);
+  assert.equal(session.grade(due, 'good'), 'saved');
+  assert.equal(session.current(), null);
 });
 test('rounds gather learning, due reviews, then new words in added order within the daily new limit', () => {
   const t = new Date(2026, 10, 20, 9).getTime();

@@ -2,7 +2,7 @@ const assert = require('node:assert/strict');
 const test = require('node:test');
 const fs = require('node:fs');
 const vm = require('node:vm');
-const { translationSource, schedule, scheduleAll, createStudy, migrateStudy } = require('../lexi.user.js');
+const { translationSource, schedule, createStudy, migrateStudy } = require('../lexi.user.js');
 const source = fs.readFileSync(require.resolve('../lexi.user.js'), 'utf8');
 
 // Exercise the userscript's actual UI callbacks without a browser or user GM data.
@@ -1861,7 +1861,67 @@ test('overview reports true recent retention and flags leeches on the overview a
   assert.ok(app.storage.get(prefix + 'study:alpha').log[0].state === 2);
 });
 
-test('saving uses the cached schedule, and a schedule older than 10 minutes is recomputed first', async () => {
+test('a new card revealed before 4:00 and graded after 4:00 uses the new learning day', async () => {
+  const app = setup();
+  const { shadow, storage, prefix, context, click, advance } = app;
+  const boundary = new Date(context.Date.now());
+  boundary.setDate(boundary.getDate() + 1);
+  boundary.setHours(4, 0, 0, 0);
+  advance(boundary.getTime() - 30000 - context.Date.now());
+  storage.delete(prefix + 'study:alpha');
+  for (const word of ['beta', 'gamma']) addWord(app, word, createStudy(word, context.Date.now()));
+  useSettings(app, { newPerDay: 1 });
+  await openReview(app);
+  await click(findButton(shadow, '显示释义'));
+  advance(45000);
+  await click(findButton(shadow, '轻松'));
+  const saved = storage.get(prefix + 'study:beta');
+  assert.equal(saved.log[0].at, boundary.getTime() + 15000);
+  await click(findButton(shadow, '返回复习概览'));
+  assert.match(textOf(shadow.querySelector('.review')), /今日新词上限 1 个已用完/);
+});
+
+test('pausing and resuming reverse cards does not refund a new-card slot', async () => {
+  const app = setup();
+  const { shadow, storage, prefix, context, click } = app;
+  const now = context.Date.now();
+  storage.set(prefix + 'study:alpha', schedule(createStudy('alpha', now - 86400000), 'easy', now - 86400000));
+  storage.set(prefix + 'recall:alpha', schedule(createStudy('alpha', now - 1000), 'easy', now - 1000));
+  storage.set(prefix + 'study:beta', createStudy('beta', now));
+  await click(shadow.querySelectorAll('.tab')[2]);
+  for (const reverse of [true, false, true]) {
+    useSettings(app, { reverse, newPerDay: 1 });
+    assert.match(textOf(shadow.querySelector('.review')), /今日新词上限 1 个已用完/);
+  }
+});
+
+test('a stale round cannot use a slot taken in another tab, but undo can return a slot', async () => {
+  const app = setup();
+  const { shadow, storage, prefix, context, click } = app;
+  const now = context.Date.now();
+  storage.delete(prefix + 'study:alpha');
+  const beta = createStudy('beta', now);
+  storage.set(prefix + 'study:beta', beta);
+  addWord(app, 'gamma', createStudy('gamma', now + 1));
+  useSettings(app, { newPerDay: 1 });
+  await openReview(app);
+  await click(findButton(shadow, '显示释义'));
+  storage.set(prefix + 'study:gamma', schedule(createStudy('gamma', now), 'easy', now));
+  await click(findButton(shadow, '轻松'));
+  assert.deepEqual(storage.get(prefix + 'study:beta'), beta);
+  assert.match(shadow.querySelector('.toast').textContent, /今日新词上限/);
+  storage.set(prefix + 'study:gamma', createStudy('gamma', now + 1));
+  await click(findButton(shadow, '返回复习概览'));
+  await click(findButton(shadow, '开始复习'));
+  await answerWith(app, '轻松');
+  assert.equal(storage.get(prefix + 'study:beta').reviews, 1);
+  await click(findButton(shadow, '撤销上一次'));
+  assert.deepEqual(storage.get(prefix + 'study:beta'), beta);
+  await answerWith(app, '轻松');
+  assert.equal(storage.get(prefix + 'study:beta').reviews, 1);
+});
+
+test('saving uses the grading time, and an answer open over 10 minutes needs reconfirmation', async () => {
   for (const wait of [30000, 11 * 60000]) {
     const app = setup();
     const { shadow, storage, prefix, context, click, advance } = app;
@@ -1872,7 +1932,7 @@ test('saving uses the cached schedule, and a schedule older than 10 minutes is r
     advance(wait);
     await click(findButton(shadow, '记得'));
     if (wait < 600000) {
-      assert.deepEqual(json(storage.get(prefix + 'study:alpha')), scheduleAll(original, shownAt).good);
+      assert.deepEqual(json(storage.get(prefix + 'study:alpha')), schedule(original, 'good', shownAt + wait));
       continue;
     }
     assert.deepEqual(storage.get(prefix + 'study:alpha'), original);

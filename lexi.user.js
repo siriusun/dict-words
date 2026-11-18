@@ -2179,7 +2179,7 @@ SOFTWARE.
     if (!Number.isSafeInteger(now) || now <= 0 || now > 8640000000000000) throw new Error('复习时间无效');
   }
   // 上游按 UTC 日历日计算间隔天数；平移到“本地凌晨 4:00 为日界”的时钟后再交给 FSRS，
-  // 使提前到 4:00 复习的卡片按学习日计算已过天数。结果按相对时长换算回真实时间。
+  // 使提前到 4:00 复习的卡片按学习日计算已过天数。
   const learningClock = time => time - new Date(time).getTimezoneOffset() * 60000 - DAY_START_HOUR * 3600000;
   function fsrsInput(record, now) {
     const prior = memoryCard(record);
@@ -2188,13 +2188,17 @@ SOFTWARE.
     return { prior, card, at: learningClock(now) };
   }
   function finish(record, grade, card, prior, now, at) {
-    card.due = new Date(now + card.due.getTime() - at);
-    if (card.last_review) card.last_review = new Date(now);
-    // 上游为区分反馈可能超出最大间隔 1–2 天，在存储和预览前统一限制为一年。
-    if (card.scheduled_days > MAX_REVIEW_DAYS) {
-      card.scheduled_days = MAX_REVIEW_DAYS;
-      card.due = new Date(now + MAX_REVIEW_DAYS * DAY);
+    if (card.state === memory.State.Review) {
+      // 保留本地钟点，但按日历推进，防止切换夏令时后落到 4:00 的另一侧。
+      card.scheduled_days = Math.min(card.scheduled_days, MAX_REVIEW_DAYS);
+      const dueDay = shiftLearningDay(now, card.scheduled_days);
+      const due = new Date(now);
+      due.setDate(due.getDate() + card.scheduled_days);
+      card.due = dayStart(due.getTime()) === dueDay ? due : new Date(dueDay);
+    } else {
+      card.due = new Date(now + card.due.getTime() - at);
     }
+    if (card.last_review) card.last_review = new Date(now);
     const stage = grade === 'again' ? 0 : grade === 'hard' ? record.stage : Math.min(record.stage + 1, 6);
     return {
       ...record, stage, fsrs: storedCard(card), dueAt: card.due.getTime(), updatedAt: now,
@@ -2231,11 +2235,13 @@ SOFTWARE.
     day.setHours(DAY_START_HOUR, 0, 0, 0);
     return day.getTime();
   }
-  function nextDayStart(now) {
+  function shiftLearningDay(now, days) {
     const day = new Date(dayStart(now));
-    day.setDate(day.getDate() + 1);
+    day.setDate(day.getDate() + days);
+    day.setHours(DAY_START_HOUR, 0, 0, 0);
     return day.getTime();
   }
+  const nextDayStart = now => shiftLearningDay(now, 1);
   const stateOf = record => record.fsrs ? record.fsrs.state : memoryCard(record).state;
   // 长期复习卡按学习日到期；学习／重学卡仍按精确时间。
   const availableAt = record => stateOf(record) === memory.State.Review ? dayStart(record.dueAt) : record.dueAt;
@@ -2245,8 +2251,14 @@ SOFTWARE.
     for (const char of value) hash = Math.imul(hash ^ char.codePointAt(0), 16777619);
     return hash >>> 0;
   }
-  // cards: [{ kind, word, record, order?, sibling? }]，sibling 为同一词另一方向的记录。
-  function planReview(cards, now, { newPerDay = 20, retention, size = ROUND_SIZE } = {}) {
+  function newCardSlots(records, now, limit) {
+    const start = dayStart(now);
+    const used = records.filter(record => record.log?.[0]?.state === memory.State.New &&
+      record.log[0].at >= start && record.log[0].at <= now).length;
+    return Math.max(0, limit - used);
+  }
+  // cards 用于出题，progress 可包含暂停出题但仍占用额度的卡。
+  function planReview(cards, now, { newPerDay = 20, retention, size = ROUND_SIZE } = {}, progress = cards.map(card => card.record)) {
     const start = dayStart(now);
     const end = nextDayStart(now);
     const items = cards.map(card => {
@@ -2263,8 +2275,7 @@ SOFTWARE.
     reviews.sort((a, b) => a.rank - b.rank || shuffleKey(start + a.kind + a.word) - shuffleKey(start + b.kind + b.word));
     const fresh = items.filter(item => item.state === 0 && !item.buried).sort((a, b) =>
       (a.order ?? a.record.addedAt) - (b.order ?? b.record.addedAt) || a.word.localeCompare(b.word));
-    const introduced = cards.filter(card => card.record.log?.[0]?.state === 0 && card.record.log[0].at >= start).length;
-    const newLeft = Math.max(0, newPerDay - introduced);
+    const newLeft = newCardSlots(progress, now, newPerDay);
     const round = [];
     const words = new Set();
     for (const item of [...learning, ...reviews, ...fresh.slice(0, newLeft)]) {
@@ -2276,6 +2287,126 @@ SOFTWARE.
     const upcoming = items.filter(item => item.state !== 0 && item.at > now)
       .sort((a, b) => a.at - b.at || a.word.localeCompare(b.word));
     return { learning, reviews, fresh, newLeft, newToday: Math.min(fresh.length, newLeft), round, upcoming, backlog, start, end };
+  }
+  const ANSWER_LIMIT = 10 * 60000;
+  const cardKey = ({ kind, word }) => (kind === 'recall' ? 'recall:' : 'study:') + word;
+  const entryOf = ({ kind, word, record, virtual = false }) => ({ kind, word, record, virtual });
+  const sameProgress = (a, b) => a && a.updatedAt === b.updatedAt && a.reviews === b.reviews &&
+    a.dueAt === b.dueAt && a.lastGrade === b.lastGrade;
+
+  function createReviewSession({ read, write, remove, inventory, options, clock }) {
+    let round = null;
+    let answer = null;
+    function plan(now = clock()) {
+      const { book, recalls } = inventory();
+      const settings = options();
+      const byWord = new Map(recalls.map(item => [item.word, item]));
+      const cards = book.map(record => ({ kind: 'meaning', word: record.word, record,
+        sibling: settings.reverse ? byWord.get(record.word) : undefined }));
+      if (settings.reverse) {
+        for (const meaning of book) {
+          const record = byWord.get(meaning.word);
+          if (record) cards.push({ kind: 'recall', word: meaning.word, record, sibling: meaning });
+          else if (stateOf(meaning) === memory.State.Review) {
+            cards.push({ kind: 'recall', word: meaning.word, record: createStudy(meaning.word, now),
+              virtual: true, order: meaning.addedAt, sibling: meaning });
+          }
+        }
+      }
+      return { book, recalls, ...planReview(cards, now, settings, [...book, ...recalls]) };
+    }
+    function valid(entry, stored, settings) {
+      const meaning = read('study:' + entry.word);
+      if (!meaning || !read('word:' + entry.word) || (entry.kind === 'recall' && !settings.reverse)) return false;
+      return entry.virtual ? !stored && stateOf(meaning) === memory.State.Review : sameProgress(stored, entry.record);
+    }
+    function clearCard() {
+      round.current = null;
+      round.typed = '';
+      answer = null;
+    }
+    function current() {
+      if (!round) return null;
+      const now = clock();
+      const settings = options();
+      while (true) {
+        if (!round.current) {
+          round.learning.sort((a, b) => a.record.dueAt - b.record.dueAt);
+          const next = round.learning[0];
+          // 到期学习卡优先，只剩学习卡时允许提前显示。
+          round.current = next && (next.record.dueAt <= now || !round.pending.length)
+            ? round.learning.shift() : round.pending.shift();
+        }
+        const entry = round.current;
+        if (!entry || valid(entry, read(cardKey(entry)), settings)) return entry ?? null;
+        clearCard();
+      }
+    }
+    return {
+      plan,
+      get active() { return round !== null; },
+      get presented() { return round?.current; },
+      get revealed() { return answer !== null; },
+      get typed() { return round?.typed ?? ''; },
+      get undoWord() { return round?.history.at(-1)?.word; },
+      get remaining() { return round.pending.length + round.learning.length + 1; },
+      current,
+      start() {
+        round = { pending: plan().round.map(entryOf), learning: [], current: null, history: [], typed: '' };
+        answer = null;
+      },
+      reset() { round = null; answer = null; },
+      type(entry, value) { if (entry && round?.current === entry && !answer) round.typed = value; },
+      reveal(entry) {
+        if (!entry || round?.current !== entry || answer) return false;
+        answer = { at: clock() };
+        return true;
+      },
+      grade(entry, grade) {
+        if (!entry || round?.current !== entry || !answer) return null;
+        const now = clock();
+        const settings = options();
+        const key = cardKey(entry);
+        const before = read(key);
+        if (!valid(entry, before, settings)) {
+          clearCard();
+          return entry.kind === 'recall' && !settings.reverse ? 'paused' : 'stale';
+        }
+        if (stateOf(entry.record) === memory.State.New) {
+          const { book, recalls } = inventory();
+          if (!newCardSlots([...book, ...recalls], now, settings.newPerDay)) {
+            clearCard();
+            return 'limited';
+          }
+        }
+        if (now - answer.at > ANSWER_LIMIT) {
+          answer.at = now;
+          return 'expired';
+        }
+        const next = schedule(before ?? entry.record, grade, now, settings.retention);
+        const state = { pending: [...round.pending], learning: [...round.learning], current: entry };
+        write(key, next);
+        round.history.push({ key, word: entry.word, before, after: next, state });
+        clearCard();
+        if ([memory.State.Learning, memory.State.Relearning].includes(stateOf(next)) && next.dueAt - now <= LEARN_AHEAD) {
+          round.learning.push(entryOf({ kind: entry.kind, word: entry.word, record: next }));
+        }
+        return 'saved';
+      },
+      undo() {
+        const last = round?.history.at(-1);
+        if (!last) return null;
+        if (!sameProgress(read(last.key), last.after)) {
+          round.history = [];
+          return { stale: true };
+        }
+        if (last.before) write(last.key, last.before); else remove(last.key);
+        round.history.pop();
+        Object.assign(round, last.state, { typed: '' });
+        answer = null;
+        return { word: last.word };
+      }
+    };
   }
   function retentionStats(records, now, days = 30) {
     let total = 0;
@@ -2609,7 +2740,7 @@ SOFTWARE.
   if (typeof window === 'undefined') {
     loadMemory();
     module.exports = { normalize, schedule, scheduleAll, migrateStudy, createStudy, reviewInterval, csv, dictionary, validateBackup, mergeBackup, ordered, audioUrl, translationSource, translationChunks, youdaoTranslation, youdaoPhonetic, datamusePhonetic, youdaoWordForms,
-      dayStart, nextDayStart, availableAt, planReview, retentionStats, contextParts, isLeech,
+      dayStart, nextDayStart, availableAt, planReview, createReviewSession, retentionStats, contextParts, isLeech,
       pageScope, siteState, validateSiteRules };
     return;
   }
@@ -2715,8 +2846,13 @@ SOFTWARE.
   let scopeFilter = '';
   let scopePage = 0;
   let oldest = false;
-  let round = null;
-  let answer = null;
+  const review = createReviewSession({
+    read: get, write: put, remove,
+    inventory: () => ({ book: all('study'), recalls: all('recall') }),
+    options: () => cleanSettings(get('settings', {})),
+    clock: () => Date.now()
+  });
+  let reviewContexts = new Map();
   let reviewTimer;
   let returnFocus;
   let internalLookup = null;
@@ -3163,7 +3299,7 @@ SOFTWARE.
       else overlay.hidden ? closePopover() : closeStudio();
       return;
     }
-    if (!internalLookup && !internalSelectionTimer && !overlay.hidden && screen === 'review' && round && !event.altKey && !event.repeat) {
+    if (!internalLookup && !internalSelectionTimer && !overlay.hidden && screen === 'review' && review.active && !event.altKey && !event.repeat) {
       let handled = false;
       try { handled = reviewKey(event); } catch (error) { handled = true; showError(error); }
       if (handled) { event.preventDefault(); event.stopPropagation(); return; }
@@ -3901,35 +4037,6 @@ SOFTWARE.
       : availableAt(item) <= Date.now() ? '待复习' : '下次 ' + when(item);
     return isLeech(item) ? label + ' · 难记词' : label;
   }
-  const PREVIEW_LIMIT = 10 * 60000;
-  const cardKey = entry => (entry.kind === 'recall' ? 'recall:' : 'study:') + entry.word;
-  function reviewCards(now) {
-    const book = all('study');
-    const recalls = new Map(all('recall').map(item => [item.word, item]));
-    const cards = book.map(record => ({
-      kind: 'meaning', word: record.word, record, sibling: settings.reverse ? recalls.get(record.word) : undefined
-    }));
-    if (settings.reverse) {
-      for (const meaning of book) {
-        const record = recalls.get(meaning.word);
-        if (record) cards.push({ kind: 'recall', word: meaning.word, record, sibling: meaning });
-        else if (stateOf(meaning) === memory.State.Review) {
-          cards.push({ kind: 'recall', word: meaning.word, record: createStudy(meaning.word, now), virtual: true, order: meaning.addedAt, sibling: meaning });
-        }
-      }
-    }
-    return { book, recalls: [...recalls.values()], cards };
-  }
-  const entryOf = item => ({
-    kind: item.kind, word: item.word, version: item.virtual ? 0 : item.record.updatedAt, dueAt: item.record.dueAt,
-    ...(item.virtual ? { virtual: true, record: item.record } : {})
-  });
-  function entryValid(entry) {
-    if (!get('word:' + entry.word) || !get('study:' + entry.word)) return false;
-    const stored = get(cardKey(entry));
-    return entry.virtual ? !stored : stored?.updatedAt === entry.version;
-  }
-  const entryRecord = entry => entry.virtual ? entry.record : get(cardKey(entry));
   function savedContexts() {
     const contexts = new Map();
     for (const event of ordered(all('event'))) {
@@ -3940,86 +4047,46 @@ SOFTWARE.
     return contexts;
   }
   function startRound() {
-    const now = Date.now();
-    const plan = planReview(reviewCards(now).cards, now, settings);
-    round = { pending: plan.round.map(entryOf), learning: [], current: null, done: 0, history: [], contexts: savedContexts(), typed: '' };
-    answer = null;
+    review.start();
+    reviewContexts = savedContexts();
     render();
-  }
-  function currentEntry(now) {
-    while (round) {
-      if (!round.current) {
-        const learning = [...round.learning].sort((a, b) => a.dueAt - b.dueAt)[0];
-        // 已到期的学习卡优先；没有其他卡片时提前显示（学习步骤均不超过 20 分钟）。
-        const next = learning && (learning.dueAt <= now || !round.pending.length) ? learning : round.pending.shift();
-        if (!next) return null;
-        if (next === learning) round.learning.splice(round.learning.indexOf(learning), 1);
-        round.current = next;
-        round.typed = '';
-        answer = null;
-      }
-      if (entryValid(round.current)) return round.current;
-      round.current = null;
-    }
-    return null;
   }
   function showAnswer(entry) {
-    if (round?.current !== entry || answer) return;
-    const now = Date.now();
-    answer = { entry, now, typed: round.typed, results: scheduleAll(entryRecord(entry), now, settings.retention) };
-    render();
+    if (review.reveal(entry)) render();
   }
   function gradeCard(entry, grade) {
-    if (round?.current !== entry || answer?.entry !== entry) return;
-    if (!entryValid(entry)) {
-      round.current = null; answer = null; render(); message('该词已在其他页面更新，已跳过'); return;
-    }
-    const now = Date.now();
-    if (now - answer.now > PREVIEW_LIMIT) {
-      answer = { ...answer, now, results: scheduleAll(entryRecord(entry), now, settings.retention) };
-      render(); message('显示答案已超过 10 分钟，间隔已按当前时间更新，请重新选择'); return;
-    }
-    const key = cardKey(entry);
-    const next = answer.results[grade];
-    const state = JSON.parse(JSON.stringify({ pending: round.pending, learning: round.learning, current: round.current, done: round.done }));
-    const before = get(key) ?? null;
-    put(key, next);
-    round.history.push({ key, word: entry.word, before, after: next.updatedAt, state });
-    round.done++;
-    round.current = null;
-    answer = null;
-    if ((next.fsrs.state === memory.State.Learning || next.fsrs.state === memory.State.Relearning) && next.dueAt - now <= LEARN_AHEAD) {
-      round.learning.push({ kind: entry.kind, word: entry.word, version: next.updatedAt, dueAt: next.dueAt });
-    }
-    stopAudio(); render();
-    notify();
+    const result = review.grade(entry, grade);
+    if (!result) return;
+    if (result !== 'expired') stopAudio();
+    render();
+    if (result === 'saved') notify();
+    else if (result === 'stale') message('该词已在其他页面更新，已跳过');
+    else if (result === 'paused') message('反向卡已暂停，已跳过');
+    else if (result === 'limited') message('今日新词上限已用完，已跳过这张新卡');
+    else if (result === 'expired') message('显示答案已超过 10 分钟，请重新选择评分');
   }
   function undo() {
-    const last = round?.history.at(-1);
-    if (!last) return;
-    if (get(last.key)?.updatedAt !== last.after) {
-      round.history = []; render(); message('该词已在其他页面更新，无法撤销'); return;
+    const result = review.undo();
+    if (!result) return;
+    if (result.stale) {
+      render(); message('该词已在其他页面更新，无法撤销'); return;
     }
-    if (last.before) put(last.key, last.before); else remove(last.key);
-    round.history.pop();
-    Object.assign(round, last.state, { typed: '' });
-    answer = null;
     stopAudio(); render();
     notify();
-    message(`已撤销 ${last.word} 的评分`);
+    message(`已撤销 ${result.word} 的评分`);
   }
   function reviewKey(event) {
     const tag = event.composedPath()[0]?.tagName || '';
     const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(tag);
-    const entry = round.current;
     if ((event.ctrlKey || event.metaKey) && !event.shiftKey && event.key.toLowerCase() === 'z') {
-      if (typing || !round.history.length) return false;
+      if (typing || !review.undoWord) return false;
       undo(); return true;
     }
+    const entry = review.presented;
     if (event.ctrlKey || event.metaKey || typing || !entry) return false;
-    if (answer && /^[1-4]$/.test(event.key)) { gradeCard(entry, Object.keys(GRADES)[event.key - 1]); return true; }
-    if (!answer && (event.key === ' ' || event.key === 'Enter') && !/^(BUTTON|A)$/.test(tag)) { showAnswer(entry); return true; }
-    if (event.key.toLowerCase() === 'r' && (entry.kind === 'meaning' || answer)) { speak(get('word:' + entry.word)); return true; }
+    if (review.revealed && /^[1-4]$/.test(event.key)) { gradeCard(entry, Object.keys(GRADES)[event.key - 1]); return true; }
+    if (!review.revealed && (event.key === ' ' || event.key === 'Enter') && !/^(BUTTON|A)$/.test(tag)) { showAnswer(entry); return true; }
+    if (event.key.toLowerCase() === 'r' && (entry.kind === 'meaning' || review.revealed)) { speak(get('word:' + entry.word)); return true; }
     return false;
   }
   const maskWord = (value, word) => value.replace(new RegExp(`(^|[^a-z'’-])${word.replace(/'/g, "['’]")}(?![a-z'’-])`, 'gi'), '$1＿＿');
@@ -4039,14 +4106,14 @@ SOFTWARE.
   function renderReview() {
     const now = Date.now();
     view.append(el('h1', 'heading', '让单词留下来'), el('p', 'subheading', '短时复习，长期积累'));
-    const entry = round && currentEntry(now);
+    const entry = review.current();
     if (entry) renderCard(entry);
-    else if (round) renderRoundDone(now);
+    else if (review.active) renderRoundDone(now);
     else renderOverview(now);
   }
   function renderOverview(now) {
-    const { book, recalls, cards } = reviewCards(now);
-    const plan = planReview(cards, now, settings);
+    const plan = review.plan(now);
+    const { book, recalls } = plan;
     refreshLater(now, plan);
     const reviewedToday = new Set([...book, ...recalls].filter(item => item.lastReviewedAt >= plan.start).map(item => item.word)).size;
     const stats = el('div', 'stats');
@@ -4094,20 +4161,20 @@ SOFTWARE.
     }
   }
   function undoButton() {
-    return button('撤销上一次', undo, 'button', `撤销 ${round.history.at(-1).word} 的评分（Ctrl/⌘+Z）`);
+    return button('撤销上一次', undo, 'button', `撤销 ${review.undoWord} 的评分（Ctrl/⌘+Z）`);
   }
   function renderRoundDone(now) {
-    const plan = planReview(reviewCards(now).cards, now, settings);
+    const plan = review.plan(now);
     refreshLater(now, plan);
     const card = el('div', 'review');
     const available = plan.learning.length + plan.reviews.length + plan.newToday;
     card.append(el('h2', '', '本轮已完成'), el('p', 'muted', available ? `进度已保存，还有 ${available} 张待学。`
       : plan.upcoming.length ? '进度已保存。下次复习：' + when(plan.upcoming[0].record, plan.upcoming[0].at) : '进度已保存。'));
     const actions = el('div', 'actions review-actions');
-    const back = button('返回复习概览', () => { round = null; answer = null; render(); }, 'button primary');
+    const back = button('返回复习概览', () => { review.reset(); render(); }, 'button primary');
     actions.append(back);
     if (plan.round.length) actions.append(button('继续下一轮', startRound));
-    if (round.history.length) actions.append(undoButton());
+    if (review.undoWord) actions.append(undoButton());
     card.append(actions);
     view.append(card);
     back.focus({ preventScroll: true });
@@ -4115,12 +4182,13 @@ SOFTWARE.
   function renderCard(entry) {
     const word = entry.word;
     const wordEntry = get('word:' + word);
-    const record = entryRecord(entry);
+    const record = entry.record;
+    const answer = review.revealed;
     const recall = entry.kind === 'recall';
     const card = el('div', 'review');
-    card.append(el('div', 'muted', `${recall ? '反向 · 看中文想英文' : '看英文想含义'} · ${STUDY_STATES[stateOf(record)]} · 本轮剩余 ${round.pending.length + round.learning.length + 1}`));
+    card.append(el('div', 'muted', `${recall ? '反向 · 看中文想英文' : '看英文想含义'} · ${STUDY_STATES[stateOf(record)]} · 本轮剩余 ${review.remaining}`));
     if (isLeech(record)) card.append(el('p', 'notice leech', `难记词：已忘记 ${record.fsrs.lapses} 次。试试结合原句、词根或自己造句。`));
-    const context = round.contexts.get(word);
+    const context = reviewContexts.get(word);
     let focusTarget;
     if (recall) {
       const prompt = el('div', 'recall-prompt');
@@ -4147,8 +4215,8 @@ SOFTWARE.
         spelling.autocomplete = 'off';
         spelling.spellcheck = false;
         spelling.maxLength = 64;
-        spelling.value = round.typed;
-        spelling.addEventListener('input', () => { round.typed = spelling.value; });
+        spelling.value = review.typed;
+        spelling.addEventListener('input', () => review.type(entry, spelling.value));
         spelling.addEventListener('keydown', event => {
           if (event.key === 'Enter') { event.preventDefault(); Promise.resolve().then(() => showAnswer(entry)).catch(showError); }
         });
@@ -4158,10 +4226,10 @@ SOFTWARE.
       card.append(reveal);
       focusTarget ||= reveal;
     } else {
-      const typed = normalize(answer.typed);
-      if (recall && answer.typed.trim()) {
+      const typed = normalize(review.typed);
+      if (recall && review.typed.trim()) {
         card.append(el('p', typed === word ? 'spell ok' : 'spell bad', typed === word ? '✓ 拼写正确'
-          : `✗ 你写的是“${answer.typed.trim()}”，答错请选“忘记”`));
+          : `✗ 你写的是“${review.typed.trim()}”，答错请选“忘记”`));
       }
       const back = el('div', 'review-answer');
       back.append(senses(wordEntry));
@@ -4176,7 +4244,7 @@ SOFTWARE.
       }
       card.append(back, actions);
     }
-    if (round.history.length) {
+    if (review.undoWord) {
       const extra = el('div', 'actions review-actions');
       extra.append(undoButton());
       card.append(extra);
@@ -4244,7 +4312,7 @@ SOFTWARE.
         syncSite();
         put('scope-revision', crypto.randomUUID());
       }
-      notify(); round = null; answer = null; render(); message('合并完成，重复历史已去重');
+      notify(); review.reset(); render(); message('合并完成，重复历史已去重');
     } catch { throw new Error('写入中断，部分记录可能已导入；原记录未主动删除，可再次导入继续合并'); }
   }
   function renderSites() {
@@ -4318,7 +4386,7 @@ SOFTWARE.
       try {
         const next = cleanSettings({ ...get('settings', {}), [key]: value });
         put('settings', next); settings = next; notify();
-        if (resetReview) { round = null; answer = null; }
+        if (resetReview) review.reset();
       } catch (error) { revert(); showError(error); }
     };
     const preferences = el('section', 'section');
@@ -4428,7 +4496,7 @@ SOFTWARE.
       if (prompt('此操作不可撤销，请先导出备份。输入“删除全部”以删除全部 Lexi 历史、词条、复习进度和网页禁用规则：') !== '删除全部') return;
       stopActivity();
       for (const key of GM_listValues().filter(key => key.startsWith(PREFIX))) GM_deleteValue(key);
-      settings = { ...DEFAULTS }; selectedWord = ''; selectedEvent = null; round = null; answer = null;
+      settings = { ...DEFAULTS }; selectedWord = ''; selectedEvent = null; review.reset();
       launcherPosition = null; positionLauncher();
       scopeFilter = ''; scopePage = 0;
       syncSite(); put('scope-revision', crypto.randomUUID());
