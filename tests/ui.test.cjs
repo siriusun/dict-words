@@ -27,7 +27,7 @@ function setup(phonetic = '/test/', phoneticSource = 'youdao', options = {}) {
         this.className = [...classes].join(' ');
       } };
     }
-    append(...nodes) { for (const node of nodes) { node.parent = this; this.children.push(node); } }
+    append(...nodes) { for (const node of nodes) { node.remove(); node.parent = this; this.children.push(node); } }
     replaceChildren(...nodes) { this.children = []; this.textContent = ''; this.append(...nodes); }
     remove() {
       if (this.parent) this.parent.children = this.parent.children.filter(node => node !== this);
@@ -1503,6 +1503,138 @@ test('deleting an unselected filtered event preserves selection and scroll posit
   assert.equal(shadow.querySelector('.detail-pane').querySelector('.word').textContent, 'alpha');
   assert.equal(shadow.querySelector('.list').scrollTop, 60);
   assert.equal(shadow.querySelector('.detail-pane').scrollTop, 120);
+});
+
+test('mobile definitions open a modal sheet, contain focus and return to the same list position', async () => {
+  const app = setup('/test/', 'youdao', { viewport: { width: 390, height: 714, scale: 1 } });
+  const { shadow, click } = app;
+  const layer = shadow.querySelector('.library-detail');
+  const list = shadow.querySelector('.list');
+  const view = shadow.querySelector('.view');
+  assert.equal(layer.hidden, true, 'details do not sit below the mobile list');
+  assert.equal(layer.parentElement, shadow.querySelector('.studio'));
+  list.scrollTop = 90;
+  view.scrollTop = 15;
+  await click(shadow.querySelector('.item'));
+  assert.equal(layer.hidden, false);
+  assert.equal(shadow.querySelector('.library-sheet').getAttribute('role'), 'dialog');
+  assert.equal(shadow.querySelector('.main').inert, true);
+  assert.equal(shadow.activeElement, shadow.querySelector('.library-sheet'));
+  assert.equal(shadow.querySelector('.detail-pane').querySelector('.word').textContent, 'alpha');
+  assert.equal(shadow.querySelector('.library-sheet-nav').querySelector('.meta').textContent, '1 / 3');
+  assert.equal(findButton(layer, '‹ 上一个').disabled, true);
+  const next = findButton(layer, '下一个');
+  next.focus();
+  await press(app, 'Tab');
+  assert.equal(shadow.activeElement, findButton(layer, '关闭'), 'Tab cannot reach the background library');
+  await press(app, 'Escape');
+  assert.equal(layer.hidden, true);
+  assert.equal(shadow.querySelector('.overlay').hidden, false, 'Escape closes only the sheet');
+  assert.equal(shadow.querySelector('.main').inert, false);
+  assert.equal(list.scrollTop, 90);
+  assert.equal(view.scrollTop, 15);
+  assert.equal(shadow.activeElement, shadow.querySelector('.item'));
+  await click(shadow.querySelector('.item'));
+  layer.listeners.click.listener({ target: layer });
+  assert.equal(layer.hidden, true, 'the sheet backdrop also returns to the list');
+  await click(shadow.querySelector('.list-star'));
+  assert.equal(layer.hidden, true, 'row actions do not open definitions');
+});
+
+test('mobile definition navigation follows filtered and sorted records across pages in history and book', async () => {
+  for (const tab of [0, 1]) {
+    const app = setup('/test/', 'youdao', { viewport: { width: 390, height: 714, scale: 1 } });
+    const { shadow, storage, prefix, click } = app;
+    const words = Array.from({ length: 52 }, (_, index) => 'sheet' + String.fromCharCode(97 + Math.floor(index / 26), 97 + index % 26));
+    for (const [index, word] of words.entries()) {
+      addWord(app, word, createStudy(word, index + 10));
+      storage.set(prefix + 'event:sheet-' + index, { word, id: 'sheet-' + index, at: index + 10 });
+    }
+    await click(shadow.querySelectorAll('.tab')[tab]);
+    const search = shadow.querySelector('.library-list').querySelector('input');
+    search.value = 'sheet';
+    search.listeners.input.listener();
+    if (tab === 0) {
+      const sort = shadow.querySelector('select');
+      sort.value = 'old';
+      sort.listeners.change.listener();
+    }
+    const expected = tab === 0 ? words : [...words].reverse();
+    await click(shadow.querySelectorAll('.item').at(-1));
+    const nav = shadow.querySelector('.library-sheet-nav');
+    assert.equal(nav.querySelector('.meta').textContent, '50 / 52');
+    shadow.querySelector('.detail-pane').scrollTop = 75;
+    await click(findButton(nav, '下一个'));
+    assert.equal(shadow.querySelector('.detail-pane').querySelector('.word').textContent, expected[50]);
+    assert.equal(shadow.querySelector('.detail-pane').scrollTop, 0);
+    assert.equal(nav.querySelector('.meta').textContent, '51 / 52');
+    await click(findButton(nav, '下一个'));
+    assert.equal(findButton(nav, '下一个').disabled, true);
+    assert.equal(nav.querySelector('.meta').textContent, '52 / 52');
+    await click(findButton(nav, '‹ 上一个'));
+    await click(findButton(shadow.querySelector('.library-sheet-bar'), '关闭'));
+    assert.equal(shadow.querySelector('.library-pagination').querySelector('.meta').textContent, '2 / 2 页');
+    const active = shadow.querySelectorAll('.item').find(row => row.getAttribute('aria-current') === 'true');
+    assert.equal(active.querySelector('.term').textContent, expected[50]);
+    assert.equal(shadow.activeElement, active, 'closing focuses the last viewed record');
+    assert.equal(search.value, 'sheet');
+    if (tab === 0) assert.equal(shadow.querySelector('select').value, 'old');
+    assert.equal(shadow.querySelector('.library-detail').hidden, true);
+  }
+});
+
+test('mobile history keeps repeated-event context and nested lookup separate from sheet navigation', async () => {
+  const app = setup('/test/', 'youdao', { viewport: { width: 390, height: 714, scale: 1 } });
+  const { shadow, storage, prefix, click } = app;
+  storage.get(prefix + 'event:history-event-2').context = 'Recent alpha context';
+  storage.get(prefix + 'event:history-event-0').context = 'Earlier alpha context';
+  const search = shadow.querySelector('.library-list').querySelector('input');
+  search.value = 'alpha';
+  search.listeners.input.listener();
+  await click(shadow.querySelector('.item'));
+  const pane = shadow.querySelector('.detail-pane');
+  const layer = shadow.querySelector('.library-detail');
+  assert.match(textOf(pane.querySelector('.context')), /Recent alpha/);
+  await click(findButton(layer, '下一个'));
+  assert.match(textOf(pane.querySelector('.context')), /Earlier alpha/);
+  const original = pane.querySelector('article');
+  pane.scrollTop = 50;
+  await selectInside(app, pane.querySelector('.definition'), 'beta');
+  assert.equal(pane.querySelector('.word').textContent, 'beta');
+  await press(app, 'Escape');
+  assert.equal(layer.hidden, false, 'first Escape returns from nested lookup');
+  assert.equal(pane.querySelector('article'), original);
+  assert.equal(pane.scrollTop, 50);
+  await press(app, 'Escape');
+  assert.equal(layer.hidden, true);
+  assert.equal(shadow.querySelectorAll('.item')[1].getAttribute('aria-current'), 'true');
+  assert.equal(historyOf(app).length, 4, 'only the nested lookup adds history');
+});
+
+test('mobile sheets reset cleanly on studio close and breakpoint changes, and manual lookup shows its result', async () => {
+  const app = setup('/test/', 'youdao', { viewport: { width: 390, height: 714, scale: 1 } });
+  const { shadow, context, click } = app;
+  await click(shadow.querySelector('.item'));
+  Object.assign(context.window.visualViewport, { width: 1100, height: 800 });
+  context.window.listeners.resize.listener();
+  assert.equal(shadow.querySelector('.library-detail').parentElement, shadow.querySelector('.split'));
+  assert.equal(shadow.querySelector('.library-detail').hidden, false);
+  assert.equal(shadow.querySelector('.main').inert, false);
+  Object.assign(context.window.visualViewport, { width: 390, height: 714 });
+  context.window.listeners.resize.listener();
+  assert.equal(shadow.querySelector('.library-detail').hidden, true);
+  assert.equal(shadow.querySelectorAll('.detail-pane').length, 1);
+  const form = shadow.querySelector('.search');
+  form.querySelector('input').value = 'beta';
+  await click(form.querySelector('button'));
+  assert.equal(shadow.querySelector('.library-detail').hidden, false);
+  assert.equal(shadow.querySelector('.detail-pane').querySelector('.word').textContent, 'beta');
+  await click(shadow.querySelector('.top').querySelector('.icon'));
+  assert.equal(shadow.querySelector('.overlay').hidden, true);
+  assert.equal(shadow.querySelector('.main').inert, false);
+  await click(shadow.querySelector('.launcher'));
+  assert.equal(shadow.querySelectorAll('.library-sheet').length, 1);
+  assert.equal(shadow.querySelector('.library-detail').hidden, true);
 });
 
 test('modal and lookup card contain wheel events, while internal scrolling and zoom remain native', () => {

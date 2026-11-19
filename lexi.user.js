@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Lexi · 划词词典与复习
 // @namespace    lexi-local
-// @version      0.6.4
+// @version      0.6.5
 // @description  英文划词、发音、跨网站历史、生词复习与本地备份，可选坚果云同步。
 // @match        http://*/*
 // @match        https://*/*
@@ -3064,6 +3064,7 @@ SOFTWARE.
   let internalSelectionTimer;
   let internalPointerDown = false;
   let refreshLibrary = null;
+  let librarySheet = null;
   let activityEpoch = 0;
   const requests = new Set();
   const host = document.createElement('div');
@@ -3135,6 +3136,8 @@ SOFTWARE.
     .view.library{display:flex;flex-direction:column;overflow:hidden}.library>.heading,.library>.subheading{flex-shrink:0}
     .library .split{flex:1;min-height:0;grid-template-rows:minmax(0,1fr)}.library-list{display:flex;flex-direction:column;min-width:0;min-height:0}.library-list>.row{flex-shrink:0}.library-pagination{margin-top:8px}
     .library .list{flex:1;min-height:0;max-height:none}.detail-pane{overflow:auto;min-height:0;padding:3px 8px 3px 3px}
+    .studio{position:relative}.library-detail,.library-sheet{display:flex;flex-direction:column;min-width:0;min-height:0}.library-sheet,.library-sheet>.detail-pane{flex:1}
+    .library-sheet-bar,.library-sheet-nav{display:none}
     .list:focus-visible,.detail-pane:focus-visible{outline:2px solid #75ac8c;outline-offset:-2px}
     .library-row{position:relative;flex-shrink:0}.library-row>.item{padding-right:42px}.history-row>.item{padding-right:70px}
     .library-row:hover>.item{background:var(--surface)}.library-row:hover>.item.active{background:var(--tint)}
@@ -3182,14 +3185,23 @@ SOFTWARE.
     .compact .top{padding:4px 8px;gap:4px}.compact .search{gap:4px}.compact .search input{padding:5px 8px;font-size:16px}
     .compact .button,.compact .icon{min-height:36px}.compact .button{padding:5px 10px;font-size:13px}.compact .icon{min-width:36px}
     .compact .view{padding:10px;overflow:auto;overflow-wrap:anywhere}
-    .compact .view.library,.compact .view.scope-view{display:block}
+    .compact .view.scope-view{display:block}.compact .view.library{display:flex}
     .compact .heading{font-size:18px}.compact .subheading{font-size:11px;margin:4px 0 8px}
-    .compact .library .split{display:block}.compact .library .list{max-height:clamp(176px,calc(var(--visible-height) * .4),300px);overscroll-behavior:auto}
-    .compact .library-row>.item{min-height:44px;padding:4px 40px 4px 8px}.compact .history-row>.item{padding-right:76px}
+    .compact .library .split{display:flex;flex-direction:column;min-height:220px}.compact .library-list{flex:1}.compact .library .list{max-height:none}
+    .compact .library-row>.item{position:relative;min-height:44px;padding:4px 60px 4px 8px}.compact .history-row>.item{padding-right:96px}
+    .compact .library-row>.item::after{content:'›';position:absolute;right:42px;top:50%;transform:translateY(-50%);font-size:22px;color:var(--muted)}.compact .history-row>.item::after{right:78px}
     .compact .item .term{font-size:18px}.compact .item .meta{font-size:10px;line-height:1.3;margin-top:1px}
     .compact .row-actions .icon{min-width:32px;min-height:36px;padding:0}
     .compact .library-pagination{margin-top:6px;gap:6px}
-    .compact .detail-pane{overflow:visible;border-top:1px solid var(--line);margin-top:10px;padding:10px 0 0}
+    .compact .library-detail{position:absolute;inset:0;z-index:1;justify-content:flex-end;background:#0d211f66;overflow:hidden}
+    .compact .library-sheet{flex:none;height:min(100%,max(300px,calc(var(--visible-height) * .64)));background:var(--paper);border:1px solid var(--line);border-radius:18px 18px 0 0;box-shadow:0 -8px 35px #081d2026;overflow:hidden;outline:none}
+    .compact .library-sheet-bar,.compact .library-sheet-nav{display:flex;align-items:center;gap:8px;flex-shrink:0;padding:6px 12px;background:var(--surface)}
+    .compact .library-sheet-bar{justify-content:space-between;border-bottom:1px solid var(--line)}.compact .library-sheet-bar strong{font-size:13px}
+    .compact .library-sheet-nav{border-top:1px solid var(--line);padding-bottom:max(6px,env(safe-area-inset-bottom))}
+    .compact .library-sheet-nav .meta{flex:1;text-align:center;margin:0}
+    .compact .library-sheet-bar .button,.compact .library-sheet-nav .button{min-height:44px}
+    .compact .library-sheet .button:disabled{cursor:default}
+    .compact .detail-pane{overflow:auto;overscroll-behavior:contain;border:0;margin:0;padding:10px 12px}
     .compact .scope-rule-list{overflow:visible}
     .compact .section{padding:10px;margin:10px 0}.compact .section h3{font-size:14px;margin-bottom:10px}.compact .setting{gap:10px;margin:10px 0}
     .compact .empty{padding:10px 6px;font-size:12px}
@@ -3288,16 +3300,18 @@ SOFTWARE.
     visibleViewport = readViewport();
     const { left, top, width, height, scale } = visibleViewport;
     const deviceWidth = width * scale;
-    compact = deviceWidth <= 760 || (touchViewport?.matches && deviceWidth <= 1000 && height * scale <= 500);
+    compact = deviceWidth <= 760 || Boolean(touchViewport?.matches && deviceWidth <= 1000 && height * scale <= 500);
     app.classList.toggle('compact', compact);
-    if (!compact) return;
-    // On desktop-width pages zoomed out by the mobile browser, size the UI in screen CSS pixels.
-    const unit = Math.min(1, scale);
-    app.style.setProperty('--visible-left', left + 'px');
-    app.style.setProperty('--visible-top', top + 'px');
-    app.style.setProperty('--visible-width', width * unit + 'px');
-    app.style.setProperty('--visible-height', height * unit + 'px');
-    app.style.setProperty('--ui-scale', 1 / unit);
+    if (compact) {
+      // On desktop-width pages zoomed out by the mobile browser, size the UI in screen CSS pixels.
+      const unit = Math.min(1, scale);
+      app.style.setProperty('--visible-left', left + 'px');
+      app.style.setProperty('--visible-top', top + 'px');
+      app.style.setProperty('--visible-width', width * unit + 'px');
+      app.style.setProperty('--visible-height', height * unit + 'px');
+      app.style.setProperty('--ui-scale', 1 / unit);
+    }
+    librarySheet?.layout();
   }
   updateViewport();
   let toastTimer;
@@ -3502,10 +3516,11 @@ SOFTWARE.
     if (!studio.contains(shadow.activeElement)) focusStudio();
   }
   function focusStudio() {
-    (compact ? studio : input).focus({ preventScroll: true });
+    (librarySheet?.open ? librarySheet.panel : compact ? studio : input).focus({ preventScroll: true });
   }
   function closeStudio() {
     resetInternalLookup();
+    librarySheet?.close(false);
     cancelInternalSelection();
     overlay.hidden = true;
     releaseReadingMarker();
@@ -3571,6 +3586,7 @@ SOFTWARE.
       event.preventDefault(); event.stopPropagation();
       if (internalSelectionTimer) cancelInternalSelection();
       else if (internalLookup) returnInternalLookup();
+      else if (librarySheet?.open) librarySheet.close();
       else overlay.hidden ? closePopover() : closeStudio();
       return;
     }
@@ -3580,7 +3596,8 @@ SOFTWARE.
       if (handled) { event.preventDefault(); event.stopPropagation(); return; }
     }
     if (event.key !== 'Tab' || overlay.hidden) return;
-    const focusable = [...studio.querySelectorAll('button,a,input,select,[tabindex="0"]')].filter(node => !node.disabled && node.getClientRects().length);
+    const focusScope = librarySheet?.open ? librarySheet.panel : studio;
+    const focusable = [...focusScope.querySelectorAll('button,a,input,select,[tabindex="0"]')].filter(node => !node.disabled && node.getClientRects().length);
     const first = focusable[0], last = focusable.at(-1);
     if (!focusable.includes(shadow.activeElement)) { event.preventDefault(); (event.shiftKey ? last : first)?.focus(); }
     else if (event.shiftKey && shadow.activeElement === first) { event.preventDefault(); last?.focus(); }
@@ -3684,7 +3701,7 @@ SOFTWARE.
     const start = readingElement(range.startContainer);
     if (!start || start !== readingElement(range.endContainer)) return;
     const target = start.closest('.popover,.detail-pane,.view');
-    if (!target || target.hidden || (target !== popover && overlay.hidden)) return;
+    if (!target || target.hidden || !target.getClientRects().length || (target !== popover && overlay.hidden)) return;
     const word = normalize(range.toString());
     if (!word || word === normalize(target.querySelector('.word')?.textContent)) return;
     return { selection, word, target };
@@ -3840,7 +3857,7 @@ SOFTWARE.
         render();
         if (compact) {
           view.scrollTop = 0;
-          if (shadow.activeElement === input) view.focus({ preventScroll: true });
+          librarySheet.show();
         }
         if (stale) message('使用离线缓存 · 暂未能更新释义');
       }
@@ -4202,6 +4219,8 @@ SOFTWARE.
   function render() {
     resetInternalLookup();
     cancelInternalSelection();
+    librarySheet?.dispose();
+    librarySheet = null;
     refreshLibrary = null;
     clearTimeout(reviewTimer);
     for (const [key, node] of Object.entries(navButtons)) {
@@ -4269,14 +4288,114 @@ SOFTWARE.
     detail.tabIndex = 0;
     detail.setAttribute('role', 'region');
     detail.setAttribute('aria-label', '单词释义');
+    const layer = el('div', 'library-detail');
+    const panel = el('section', 'library-sheet');
+    panel.tabIndex = -1;
+    const sheetBar = el('header', 'library-sheet-bar');
+    sheetBar.append(el('strong', '', '单词释义'), button('关闭', () => closeSheet(), 'button', '关闭释义，返回列表'));
+    const sheetNav = el('nav', 'library-sheet-nav');
+    sheetNav.setAttribute('aria-label', '切换单词');
+    const previousWord = button('‹ 上一个', () => moveWord(-1));
+    const nextWord = button('下一个 ›', () => moveWord(1));
+    const positionLabel = el('span', 'meta');
+    positionLabel.setAttribute('role', 'status');
+    positionLabel.setAttribute('aria-live', 'polite');
+    positionLabel.setAttribute('aria-atomic', 'true');
+    sheetNav.append(previousWord, positionLabel, nextWord);
+    panel.append(sheetBar, detail, sheetNav);
+    layer.append(panel);
+    let matches = [];
+    let sheetOpen = false;
+    let sheetOrigin = null;
+    let sheetMoved = false;
+    let lastCompact = null;
     const pager = createPager('library-pagination', direction => {
       state.page += direction;
       drawList();
       list.scrollTop = 0;
     });
     left.append(toolbar, list, pager.node);
-    split.append(left, detail);
+    split.append(left, layer);
     view.append(split);
+    function selectedIndex() {
+      return matches.findIndex(item => isBook ? item.word === selectedWord : item.id === selectedEvent?.id);
+    }
+    function updateWordNavigation() {
+      const index = selectedIndex();
+      previousWord.disabled = index <= 0;
+      nextWord.disabled = index < 0 || index >= matches.length - 1;
+      positionLabel.textContent = `${index + 1} / ${matches.length}`;
+    }
+    function showSheet() {
+      if (!compact || sheetOpen) return;
+      sheetOrigin = { page: state.page, listTop: list.scrollTop, viewTop: view.scrollTop };
+      sheetMoved = false;
+      sheetOpen = true;
+      layer.hidden = false;
+      sidebar.inert = main.inert = true;
+      panel.setAttribute('role', 'dialog');
+      panel.setAttribute('aria-modal', 'true');
+      panel.setAttribute('aria-label', '单词释义面板');
+      panel.focus({ preventScroll: true });
+    }
+    function closeSheet(restoreFocus = true) {
+      if (!sheetOpen) return;
+      resetInternalLookup(); cancelInternalSelection(); stopQuery(); stopAudio();
+      sheetOpen = false;
+      layer.hidden = compact;
+      sidebar.inert = main.inert = false;
+      panel.removeAttribute('role');
+      panel.removeAttribute('aria-modal');
+      panel.removeAttribute('aria-label');
+      if (!restoreFocus) return;
+      const index = selectedIndex();
+      state.page = sheetMoved && index >= 0 ? Math.floor(index / PAGE_SIZE) : sheetOrigin.page;
+      drawList();
+      list.scrollTop = sheetOrigin.listTop;
+      view.scrollTop = sheetOrigin.viewTop;
+      const active = [...list.querySelectorAll('.item')].find(row => row.getAttribute('aria-current') === 'true');
+      if (sheetMoved && active) {
+        const bounds = list.getBoundingClientRect();
+        const row = active.getBoundingClientRect();
+        const unit = bounds.height / list.clientHeight || 1;
+        if (row.top < bounds.top) list.scrollTop += (row.top - bounds.top) / unit;
+        else if (row.bottom > bounds.bottom) list.scrollTop += (row.bottom - bounds.bottom) / unit;
+      }
+      (active || search).focus({ preventScroll: true });
+    }
+    function layoutSheet() {
+      if (lastCompact === compact) return;
+      const focusedDetail = layer.contains(shadow.activeElement);
+      closeSheet(false);
+      layer.hidden = compact;
+      (compact ? studio : split).append(layer);
+      lastCompact = compact;
+      drawList();
+      if (focusedDetail) (compact ? studio : detail).focus({ preventScroll: true });
+    }
+    layer.addEventListener('click', event => { if (event.target === layer) closeSheet(); });
+    librarySheet = {
+      get open() { return sheetOpen; }, panel, show: showSheet, close: closeSheet, layout: layoutSheet,
+      dispose() { closeSheet(false); layer.remove(); }
+    };
+    function selectItem(item) {
+      resetInternalLookup(); cancelInternalSelection(); stopAudio();
+      selectedWord = item.word;
+      selectedEvent = isBook ? null : item;
+      const scrollTop = list.scrollTop;
+      drawList(); drawDetail();
+      list.scrollTop = scrollTop;
+      detail.scrollTop = 0;
+    }
+    function moveWord(direction) {
+      const item = matches[selectedIndex() + direction];
+      if (!item) { message('当前记录已变化，请重新选择单词'); return; }
+      const index = matches.indexOf(item);
+      state.page = Math.floor(index / PAGE_SIZE);
+      sheetMoved = true;
+      selectItem(item);
+      if (shadow.activeElement?.disabled) panel.focus({ preventScroll: true });
+    }
     function drawDetail() {
       const entry = selectedWord && (!isBook || get('study:' + selectedWord)) ? get('word:' + selectedWord) : null;
       detail.replaceChildren(entry ? wordDetail(entry, isBook ? null : selectedEvent, false) : el('div', 'empty', '选择一个单词，或在上方开始查询'));
@@ -4286,7 +4405,8 @@ SOFTWARE.
       subheading.textContent = isBook ? `${records.length} 个词 · 收藏的词会进入复习` : `${records.length} 次查询 · 每次成功查询都留有记录`;
       list.replaceChildren();
       const filter = state.filter.trim().toLowerCase();
-      const matches = records.filter(item => item.word.includes(filter));
+      matches = records.filter(item => item.word.includes(filter));
+      updateWordNavigation();
       state.page = pager.update(matches.length, state.page);
       pager.node.hidden = matches.length <= PAGE_SIZE;
       if (!matches.length) { list.append(el('div', 'empty', records.length ? '没有匹配的单词' : isBook ? '遇到想记住的词，点一下收藏' : '你的第一条查词记录会出现在这里')); return; }
@@ -4295,12 +4415,13 @@ SOFTWARE.
         const position = start + index;
         const neighbor = matches[position + 1] || matches[position - 1];
         const row = button('', () => {
-          resetInternalLookup(); cancelInternalSelection();
-          selectedWord = item.word;
-          selectedEvent = isBook ? null : item;
-          drawList(); drawDetail(); detail.scrollTop = 0;
+          selectItem(item);
+          showSheet();
         }, 'item');
-        row.classList.toggle('active', isBook ? selectedWord === item.word : selectedEvent?.id === item.id);
+        const active = isBook ? selectedWord === item.word : selectedEvent?.id === item.id;
+        row.classList.toggle('active', active);
+        if (active) row.setAttribute('aria-current', 'true');
+        if (compact) row.setAttribute('aria-haspopup', 'dialog');
         row.append(el('div', 'term', item.word), el('div', 'meta', isBook ? bookMeta(item) : date(item.at)));
         const starred = Boolean(get('study:' + item.word));
         const wrapper = el('div', isBook ? 'library-row' : 'library-row history-row');
@@ -4363,7 +4484,7 @@ SOFTWARE.
       drawList();
       list.scrollTop = scrollTop;
     };
-    drawList(); drawDetail();
+    layoutSheet(); drawDetail();
   }
   function bookMeta(item) {
     const label = stateOf(item) === memory.State.New ? '新词 · 待学习'
