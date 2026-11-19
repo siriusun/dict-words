@@ -119,7 +119,7 @@ function setup(phonetic = '/test/', phoneticSource = 'youdao', options = {}) {
   }
   let uuid = 0;
   const context = {
-    window, document, Element, Date: ClockDate, TextEncoder, URL: BrowserURL, Blob, location: { href: options.url || 'https://docs.example.com/reading' },
+    window, document, Element, Date: ClockDate, TextEncoder, URL: BrowserURL, Blob, btoa, location: { href: options.url || 'https://docs.example.com/reading' },
     crypto: { randomUUID: () => 'test-uuid-' + ++uuid },
     confirm: () => true,
     alert: message => alerts.push(message),
@@ -668,6 +668,119 @@ test('import preview distinguishes replay from incomplete history and cancellati
   const replay = storage.get(prefix + 'study:beta');
   assert.deepEqual(json(replay.log.map(({ at, rating }) => [at, rating])),
     [[now - 4 * DAY, 4], [now - 2 * DAY, 3], [now - DAY, 1]]);
+});
+
+async function setupNutstore() {
+  const app = setup();
+  const { storage, prefix, context, shadow, click } = app;
+  const requests = [];
+  context.GM_xmlhttpRequest = options => {
+    requests.push(options);
+    return { abort() { options.onabort(); } };
+  };
+  context.prompt = () => 'fixture-app-password';
+  await click(findButton(shadow, '设置'));
+  shadow.querySelectorAll('input').find(node => node.type === 'email').value = 'lexi@example.com';
+  const folder = shadow.querySelectorAll('.setting').find(row => textOf(row).includes('同步文件夹'));
+  folder.querySelector('input').value = '词库 2026';
+  await click(findButton(shadow, '保存同步配置'));
+  assert.equal(requests.length, 0, 'saving settings does not start synchronization');
+  const start = () => click(findButton(shadow, '立即同步'));
+  const last = () => requests.at(-1);
+  const reply = async (status, data, tag) => {
+    last().onload({ status, responseText: JSON.stringify(data), responseHeaders: tag ? `ETag: ${tag}\r\n` : '' });
+    await new Promise(setImmediate);
+  };
+  return { ...app, requests, start, last, reply, config: () => storage.get(prefix + 'nutstore-sync') };
+}
+
+test('Nutstore sync is manual, uses conditional WebDAV requests, and does not export credentials', async () => {
+  const app = await setupNutstore();
+  const { requests, start, last, reply, config, shadow, click, downloads } = app;
+  await click(findButton(shadow, '导出 JSON 备份'));
+  const backup = await [...downloads.values()][0].text();
+  assert.doesNotMatch(backup, /fixture-app-password|lexi@example\.com/);
+  await start();
+  await start();
+  assert.equal(requests.length, 1, 'a pending sync cannot be started a second time');
+  assert.equal(last().method, 'GET');
+  assert.equal(last().url, 'https://dav.jianguoyun.com/dav/%E8%AF%8D%E5%BA%93%202026/lexi-sync.json');
+  assert.equal(last().headers.Authorization, 'Basic ' + btoa('lexi@example.com:fixture-app-password'));
+  assert.equal(last().redirect, 'error');
+  await reply(404);
+  assert.equal(last().method, 'PUT');
+  assert.equal(last().headers['If-None-Match'], '*');
+  const uploaded = JSON.parse(last().data);
+  assert.deepEqual(Object.keys(uploaded), ['schemaVersion', 'words', 'history', 'book', 'recall']);
+  assert.equal(uploaded.history.length, 3);
+  await reply(201);
+  assert.equal(config().lastSyncAt, app.context.Date.now());
+  await start();
+  await reply(200, uploaded, '"version-1"');
+  assert.equal(requests.length, 3, 'an unchanged cloud file is not re-uploaded');
+  await click(findButton(shadow, '清除同步配置'));
+  assert.equal(config(), undefined);
+  assert.equal(app.storage.has(app.prefix + 'word:alpha'), true);
+  assert.equal(requests.length, 3);
+});
+
+test('Nutstore merges both sides and does not import server settings or site rules', async () => {
+  const app = await setupNutstore();
+  const { storage, prefix, context, start, reply, last, config } = app;
+  const at = context.Date.now();
+  const card = schedule(createStudy('gamma', at - DAY), 'good', at - DAY);
+  const remote = { schemaVersion: 3, words: [{ ...storage.get(prefix + 'word:beta'), word: 'gamma' }],
+    history: [{ id: 'remote-event-1', word: 'gamma', at, context: 'a reading example' }], book: [card], recall: [card],
+    settings: { retention: 0.95 }, siteRules: [{ type: 'domain', value: 'docs.example.com' }] };
+  await start();
+  await reply(200, remote, '"version-2"');
+  const sent = JSON.parse(last().data);
+  assert.equal(last().headers['If-Match'], '"version-2"');
+  assert.deepEqual(sent.words.map(item => item.word), ['alpha', 'beta', 'gamma']);
+  assert.equal(sent.history.length, 4);
+  assert.equal(sent.history.at(-1).context, 'a reading example');
+  assert.deepEqual(sent.recall.map(item => item.word), ['gamma']);
+  assert.equal(storage.has(prefix + 'word:gamma'), false, 'local changes wait for a successful cloud write');
+  await reply(412);
+  assert.match(app.shadow.querySelector('.toast').textContent, /云端文件已变化/);
+  assert.equal(storage.has(prefix + 'word:gamma'), false);
+  assert.equal(config().lastSyncAt, 0);
+
+  await start();
+  await reply(200, remote, '"version-3"');
+  await reply(204);
+  assert.equal(storage.get(prefix + 'event:remote-event-1').context, 'a reading example');
+  assert.deepEqual(json(storage.get(prefix + 'study:gamma')), card);
+  assert.deepEqual(json(storage.get(prefix + 'recall:gamma')), card);
+  assert.equal(storage.has(prefix + 'settings'), false);
+  assert.equal(storage.has(prefix + 'disabled:domain:docs.example.com'), false);
+});
+
+test('Nutstore refuses invalid or unversioned cloud data and preserves concurrent local edits', async () => {
+  const app = await setupNutstore();
+  const { storage, prefix, shadow, requests, start, reply, config } = app;
+  const toast = () => shadow.querySelector('.toast').textContent;
+  await start();
+  await reply(401);
+  assert.match(toast(), /认证失败/);
+  await start();
+  await reply(200, '<html>not a backup</html>', '"existing"');
+  assert.match(toast(), /备份格式无效/);
+  const remote = { schemaVersion: 3, words: [storage.get(prefix + 'word:beta')],
+    history: [{ id: 'remote-event-2', word: 'beta', at: 100 }], book: [], recall: [] };
+  await start();
+  await reply(200, remote, 'W/"weak-version"');
+  assert.match(toast(), /未返回可用的文件版本标识/);
+  assert.equal(requests.length, 3);
+  await start();
+  await reply(200, remote, '"existing"');
+  storage.delete(prefix + 'event:history-event-0');
+  storage.set(prefix + 'revision', 'edited-by-another-tab');
+  await reply(204);
+  assert.match(toast(), /本机数据或配置已变化/);
+  assert.equal(storage.has(prefix + 'event:history-event-0'), false);
+  assert.equal(storage.has(prefix + 'event:remote-event-2'), false);
+  assert.equal(config().lastSyncAt, 0);
 });
 
 test('settings can still import v1 and v2 progress backups', async () => {

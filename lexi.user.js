@@ -1,12 +1,13 @@
 // ==UserScript==
 // @name         Lexi · 划词词典与复习
 // @namespace    lexi-local
-// @version      0.5.1
-// @description  英文划词、发音、跨网站历史、生词复习与本地备份。无需账号。
+// @version      0.6.0
+// @description  英文划词、发音、跨网站历史、生词复习与本地备份，可选坚果云同步。
 // @match        http://*/*
 // @match        https://*/*
 // @noframes
 // @run-at       document-idle
+// @sandbox      DOM
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_deleteValue
@@ -21,6 +22,7 @@
 // @connect      translate.googleapis.com
 // @connect      dict.youdao.com
 // @connect      api.datamuse.com
+// @connect      dav.jianguoyun.com
 // @license      MIT
 // ==/UserScript==
 
@@ -2770,11 +2772,127 @@ SOFTWARE.
     const rules = ['page', 'domain'].map(type => get(ruleKey({ type, value: scope[type] }), null)).filter(Boolean);
     return siteState(location.href, validateSiteRules(rules));
   };
-  const snapshot = () => ({
-    schemaVersion: 3, exportedAt: new Date().toISOString(),
+  const learningSnapshot = () => ({
+    schemaVersion: 3,
     words: all('word').map(splitTranslations), history: ordered(all('event'), true), book: all('study').map(migrateStudy),
-    recall: all('recall').map(migrateStudy), settings: cleanSettings(get('settings', {})), siteRules: readSiteRules()
+    recall: all('recall').map(migrateStudy)
   });
+  const snapshot = () => ({
+    ...learningSnapshot(), exportedAt: new Date().toISOString(), settings: cleanSettings(get('settings', {})), siteRules: readSiteRules()
+  });
+  function writeLearningData(data, previous) {
+    let changed = false;
+    for (const [field, type, id] of [['words', 'word', 'word'], ['history', 'event', 'id'],
+      ['book', 'study', 'word'], ['recall', 'recall', 'word']]) {
+      const before = new Map((previous?.[field] || []).map(item => [item[id], item]));
+      for (const item of data[field]) {
+        if (JSON.stringify(before.get(item[id])) === JSON.stringify(item)) continue;
+        put(type + ':' + item[id], item);
+        changed = true;
+      }
+    }
+    return changed;
+  }
+  const SYNC_HELP = 'https://help.jianguoyun.com/?p=2064';
+  const SYNC_FILE = 'lexi-sync.json';
+  function syncContent({ words, history, book, recall }) {
+    const byWord = items => [...items].sort((a, b) => a.word.localeCompare(b.word));
+    return JSON.stringify({ schemaVersion: 3, words: byWord(words), history: ordered(history, true),
+      book: byWord(book), recall: byWord(recall) });
+  }
+  function webdavRequest(config, method, data, condition = {}) {
+    const url = `https://dav.jianguoyun.com/dav/${encodeURIComponent(config.folder)}/${SYNC_FILE}`;
+    const credentials = new TextEncoder().encode(`${config.account}:${config.password}`);
+    const authorization = 'Basic ' + btoa(Array.from(credentials, byte => String.fromCharCode(byte)).join(''));
+    return new Promise((resolve, reject) => {
+      let handle;
+      let done = false;
+      const finish = (error, response) => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        if (error) reject(error); else resolve(response);
+      };
+      const abort = error => {
+        finish(error);
+        handle?.abort();
+      };
+      const timedOut = () => new Error('连接坚果云超时，请稍后重试');
+      const failed = () => new Error('无法连接坚果云，请检查网络和油猴的联网权限');
+      const timer = setTimeout(() => abort(timedOut()), 60000);
+      try {
+        handle = GM_xmlhttpRequest({
+          method, url, anonymous: true, redirect: 'error', timeout: 60000,
+          headers: { Authorization: authorization, 'Cache-Control': 'no-cache',
+            ...(method === 'PUT' ? { 'Content-Type': 'application/json; charset=utf-8', ...condition } : {}) },
+          ...(method === 'PUT' ? { data } : {}),
+          onload: response => {
+            if (response.finalUrl && response.finalUrl !== url) finish(new Error('坚果云返回了意外的请求地址，已停止同步'));
+            else finish(null, response);
+          },
+          onprogress: ({ loaded, total }) => {
+            if (method !== 'GET') return;
+            try { checkBackupSize(Math.max(loaded || 0, total || 0)); } catch (error) { abort(error); }
+          },
+          onerror: () => finish(failed()), ontimeout: () => abort(timedOut()),
+          onabort: () => finish(new Error('坚果云同步已取消'))
+        });
+      } catch { finish(failed()); }
+    });
+  }
+  function webdavError(status) {
+    if (status === 401) return new Error('坚果云认证失败，请检查账号和第三方应用密码');
+    if (status === 403) return new Error('坚果云拒绝访问，请检查应用密码和同步文件夹的读写权限');
+    if (status === 404 || status === 409) return new Error('找不到坚果云同步文件夹，请先创建同名的一级文件夹并检查名称');
+    if (status === 412 || status === 423) return new Error('云端文件已变化或正在使用，请稍后重新同步');
+    if (status === 429 || status === 507) return new Error('坚果云请求受限或空间不足，请检查账号额度后重试');
+    return new Error(`坚果云请求失败（HTTP ${status}），请稍后重试`);
+  }
+  async function syncWithNutstore(config) {
+    const response = await webdavRequest(config, 'GET');
+    const empty = { schemaVersion: 3, words: [], history: [], book: [], recall: [] };
+    let incoming = empty;
+    let condition = { 'If-None-Match': '*' };
+    if (response.status !== 404) {
+      if (response.status !== 200) throw webdavError(response.status);
+      checkBackupSize(new TextEncoder().encode(response.responseText).length);
+      let parsed;
+      try { parsed = JSON.parse(response.responseText); }
+      catch { throw new Error('云端文件不是有效的 Lexi JSON，未覆盖，请检查同步文件夹'); }
+      incoming = validateBackup(parsed);
+      const etag = /^etag:[ \t]*("[\x21\x23-\x7e\x80-\xff]*")[ \t]*\r?$/im.exec(response.responseHeaders || '')?.[1];
+      condition = etag ? { 'If-Match': etag } : null;
+    }
+    const revision = get('revision', null);
+    const sameConfig = () => {
+      const current = get('nutstore-sync', null);
+      return current?.account === config.account && current.folder === config.folder && current.password === config.password;
+    };
+    if (!sameConfig()) throw new Error('本机同步配置已变化，请重新同步');
+    const local = validateBackup(learningSnapshot());
+    const retention = cleanSettings(get('settings', {})).retention;
+    const merged = validateBackup({ schemaVersion: 3, ...mergeBackup(local, incoming, retention) });
+    const data = syncContent(merged);
+    checkBackupSize(new TextEncoder().encode(data).length);
+    const upload = response.status === 404 || syncContent(incoming) !== data;
+    if (upload) {
+      if (!condition) throw new Error('坚果云未返回可用的文件版本标识（ETag），为避免覆盖云端更新，未写入');
+      const saved = await webdavRequest(config, 'PUT', data, condition);
+      if (![200, 201, 204].includes(saved.status)) throw webdavError(saved.status);
+    }
+    if (!sameConfig() || get('revision', null) !== revision) {
+      throw new Error('同步期间本机数据或配置已变化，未写入本机，请重新同步');
+    }
+    let changed;
+    try { changed = writeLearningData(merged, local); }
+    catch {
+      notify();
+      throw new Error('本机写入中断，部分记录可能已合并；原记录未主动删除，可再次同步');
+    }
+    if (changed) notify();
+    put('nutstore-sync', { ...config, lastSyncAt: Date.now() });
+    return { changed, message: `同步完成：${merged.words.length} 个词条、${merged.history.length} 条历史、${merged.book.length} 个生词` };
+  }
   let ui;
   let currentSite;
   let menuSignature = '';
@@ -4475,10 +4593,7 @@ SOFTWARE.
     if (latest.details !== details) throw new Error('确认期间本机复习进度或设置已变化，未导入数据，请重新选择备份');
     const { merged } = latest;
     try {
-      for (const item of merged.words) put('word:' + item.word, item);
-      for (const item of merged.history) put('event:' + item.id, item);
-      for (const item of merged.book) put('study:' + item.word, item);
-      for (const item of merged.recall) put('recall:' + item.word, item);
+      writeLearningData(merged);
       if (restoreRules) {
         for (const rule of incoming.siteRules) put(ruleKey(rule), rule);
         syncSite();
@@ -4542,6 +4657,90 @@ SOFTWARE.
     renderRules();
     scope.append(current, help, toolbar, ruleList, pager.node);
     view.append(scope);
+  }
+  let syncBusy = false;
+  let syncMessage = '';
+  let refreshSyncStatus;
+  function renderNutstore() {
+    const section = el('section', 'section');
+    const config = get('nutstore-sync', null);
+    const account = el('input'); account.type = 'email'; account.autocomplete = 'off';
+    account.value = config?.account || ''; account.maxLength = 254;
+    const folder = el('input'); folder.autocomplete = 'off'; folder.spellcheck = false;
+    folder.value = config?.folder || 'Lexi'; folder.maxLength = 80;
+    const field = (label, input) => {
+      const row = el('label', 'setting fallback-setting');
+      row.append(el('span', '', label), input);
+      return row;
+    };
+    const status = el('p', 'notice');
+    status.setAttribute('role', 'status');
+    const save = button('保存同步配置', () => {
+      if (syncBusy) return;
+      const email = account.value.trim();
+      const name = folder.value.trim();
+      if (!email || /[:\s\x00-\x1f\x7f]/.test(email) || email.length > 254) throw new Error('请输入正确的坚果云账号');
+      if (!name || name === '.' || name === '..' || /[\\/:*?"<>|\x00-\x1f\x7f]/.test(name) || name.length > 80) {
+        throw new Error('请输入已创建的一级文件夹名称，不要填写路径或网址');
+      }
+      const previous = get('nutstore-sync', null);
+      const existing = previous?.account === email ? previous.password : '';
+      const answer = prompt('请输入坚果云第三方应用密码（不是登录密码）。此对话框中输入内容可见。' +
+        (existing ? '\n留空可保留原应用密码。' : ''));
+      if (answer === null) return;
+      const password = answer.trim() || existing;
+      if (!password || password.length > 512 || /[\x00-\x1f\x7f]/.test(password)) throw new Error('请输入有效的第三方应用密码');
+      put('nutstore-sync', { account: email, folder: name, password,
+        lastSyncAt: existing === password && previous?.folder === name ? previous.lastSyncAt || 0 : 0 });
+      syncMessage = '同步配置已保存，尚未联网。';
+      refreshSyncStatus();
+    });
+    const sync = button('立即同步', async () => {
+      if (syncBusy) return;
+      const saved = get('nutstore-sync', null);
+      if (!saved) throw new Error('请先保存坚果云同步配置');
+      if (account.value.trim() !== saved.account || folder.value.trim() !== saved.folder) throw new Error('请先保存修改后的同步配置');
+      syncBusy = true;
+      syncMessage = '正在连接坚果云并合并数据…';
+      refreshSyncStatus();
+      try {
+        const result = await syncWithNutstore(saved);
+        syncMessage = result.message;
+        if (result.changed) {
+          review.reset();
+          if (!overlay.hidden && screen !== 'settings') render();
+        }
+        message(result.message);
+      } catch (error) {
+        syncMessage = error.message || '同步失败，请重试';
+        showError(error);
+      } finally {
+        syncBusy = false;
+        refreshSyncStatus();
+      }
+    }, 'button primary');
+    const clear = button('清除同步配置', () => {
+      if (syncBusy) return;
+      remove('nutstore-sync');
+      account.value = ''; folder.value = 'Lexi';
+      syncMessage = '已清除本机同步配置；云端和本机词库均保留。';
+      refreshSyncStatus();
+    });
+    refreshSyncStatus = () => {
+      const saved = get('nutstore-sync', null);
+      const lastSync = saved?.lastSyncAt ? `上次成功：${new Date(saved.lastSyncAt).toLocaleString()}` : '';
+      status.textContent = [syncMessage || (saved ? '已配置，等待手动同步。' : '未配置同步。'), lastSync].filter(Boolean).join(' · ');
+      account.disabled = folder.disabled = save.disabled = syncBusy;
+      sync.disabled = clear.disabled = syncBusy || !saved;
+    };
+    refreshSyncStatus();
+    const actions = el('div', 'actions');
+    actions.append(save, sync, clear);
+    section.append(el('h3', '', '坚果云同步'),
+      el('p', 'notice', '仅点击「立即同步」时联网。先在坚果云创建一个私有一级文件夹（例如 Lexi），在每台设备上使用同一账号和文件夹。'),
+      link('如何生成第三方应用密码 ↗', SYNC_HELP), field('坚果云账号', account), field('同步文件夹', folder), actions, status,
+      el('p', 'notice', '双向合并词条、查词历史（含已保存的阅读上下文和来源）、生词本和复习进度。不传播删除或撤销，其他设备保留的数据可能重新出现。设置与网页禁用规则不同步；应用密码仅保存在本机 Tampermonkey 存储，不写入备份。'));
+    return section;
   }
   function renderSettings() {
     view.append(el('h1', 'heading', '设置与数据'), el('p', 'subheading', '跨网站共用，数据保存在本机油猴存储'));
@@ -4647,7 +4846,7 @@ SOFTWARE.
     actions.append(button('导入 JSON 合并', () => upload.click()));
     data.append(actions, upload, restoreRow, el('p', 'notice', `JSON 包含完整历史、复习进度和网页禁用规则，导出与导入上限均为 ${BACKUP_MIB} MiB。导入默认保留本机设置与禁用规则，CSV 便于表格查看。`));
     const privacy = el('section', 'section');
-    privacy.append(el('h3', '', '服务与隐私'), el('p', 'notice', '查词会向 Free Dictionary API 发送当前单词；缺少对应缓存时，向 MyMemory 发送最多 6 条英文释义、向有道发送当前单词，分别获取并同时显示两路中文。启用翻译回落后，MyMemory 失败时向 Google Translate 发送相同释义。获取音标和词形同样向有道发送单词，词形补全可能另查原形；进行中的有道请求复用。启用额外音标备用来源后，在有道失败且主词典无音标时向 Datamuse 发送当前单词。成功后本地保存，再次打开直接读取。网页上下文不会发送。在线音频和浏览器朗读可能联网。服务可用性、内容与额度由提供方决定。'),
+    privacy.append(el('h3', '', '服务与隐私'), el('p', 'notice', '查词会向 Free Dictionary API 发送当前单词；缺少对应缓存时，向 MyMemory 发送最多 6 条英文释义、向有道发送当前单词，分别获取并同时显示两路中文。启用翻译回落后，MyMemory 失败时向 Google Translate 发送相同释义。获取音标和词形同样向有道发送单词，词形补全可能另查原形；进行中的有道请求复用。启用额外音标备用来源后，在有道失败且主词典无音标时向 Datamuse 发送当前单词。成功后本地保存，再次打开直接读取。网页上下文不会发送给词典服务。在线音频和浏览器朗读可能联网。服务可用性、内容与额度由提供方决定。'),
       link('Free Dictionary API', 'https://dictionaryapi.dev/'), document.createTextNode(' · '),
       link('MyMemory', 'https://mymemory.translated.net/doc/spec.php'), document.createTextNode(' · '),
       link('Google Translate', 'https://translate.google.com/'), document.createTextNode(' · '),
@@ -4661,18 +4860,19 @@ SOFTWARE.
       for (const key of GM_listValues().filter(key => key.startsWith(PREFIX + 'event:'))) GM_deleteValue(key);
       selectedEvent = null; notify(); render(); message('查词历史已清空');
     }, 'button danger'), button('删除全部 Lexi 数据', () => {
-      if (prompt('此操作不可撤销，请先导出备份。输入“删除全部”以删除全部 Lexi 历史、词条、复习进度和网页禁用规则：') !== '删除全部') return;
+      if (prompt('此操作不可撤销，请先导出备份。输入“删除全部”以清除本机所有 Lexi 数据与同步配置（不删除云端文件）：') !== '删除全部') return;
       stopActivity();
       for (const key of GM_listValues().filter(key => key.startsWith(PREFIX))) GM_deleteValue(key);
       settings = { ...DEFAULTS }; selectedWord = ''; selectedEvent = null; review.reset();
       launcherPosition = null; positionLauncher();
       scopeFilter = ''; scopePage = 0;
+      syncMessage = '';
       for (const state of Object.values(libraryState)) Object.assign(state, { filter: '', page: 0 });
       syncSite(); put('scope-revision', crypto.randomUUID());
       notify(); render(); message('Lexi 数据已删除');
     }, 'button danger'));
     cleanup.append(cleanActions);
-    view.append(preferences, study, chinese, phonetics, data, privacy, cleanup);
+    view.append(preferences, study, chinese, phonetics, renderNutstore(), data, privacy, cleanup);
   }
 
   let selectionTimer;
