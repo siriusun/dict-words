@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Lexi · 划词词典与复习
 // @namespace    lexi-local
-// @version      0.5.0
+// @version      0.5.1
 // @description  英文划词、发音、跨网站历史、生词复习与本地备份。无需账号。
 // @match        http://*/*
 // @match        https://*/*
@@ -2890,7 +2890,7 @@ SOFTWARE.
     node.type = 'button';
     if (hint) { node.title = hint; node.setAttribute('aria-label', hint); }
     node.addEventListener('click', () => Promise.resolve().then(action).then(() => {
-      if (!overlay.hidden && !shadow.activeElement) input.focus();
+      if (!overlay.hidden && !shadow.activeElement) focusStudio();
     }).catch(showError));
     return node;
   }
@@ -2917,7 +2917,7 @@ SOFTWARE.
     .overlay{pointer-events:auto;position:fixed;inset:0;background:#0d211f55;backdrop-filter:blur(5px);display:flex;align-items:center;justify-content:center;padding:24px}.studio{background:var(--paper);border:1px solid var(--line);border-radius:24px;box-shadow:0 30px 100px #081d2038;width:min(1060px,100%);height:min(760px,90vh);display:grid;grid-template-columns:166px minmax(0,1fr);overflow:hidden}.sidebar{padding:28px 18px;background:var(--surface);border-right:1px solid var(--line);display:flex;flex-direction:column;gap:8px}.logo{font:italic 34px Georgia,serif;margin:0 10px}.sidebar .muted{margin:0 10px 28px}.tab{text-align:left;border-color:transparent;background:transparent;padding:11px 14px}.tab.active{background:var(--tint);color:var(--accent);font-weight:650}.sidebar .footnote{margin-top:auto;font-size:11px;color:var(--muted);padding:12px}
     .main{min-width:0;display:flex;flex-direction:column}.top{padding:22px 26px;display:flex;align-items:center;gap:12px;border-bottom:1px solid var(--line)}.search{display:flex;gap:8px;flex:1;min-width:0}input,select{color:var(--ink);background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:9px 12px;min-width:0}input{width:100%}input::placeholder{color:var(--muted)}.view{padding:24px 26px;overflow:auto;min-height:0;flex:1}.heading{font-size:24px;letter-spacing:-.5px;margin:0;font-weight:650}.subheading{font-size:13px;color:var(--muted);margin:5px 0 22px}.split{display:grid;grid-template-columns:240px minmax(0,1fr);gap:24px}.list{display:flex;flex-direction:column;gap:6px;margin-top:12px;max-height:440px;overflow:auto;padding:4px}.item{display:block;width:100%;text-align:left;padding:11px 12px;border-radius:12px;background:transparent;border:1px solid transparent;color:var(--ink)}.item:hover{background:var(--surface)}.item.active{background:var(--tint);border-color:var(--line)}.item .term{font:22px Georgia,serif}.detail{min-width:0}.detail .word{margin-top:8px}.empty{color:var(--muted);text-align:center;padding:45px 15px;font-size:14px}.section{background:var(--surface);border:1px solid var(--line);border-radius:16px;padding:20px;margin:16px 0}.section h3{margin:0 0 14px;font-size:15px}.setting{display:flex;justify-content:space-between;align-items:center;gap:14px;margin:16px 0}.setting input{width:18px;height:18px;accent-color:var(--accent)}.notice{font-size:12px;color:var(--muted);margin-top:12px}.review{text-align:center;max-width:540px;margin:25px auto}.review .word{font-size:54px;margin:35px 0 12px}.review-answer{text-align:left;margin:25px 0}.stats{display:flex;gap:12px;margin:24px 0}.stat{flex:1;padding:18px;background:var(--surface);border:1px solid var(--line);border-radius:15px}.stat strong{display:block;font:32px Georgia,serif;color:var(--accent)}.toast{pointer-events:auto;position:fixed;left:50%;bottom:25px;transform:translateX(-50%);max-width:calc(100vw - 32px);background:var(--ink);color:var(--surface);padding:12px 20px;border-radius:12px;box-shadow:0 5px 25px #0002;z-index:2}
     @media(prefers-color-scheme:dark){:host{--paper:#15201d;--surface:#1b2823;--ink:#e4ede5;--muted:#9aada1;--line:#304238;--accent:#9fd2b1;--tint:#263c30;--error:#f1a19b;color-scheme:dark}.primary,.launcher{background:#38684d;color:#fff;border-color:#497a5d}.primary:hover{background:#38684d}}
-    @media(max-width:760px){.overlay{padding:10px}.studio{grid-template-columns:1fr;height:95vh;border-radius:18px}.sidebar{padding:12px;flex-direction:row;align-items:center;border-right:0;border-bottom:1px solid var(--line);gap:3px;flex-wrap:wrap}.sidebar .logo{font-size:25px;margin-right:auto}.sidebar .muted,.footnote{display:none}.tab{padding:7px 10px}.main{min-height:0}.top{padding:14px}.view{padding:18px}.split{grid-template-columns:1fr}.list{max-height:170px}.detail{border-top:1px solid var(--line);padding-top:18px}.review .word{font-size:40px}.stats{gap:6px}.stat{padding:12px}.launcher{right:16px;bottom:16px}}
+    @media(max-width:760px){.launcher{right:16px;bottom:16px}}
     @media(prefers-reduced-motion:reduce){*{transition:none!important;scroll-behavior:auto!important}}
   `;
   const app = el('div', 'app');
@@ -2957,7 +2957,6 @@ SOFTWARE.
     .history-row:hover .history-delete,.history-row:focus-within .history-delete{opacity:1;pointer-events:auto}
     .history-delete:hover{background:color-mix(in srgb,var(--error) 12%,transparent)}
     @media(hover:none){.history-delete{opacity:1;pointer-events:auto}}
-    @media(max-width:760px){.studio{grid-template-rows:auto minmax(0,1fr)}.library .split{grid-template-rows:minmax(0,2fr) minmax(0,3fr);gap:16px}}
     .stats{flex-wrap:wrap}.stat{min-width:110px}
     .context-line{margin:14px auto 4px;max-width:480px;color:var(--muted);font:15px/1.7 Georgia,"Times New Roman",serif;overflow-wrap:anywhere}
     .context-line mark{background:color-mix(in srgb,var(--accent) 18%,transparent);color:var(--ink);border-radius:4px;padding:0 3px}
@@ -2980,6 +2979,24 @@ SOFTWARE.
     .scope-rule-list{flex:1;min-height:0;overflow:auto;border-top:1px solid var(--line)}.scope-rule{display:flex;align-items:center;gap:10px;padding:5px 0;border-bottom:1px solid var(--line)}
     .scope-kind{flex-shrink:0;font-size:11px;color:var(--muted);background:var(--tint);border-radius:4px;padding:1px 5px}.scope-address{min-width:0;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:12px}
     .scope-remove{font-size:12px;padding:3px 8px;border-color:transparent}.scope-pagination{display:flex;align-items:center;gap:8px;flex-shrink:0}.scope-pagination .meta{flex:1}.scope-pagination .button{font-size:12px;padding:5px 10px}.scope-pagination .button:disabled{cursor:default}
+    .compact .overlay{inset:auto;left:var(--visible-left);top:var(--visible-top);width:var(--visible-width);height:var(--visible-height);transform:scale(var(--ui-scale));transform-origin:top left;overflow:hidden;align-items:flex-end;background:#0d211f44;backdrop-filter:none;padding:max(8px,env(safe-area-inset-top)) max(8px,env(safe-area-inset-right)) max(8px,env(safe-area-inset-bottom)) max(8px,env(safe-area-inset-left))}
+    .compact .studio{width:min(640px,100%);height:min(640px,82%);border-radius:18px;grid-template:auto minmax(0,1fr) / minmax(0,1fr);outline:none}
+    .compact .sidebar{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:2px;overflow:visible;padding:4px 6px;border-right:0;border-bottom:1px solid var(--line)}
+    .compact .sidebar .logo,.compact .sidebar .muted,.compact .sidebar .footnote{display:none}
+    .compact .tab{min-height:44px;padding:0 2px;text-align:center;font-size:13px}
+    .compact .top{padding:4px 8px;gap:6px}.compact .search{gap:4px}.compact .search input{padding:6px 8px;font-size:16px}
+    .compact .button,.compact .icon{min-height:44px}.compact .icon{min-width:44px}
+    .compact .view{padding:12px;overflow:auto;overflow-wrap:anywhere}
+    .compact .view.library,.compact .view.scope-view{display:block}
+    .compact .heading{font-size:21px}.compact .subheading{margin-bottom:10px}
+    .compact .library .split{display:block}.compact .library .list{max-height:150px;overscroll-behavior:auto}
+    .compact .detail-pane{overflow:visible;border-top:1px solid var(--line);margin-top:12px;padding:12px 0 0}
+    .compact .scope-rule-list{overflow:visible}
+    .compact .section{padding:12px}.compact .empty{padding:12px 6px}
+    .compact .review{margin:12px auto}.compact .review .word{font-size:36px;margin-top:18px}
+    .compact .stats{gap:6px}.compact .stat{min-width:90px;padding:10px}
+    .compact .popover{width:min(380px,calc(var(--visible-width) - 16px));max-height:min(65vh,calc(var(--visible-height) - 16px));padding:14px;overflow-wrap:anywhere;transform:scale(var(--ui-scale));transform-origin:top left}
+    .compact input:not([type="checkbox"]),.compact select{font-size:16px}
   `;
   let launcherPosition = get('launcher-position', null);
   if (!launcherPosition || !['x', 'y'].every(axis => Number.isFinite(launcherPosition[axis]) &&
@@ -2996,6 +3013,7 @@ SOFTWARE.
   const overlay = el('div', 'overlay');
   overlay.hidden = true;
   const studio = el('section', 'studio');
+  studio.tabIndex = -1;
   studio.setAttribute('role', 'dialog');
   studio.setAttribute('aria-modal', 'true');
   studio.setAttribute('aria-label', 'Lexi 学习中心');
@@ -3006,7 +3024,12 @@ SOFTWARE.
   sidebar.append(logo, el('div', 'muted', '个人词汇库'));
   const navButtons = {};
   for (const [key, label] of [['history', '查词历史'], ['book', '生词本'], ['review', '复习'], ['sites', '网页管理'], ['settings', '设置']]) {
-    navButtons[key] = button(label, () => { screen = key; render(); }, 'tab');
+    navButtons[key] = button(label, () => {
+      const changed = screen !== key;
+      screen = key;
+      render();
+      if (compact && changed) view.scrollTop = 0;
+    }, 'tab');
     sidebar.append(navButtons[key]);
   }
   sidebar.append(el('div', 'footnote', '本地保存 · 无需账号'));
@@ -3017,6 +3040,9 @@ SOFTWARE.
   input.placeholder = '输入英文单词，按 Enter 查词';
   input.setAttribute('aria-label', '查询英文单词');
   input.autocomplete = 'off';
+  input.autocapitalize = 'none';
+  input.spellcheck = false;
+  input.enterKeyHint = 'search';
   input.maxLength = 80;
   form.append(input, button('查询', () => lookup(input.value), 'button primary'));
   form.addEventListener('submit', event => { event.preventDefault(); lookup(input.value).catch(showError); });
@@ -3042,6 +3068,33 @@ SOFTWARE.
   overlay.append(studio);
   app.append(readingMarks, launcher, readingReturn, popover, overlay, toast);
   shadow.append(style, app);
+  const visualViewport = window.visualViewport;
+  const touchViewport = window.matchMedia?.('(pointer: coarse)');
+  let visibleViewport = readViewport();
+  let compact = false;
+  function readViewport() {
+    return {
+      left: visualViewport?.offsetLeft || 0, top: visualViewport?.offsetTop || 0,
+      width: visualViewport?.width || window.innerWidth, height: visualViewport?.height || window.innerHeight,
+      scale: visualViewport?.scale || 1
+    };
+  }
+  function updateViewport() {
+    visibleViewport = readViewport();
+    const { left, top, width, height, scale } = visibleViewport;
+    const deviceWidth = width * scale;
+    compact = deviceWidth <= 760 || (touchViewport?.matches && deviceWidth <= 1000 && height * scale <= 500);
+    app.classList.toggle('compact', compact);
+    if (!compact) return;
+    // On desktop-width pages zoomed out by the mobile browser, size the UI in screen CSS pixels.
+    const unit = Math.min(1, scale);
+    app.style.setProperty('--visible-left', left + 'px');
+    app.style.setProperty('--visible-top', top + 'px');
+    app.style.setProperty('--visible-width', width * unit + 'px');
+    app.style.setProperty('--visible-height', height * unit + 'px');
+    app.style.setProperty('--ui-scale', 1 / unit);
+  }
+  updateViewport();
   let toastTimer;
   function message(value) {
     toast.textContent = value;
@@ -3233,6 +3286,7 @@ SOFTWARE.
     if (wasOpen && !keepReading) releaseReadingMarker();
   }
   function openStudio(nextScreen) {
+    updateViewport();
     returnFocus = shadow.activeElement || document.activeElement;
     closePopover(true);
     if (nextScreen) screen = nextScreen;
@@ -3240,7 +3294,10 @@ SOFTWARE.
     holdReadingMarker();
     render();
     if (nextScreen === 'settings' || nextScreen === 'sites') view.scrollTop = 0;
-    if (!studio.contains(shadow.activeElement)) input.focus();
+    if (!studio.contains(shadow.activeElement)) focusStudio();
+  }
+  function focusStudio() {
+    (compact ? studio : input).focus({ preventScroll: true });
   }
   function closeStudio() {
     resetInternalLookup();
@@ -3360,15 +3417,21 @@ SOFTWARE.
     });
     return pending.finally(() => { clearTimeout(timer); requests.delete(tracked); });
   }
-  function positionPopover(rect) {
+  function positionPopover(rect, keepPosition = false) {
     popover.hidden = false;
-    const width = Math.min(380, window.innerWidth - 24);
-    const left = Math.max(12, Math.min(rect?.left ?? window.innerWidth - width - 24, window.innerWidth - width - 12));
-    const height = popover.getBoundingClientRect().height;
-    const below = (rect?.bottom ?? 80) + 10;
-    const top = below + height < window.innerHeight - 12 ? below : Math.max(12, (rect?.top ?? 80) - height - 10);
-    popover.style.left = left + 'px';
-    popover.style.top = Math.min(top, Math.max(12, window.innerHeight - height - 12)) + 'px';
+    const viewport = compact ? visibleViewport : { left: 0, top: 0, width: window.innerWidth, height: window.innerHeight, scale: 1 };
+    const unit = Math.min(1, viewport.scale);
+    const gap = (compact ? 8 : 12) / unit;
+    const { width, height } = popover.getBoundingClientRect();
+    const maxLeft = Math.max(viewport.left + gap, viewport.left + viewport.width - width - gap);
+    const maxTop = Math.max(viewport.top + gap, viewport.top + viewport.height - height - gap);
+    const anchorTop = rect?.top ?? viewport.top + 80 / unit;
+    const below = (rect?.bottom ?? anchorTop) + 10 / unit;
+    const top = below <= maxTop ? below : anchorTop - height - 10 / unit;
+    const currentLeft = keepPosition ? parseFloat(popover.style.left) : NaN;
+    const currentTop = keepPosition ? parseFloat(popover.style.top) : NaN;
+    popover.style.left = Math.max(viewport.left + gap, Math.min(maxLeft, Number.isFinite(currentLeft) ? currentLeft : rect?.left ?? maxLeft - gap)) + 'px';
+    popover.style.top = Math.max(viewport.top + gap, Math.min(maxTop, Number.isFinite(currentTop) ? currentTop : top)) + 'px';
   }
   function popHeader() {
     const bar = el('div', 'bar');
@@ -3478,6 +3541,7 @@ SOFTWARE.
     const frame = frames.pop();
     if (!frames.length) internalLookup = null;
     restoreFrame(target, frame);
+    if (compact && target === popover) positionPopover(null, true);
     if (frame.focus?.getClientRects().length) frame.focus.focus({ preventScroll: true });
     else (target.querySelector('.lookup-back') || target).focus({ preventScroll: true });
   }
@@ -3497,10 +3561,7 @@ SOFTWARE.
     if (target === popover) bar.append(scopeMenu(), button('×', closePopover, 'icon', '关闭查词卡'));
     target.replaceChildren(bar, ...nodes);
     target.scrollTop = 0;
-    if (target === popover) {
-      const rect = popover.getBoundingClientRect();
-      popover.style.top = Math.max(12, Math.min(rect.top, window.innerHeight - rect.height - 12)) + 'px';
-    }
+    if (target === popover) positionPopover(null, true);
     if (focused) bar.querySelector('button').focus({ preventScroll: true });
   }
   async function lookup(raw, rect, context = null, target = null) {
@@ -3572,6 +3633,10 @@ SOFTWARE.
         screen = 'history';
         Object.assign(libraryState.history, { filter: '', page: 0 });
         render();
+        if (compact) {
+          view.scrollTop = 0;
+          if (shadow.activeElement === input) view.focus({ preventScroll: true });
+        }
         if (stale) message('使用离线缓存 · 暂未能更新释义');
       }
     } catch (error) {
@@ -4657,12 +4722,20 @@ SOFTWARE.
     }, 220);
   });
   window.addEventListener('resize', () => {
+    updateViewport();
     finishLauncherDrag();
     positionLauncher();
     cancelInternalSelection();
     updateReadingMarker();
-    if (!popover.hidden) positionPopover();
+    if (!popover.hidden) positionPopover(null, true);
   });
+  function onVisualViewportChange() {
+    if (!compact && !touchViewport?.matches) return;
+    updateViewport();
+    if (!popover.hidden) positionPopover(null, true);
+  }
+  visualViewport?.addEventListener('resize', onVisualViewportChange);
+  visualViewport?.addEventListener('scroll', onVisualViewportChange);
   document.addEventListener('scroll', updateReadingMarker, true);
   document.addEventListener('pointerdown', event => {
     if (!event.composedPath().includes(host)) {

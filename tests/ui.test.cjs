@@ -18,7 +18,7 @@ function setup(phonetic = '/test/', phoneticSource = 'youdao', options = {}) {
   class Element {
     constructor(tag = 'div') {
       this.tag = tag; this.children = []; this.listeners = {}; this.attributes = {};
-      this.className = ''; this.textContent = ''; this.style = {}; this.scrollTop = 0;
+      this.className = ''; this.textContent = ''; this.style = { setProperty(name, value) { this[name] = value; } }; this.scrollTop = 0;
       this.scrollLeft = 0; this.scrollHeight = this.clientHeight = 100;
       this.scrollWidth = this.clientWidth = 100; this.css = {};
       this.classList = { toggle: (name, active) => {
@@ -91,6 +91,7 @@ function setup(phonetic = '/test/', phoneticSource = 'youdao', options = {}) {
   document.activeElement = new Element('button');
   const window = new Element('window');
   window.innerWidth = 1100; window.innerHeight = 800;
+  if (options.viewport) window.visualViewport = Object.assign(new Element(), options.viewport);
   window.getSelection = () => null;
   const prefix = 'lexi:v1:';
   const storage = new Map();
@@ -151,6 +152,21 @@ function setup(phonetic = '/test/', phoneticSource = 'youdao', options = {}) {
 }
 
 const findButton = (shadow, label) => shadow.querySelectorAll('button').find(node => node.textContent.startsWith(label));
+test('opening the studio on a scaled-down mobile page does not focus the search field', async () => {
+  const desktop = setup();
+  assert.equal(desktop.shadow.activeElement.getAttribute('aria-label'), '查询英文单词');
+
+  const app = setup('/test/', 'youdao', {
+    open: false, viewport: { width: 980, height: 1900, scale: 0.4, offsetTop: 0, offsetLeft: 0 }
+  });
+  const launcher = app.shadow.querySelector('.launcher');
+  launcher.focus();
+  await app.click(launcher);
+  assert.equal(app.shadow.activeElement, app.shadow.querySelector('.studio'));
+  await app.click(app.shadow.querySelector('.top').querySelector('.icon'));
+  assert.equal(app.shadow.activeElement, launcher);
+});
+
 const openReview = async app => {
   await app.click(app.shadow.querySelectorAll('.tab')[2]);
   await app.click(findButton(app.shadow, '开始复习'));
