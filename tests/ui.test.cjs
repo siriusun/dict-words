@@ -681,7 +681,7 @@ async function setupNutstore() {
   context.prompt = () => 'fixture-app-password';
   await click(findButton(shadow, '设置'));
   shadow.querySelectorAll('input').find(node => node.type === 'email').value = 'lexi@example.com';
-  const folder = shadow.querySelectorAll('.setting').find(row => textOf(row).includes('同步文件夹'));
+  const folder = shadow.querySelectorAll('.sync-field').find(row => textOf(row).includes('同步文件夹'));
   folder.querySelector('input').value = '词库 2026';
   await click(findButton(shadow, '保存同步配置'));
   assert.equal(requests.length, 0, 'saving settings does not start synchronization');

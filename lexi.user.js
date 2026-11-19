@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Lexi · 划词词典与复习
 // @namespace    lexi-local
-// @version      0.6.0
+// @version      0.6.1
 // @description  英文划词、发音、跨网站历史、生词复习与本地备份，可选坚果云同步。
 // @match        http://*/*
 // @match        https://*/*
@@ -3087,6 +3087,9 @@ SOFTWARE.
     .reading-marks{pointer-events:none;position:fixed;inset:0}.reading-mark{position:absolute;border-radius:3px}
     .reading-return{pointer-events:auto;position:fixed;left:12px;bottom:24px;z-index:1;box-shadow:0 5px 25px #0002}
     .fallback-setting{flex-wrap:wrap}.fallback-setting select{max-width:100%}
+    .sync-field{display:block;max-width:420px;margin:12px 0}
+    .sync-field input{display:block;min-height:44px;margin-top:4px;border:1px solid var(--line);background:var(--paper)}
+    .sync-field input:focus-visible{border-color:var(--accent);background:var(--tint)}
     .lookup-back{min-width:0;max-width:100%;overflow:hidden;text-overflow:ellipsis}.lookup-bar{margin-bottom:16px;gap:8px}
     .scope-menu{position:relative}.scope-menu summary{list-style:none;cursor:pointer}.scope-menu summary::-webkit-details-marker{display:none}
     .scope-actions{position:absolute;right:0;top:100%;z-index:1;width:190px;padding:8px;display:flex;flex-direction:column;gap:5px;background:var(--surface);border:1px solid var(--line);border-radius:12px;box-shadow:0 6px 20px #102a2025}
@@ -4665,11 +4668,12 @@ SOFTWARE.
     const section = el('section', 'section');
     const config = get('nutstore-sync', null);
     const account = el('input'); account.type = 'email'; account.autocomplete = 'off';
+    account.placeholder = '输入坚果云账号邮箱';
     account.value = config?.account || ''; account.maxLength = 254;
     const folder = el('input'); folder.autocomplete = 'off'; folder.spellcheck = false;
     folder.value = config?.folder || 'Lexi'; folder.maxLength = 80;
     const field = (label, input) => {
-      const row = el('label', 'setting fallback-setting');
+      const row = el('label', 'sync-field');
       row.append(el('span', '', label), input);
       return row;
     };
@@ -4738,7 +4742,9 @@ SOFTWARE.
     actions.append(save, sync, clear);
     section.append(el('h3', '', '坚果云同步'),
       el('p', 'notice', '仅点击「立即同步」时联网。先在坚果云创建一个私有一级文件夹（例如 Lexi），在每台设备上使用同一账号和文件夹。'),
-      link('如何生成第三方应用密码 ↗', SYNC_HELP), field('坚果云账号', account), field('同步文件夹', folder), actions, status,
+      link('如何生成第三方应用密码 ↗', SYNC_HELP), field('坚果云账号', account), field('同步文件夹', folder),
+      el('p', 'notice', '点「保存同步配置」后，在弹窗里输入第三方应用密码（不是坚果云登录密码）。'),
+      actions, status,
       el('p', 'notice', '双向合并词条、查词历史（含已保存的阅读上下文和来源）、生词本和复习进度。不传播删除或撤销，其他设备保留的数据可能重新出现。设置与网页禁用规则不同步；应用密码仅保存在本机 Tampermonkey 存储，不写入备份。'));
     return section;
   }
