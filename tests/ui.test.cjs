@@ -688,7 +688,7 @@ async function setupNutstore() {
   const start = () => click(findButton(shadow, '立即同步'));
   const last = () => requests.at(-1);
   const reply = async (status, data, tag) => {
-    last().onload({ status, responseText: JSON.stringify(data), responseHeaders: tag ? `ETag: ${tag}\r\n` : '' });
+    last().onload({ status, responseText: typeof data === 'string' ? data : JSON.stringify(data), responseHeaders: tag ? `ETag: ${tag}\r\n` : '' });
     await new Promise(setImmediate);
   };
   return { ...app, requests, start, last, reply, config: () => storage.get(prefix + 'nutstore-sync') };
@@ -756,7 +756,68 @@ test('Nutstore merges both sides and does not import server settings or site rul
   assert.equal(storage.has(prefix + 'disabled:domain:docs.example.com'), false);
 });
 
-test('Nutstore refuses invalid or unversioned cloud data and preserves concurrent local edits', async () => {
+test('Nutstore imports an existing cloud backup when no safe upload version is available', async () => {
+  const app = await setupNutstore();
+  const { storage, prefix, shadow, requests, start, reply, config } = app;
+  const remote = { schemaVersion: 3, words: [{ ...storage.get(prefix + 'word:beta'), word: 'gamma' }],
+    history: [{ id: 'remote-event-2', word: 'gamma', at: 100 }], book: [], recall: [] };
+  await start();
+  await reply(200, remote);
+  assert.equal(app.last().method, 'PROPFIND');
+  await reply(405);
+  assert.equal(storage.has(prefix + 'word:gamma'), true, 'the phone still receives the cloud data');
+  assert.equal(storage.has(prefix + 'word:alpha'), true, 'existing local data is kept');
+  assert.equal(requests.some(request => request.method === 'PUT'), false, 'no unsafe overwrite');
+  assert.match(shadow.querySelector('.toast').textContent, /已合并到本机.*未上传/);
+  assert.equal(config().lastSyncAt, 0, 'a one-way import is not marked as a completed sync');
+});
+
+test('Nutstore recovers the matching file version via WebDAV and aborts if its content changes', async () => {
+  const app = await setupNutstore();
+  const { storage, prefix, context, requests, start, last, reply, config } = app;
+  const remote = { schemaVersion: 3, words: [{ ...storage.get(prefix + 'word:beta'), word: 'gamma' }],
+    history: [], book: [], recall: [] };
+  const dav = (localName, content) => ({
+    namespaceURI: 'DAV:', localName, textContent: typeof content === 'string' ? content : '',
+    children: typeof content === 'string' ? [] : content
+  });
+  const property = (tag, status = 200) => dav('propstat', [
+    dav('prop', [dav('getetag', tag)]), dav('status', `HTTP/1.1 ${status} Status`)
+  ]);
+  const resource = (href, ...properties) => dav('response', [dav('href', href), ...properties]);
+  context.DOMParser = class {
+    parseFromString() {
+      return { documentElement: dav('multistatus', [
+        resource('/dav/词库%202026/another.json', property('"wrong-file"')),
+        resource('/dav/词库%202026/lexi-sync.json', property('"not-found"', 404), property('"matching-version"'))
+      ]) };
+    }
+  };
+  async function recoverVersion() {
+    await start();
+    await reply(200, remote, 'W/"weak-version"');
+    assert.equal(last().method, 'PROPFIND');
+    assert.equal(last().headers.Depth, '1');
+    assert.ok(last().url.endsWith('%E8%AF%8D%E5%BA%93%202026/'));
+    await reply(207, '<multistatus xmlns="DAV:"/>');
+    assert.equal(last().method, 'GET');
+    assert.equal(last().headers['If-Match'], '"matching-version"');
+  }
+  await recoverVersion();
+  await reply(200, { ...remote, history: [{ id: 'added-remotely', word: 'gamma', at: 100 }] });
+  assert.equal(requests.some(request => request.method === 'PUT'), false);
+  assert.equal(storage.has(prefix + 'word:gamma'), false);
+  assert.match(app.shadow.querySelector('.toast').textContent, /云端文件已变化/);
+  await recoverVersion();
+  await reply(200, remote);
+  assert.equal(last().method, 'PUT');
+  assert.equal(last().headers['If-Match'], '"matching-version"');
+  await reply(204);
+  assert.equal(storage.has(prefix + 'word:gamma'), true);
+  assert.equal(config().lastSyncAt, context.Date.now());
+});
+
+test('Nutstore refuses invalid cloud data and preserves concurrent local edits', async () => {
   const app = await setupNutstore();
   const { storage, prefix, shadow, requests, start, reply, config } = app;
   const toast = () => shadow.querySelector('.toast').textContent;
@@ -765,13 +826,9 @@ test('Nutstore refuses invalid or unversioned cloud data and preserves concurren
   assert.match(toast(), /认证失败/);
   await start();
   await reply(200, '<html>not a backup</html>', '"existing"');
-  assert.match(toast(), /备份格式无效/);
+  assert.match(toast(), /不是有效的 Lexi JSON/);
   const remote = { schemaVersion: 3, words: [storage.get(prefix + 'word:beta')],
     history: [{ id: 'remote-event-2', word: 'beta', at: 100 }], book: [], recall: [] };
-  await start();
-  await reply(200, remote, 'W/"weak-version"');
-  assert.match(toast(), /未返回可用的文件版本标识/);
-  assert.equal(requests.length, 3);
   await start();
   await reply(200, remote, '"existing"');
   storage.delete(prefix + 'event:history-event-0');

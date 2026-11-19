@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Lexi · 划词词典与复习
 // @namespace    lexi-local
-// @version      0.6.1
+// @version      0.6.2
 // @description  英文划词、发音、跨网站历史、生词复习与本地备份，可选坚果云同步。
 // @match        http://*/*
 // @match        https://*/*
@@ -2795,13 +2795,16 @@ SOFTWARE.
   }
   const SYNC_HELP = 'https://help.jianguoyun.com/?p=2064';
   const SYNC_FILE = 'lexi-sync.json';
+  const DAV_NS = 'DAV:';
+  const DAV_ETAG_QUERY = '<propfind xmlns="DAV:"><prop><getetag/></prop></propfind>';
+  const cloudFolderUrl = config => `https://dav.jianguoyun.com/dav/${encodeURIComponent(config.folder)}/`;
   function syncContent({ words, history, book, recall }) {
     const byWord = items => [...items].sort((a, b) => a.word.localeCompare(b.word));
     return JSON.stringify({ schemaVersion: 3, words: byWord(words), history: ordered(history, true),
       book: byWord(book), recall: byWord(recall) });
   }
-  function webdavRequest(config, method, data, condition = {}) {
-    const url = `https://dav.jianguoyun.com/dav/${encodeURIComponent(config.folder)}/${SYNC_FILE}`;
+  function webdavRequest(config, method, data, headers = {}) {
+    const url = cloudFolderUrl(config) + (method === 'PROPFIND' ? '' : SYNC_FILE);
     const credentials = new TextEncoder().encode(`${config.account}:${config.password}`);
     const authorization = 'Basic ' + btoa(Array.from(credentials, byte => String.fromCharCode(byte)).join(''));
     return new Promise((resolve, reject) => {
@@ -2823,15 +2826,14 @@ SOFTWARE.
       try {
         handle = GM_xmlhttpRequest({
           method, url, anonymous: true, redirect: 'error', timeout: 60000,
-          headers: { Authorization: authorization, 'Cache-Control': 'no-cache',
-            ...(method === 'PUT' ? { 'Content-Type': 'application/json; charset=utf-8', ...condition } : {}) },
-          ...(method === 'PUT' ? { data } : {}),
+          headers: { Authorization: authorization, 'Cache-Control': 'no-cache', ...headers },
+          ...(data !== undefined ? { data } : {}),
           onload: response => {
             if (response.finalUrl && response.finalUrl !== url) finish(new Error('坚果云返回了意外的请求地址，已停止同步'));
             else finish(null, response);
           },
           onprogress: ({ loaded, total }) => {
-            if (method !== 'GET') return;
+            if (method === 'PUT') return;
             try { checkBackupSize(Math.max(loaded || 0, total || 0)); } catch (error) { abort(error); }
           },
           onerror: () => finish(failed()), ontimeout: () => abort(timedOut()),
@@ -2848,6 +2850,53 @@ SOFTWARE.
     if (status === 429 || status === 507) return new Error('坚果云请求受限或空间不足，请检查账号额度后重试');
     return new Error(`坚果云请求失败（HTTP ${status}），请稍后重试`);
   }
+  const strongEtag = value => /^"[\x21\x23-\x7e\x80-\xff]*"$/.test(value || '') ? value : null;
+  const responseEtag = response => strongEtag(/^etag:[ \t]*([^\r\n]*)/im.exec(response.responseHeaders || '')?.[1].trim());
+  function checkedDavText(response) {
+    checkBackupSize(new TextEncoder().encode(response.responseText).length);
+    return response.responseText;
+  }
+  async function recoverCloudEtag(config, original) {
+    const properties = await webdavRequest(config, 'PROPFIND', DAV_ETAG_QUERY, {
+      Depth: '1', 'Content-Type': 'application/xml; charset=utf-8'
+    });
+    if ([400, 403, 404, 405, 501].includes(properties.status)) return null;
+    if (properties.status !== 207) throw webdavError(properties.status);
+    const xml = new DOMParser().parseFromString(checkedDavText(properties), 'application/xml');
+    const root = xml.documentElement;
+    if (root?.namespaceURI !== DAV_NS || root.localName !== 'multistatus') return null;
+    const folderUrl = cloudFolderUrl(config);
+    const expected = new URL(SYNC_FILE, folderUrl);
+    const path = url => decodeURIComponent(url.pathname);
+    const child = (node, name) => [...node.children].find(item => item.namespaceURI === DAV_NS && item.localName === name);
+    let tag = null;
+    for (const resource of root.children) {
+      if (resource.namespaceURI !== DAV_NS || resource.localName !== 'response') continue;
+      const href = child(resource, 'href')?.textContent.trim();
+      if (!href) continue;
+      try {
+        const url = new URL(href, folderUrl);
+        if (url.origin !== expected.origin || url.search || url.hash || path(url) !== path(expected)) continue;
+      } catch { continue; }
+      for (const propstat of resource.children) {
+        if (propstat.namespaceURI !== DAV_NS || propstat.localName !== 'propstat' ||
+          !/^HTTP\/\S+ 200(?: |$)/.test(child(propstat, 'status')?.textContent.trim() || '')) continue;
+        const prop = child(propstat, 'prop');
+        const candidate = prop && strongEtag(child(prop, 'getetag')?.textContent.trim());
+        if (!candidate) continue;
+        if (tag && candidate !== tag) return null;
+        tag = candidate;
+      }
+    }
+    if (!tag) return null;
+    // The properties request is separate from the download: recheck the body before using its tag.
+    const verified = await webdavRequest(config, 'GET', undefined, { 'If-Match': tag });
+    if (verified.status === 404) throw webdavError(412);
+    if (verified.status !== 200) throw webdavError(verified.status);
+    const verifiedTag = responseEtag(verified);
+    if (checkedDavText(verified) !== original || (verifiedTag && verifiedTag !== tag)) throw webdavError(412);
+    return tag;
+  }
   async function syncWithNutstore(config) {
     const response = await webdavRequest(config, 'GET');
     const empty = { schemaVersion: 3, words: [], history: [], book: [], recall: [] };
@@ -2855,12 +2904,12 @@ SOFTWARE.
     let condition = { 'If-None-Match': '*' };
     if (response.status !== 404) {
       if (response.status !== 200) throw webdavError(response.status);
-      checkBackupSize(new TextEncoder().encode(response.responseText).length);
+      const body = checkedDavText(response);
       let parsed;
-      try { parsed = JSON.parse(response.responseText); }
+      try { parsed = JSON.parse(body); }
       catch { throw new Error('云端文件不是有效的 Lexi JSON，未覆盖，请检查同步文件夹'); }
       incoming = validateBackup(parsed);
-      const etag = /^etag:[ \t]*("[\x21\x23-\x7e\x80-\xff]*")[ \t]*\r?$/im.exec(response.responseHeaders || '')?.[1];
+      const etag = responseEtag(response);
       condition = etag ? { 'If-Match': etag } : null;
     }
     const revision = get('revision', null);
@@ -2873,16 +2922,26 @@ SOFTWARE.
     const retention = cleanSettings(get('settings', {})).retention;
     const merged = validateBackup({ schemaVersion: 3, ...mergeBackup(local, incoming, retention) });
     const data = syncContent(merged);
-    checkBackupSize(new TextEncoder().encode(data).length);
     const upload = response.status === 404 || syncContent(incoming) !== data;
+    let downloadOnly = false;
+    const checkLocal = () => {
+      if (!sameConfig() || get('revision', null) !== revision) {
+        throw new Error('同步期间本机数据或配置已变化，未写入本机，请重新同步');
+      }
+    };
     if (upload) {
-      if (!condition) throw new Error('坚果云未返回可用的文件版本标识（ETag），为避免覆盖云端更新，未写入');
-      const saved = await webdavRequest(config, 'PUT', data, condition);
-      if (![200, 201, 204].includes(saved.status)) throw webdavError(saved.status);
+      checkBackupSize(new TextEncoder().encode(data).length);
+      if (!condition) {
+        const etag = await recoverCloudEtag(config, response.responseText);
+        if (etag) condition = { 'If-Match': etag };
+      }
+      checkLocal();
+      if (condition) {
+        const saved = await webdavRequest(config, 'PUT', data, { 'Content-Type': 'application/json; charset=utf-8', ...condition });
+        if (![200, 201, 204].includes(saved.status)) throw webdavError(saved.status);
+      } else downloadOnly = true;
     }
-    if (!sameConfig() || get('revision', null) !== revision) {
-      throw new Error('同步期间本机数据或配置已变化，未写入本机，请重新同步');
-    }
+    checkLocal();
     let changed;
     try { changed = writeLearningData(merged, local); }
     catch {
@@ -2890,6 +2949,7 @@ SOFTWARE.
       throw new Error('本机写入中断，部分记录可能已合并；原记录未主动删除，可再次同步');
     }
     if (changed) notify();
+    if (downloadOnly) return { changed, message: '云端数据已合并到本机；无法确认云端文件版本（ETag），未上传本机变更' };
     put('nutstore-sync', { ...config, lastSyncAt: Date.now() });
     return { changed, message: `同步完成：${merged.words.length} 个词条、${merged.history.length} 条历史、${merged.book.length} 个生词` };
   }
