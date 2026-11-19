@@ -686,158 +686,209 @@ async function setupNutstore() {
   await click(findButton(shadow, '保存同步配置'));
   assert.equal(requests.length, 0, 'saving settings does not start synchronization');
   const start = () => click(findButton(shadow, '立即同步'));
-  const last = () => requests.at(-1);
-  const reply = async (status, data, tag) => {
-    last().onload({ status, responseText: typeof data === 'string' ? data : JSON.stringify(data), responseHeaders: tag ? `ETag: ${tag}\r\n` : '' });
-    await new Promise(setImmediate);
+  const finish = async () => {
+    for (let i = 0; i < 30 && findButton(shadow, '立即同步').disabled; i++) await new Promise(setImmediate);
+    assert.equal(findButton(shadow, '立即同步').disabled, false, 'sync has settled');
   };
-  return { ...app, requests, start, last, reply, config: () => storage.get(prefix + 'nutstore-sync') };
+  return { ...app, requests, start, finish, config: () => storage.get(prefix + 'nutstore-sync') };
 }
 
-test('Nutstore sync is manual, uses conditional WebDAV requests, and does not export credentials', async () => {
+function nutstoreFixture(entries = []) {
+  const files = new Map(entries);
+  const dav = (localName, content) => ({
+    namespaceURI: 'DAV:', localName, textContent: typeof content === 'string' ? content : '',
+    children: typeof content === 'string' ? [] : content
+  });
+  function connect(app, id, intercept = () => false) {
+    let fileId = 0;
+    app.context.crypto.randomUUID = () => `00000000-0000-4000-8000-${id}${String(++fileId).padStart(11, '0')}`;
+    app.context.DOMParser = class {
+      parseFromString(source) {
+        return { documentElement: dav('multistatus', JSON.parse(source).map(name => dav('response', [
+          dav('href', name.startsWith('https://') ? name : '/dav/词库%202026/' + name),
+          dav('propstat', [dav('prop', [dav('resourcetype', [])]), dav('status', 'HTTP/1.1 200 OK')])
+        ]))) };
+      }
+    };
+    app.context.GM_xmlhttpRequest = request => {
+      const { method, url, data, onload } = request;
+      const name = decodeURIComponent(new URL(url).pathname.split('/').at(-1));
+      app.requests.push(request);
+      const respond = () => {
+        if (method === 'PROPFIND') onload({ status: 207, responseText: JSON.stringify([...files.keys()]) });
+        else if (method === 'GET') onload(files.has(name) ? { status: 200, responseText: files.get(name) } : { status: 404 });
+        else if (method === 'PUT') {
+          if (files.has(name)) onload({ status: 412 });
+          else { files.set(name, data); onload({ status: 201 }); }
+        } else if (method === 'DELETE') onload({ status: files.delete(name) ? 204 : 404 });
+        else assert.fail(`Unexpected HTTP method ${method}`);
+      };
+      setImmediate(() => { if (!intercept(request, name, respond)) respond(); });
+      return { abort() {} };
+    };
+  }
+  return { files, connect };
+}
+
+test('Nutstore round-trips phone and desktop data without any ETag or reconfiguration', async () => {
+  const phone = await setupNutstore();
+  const desktop = await setupNutstore();
+  const at = desktop.context.Date.now();
+  const card = schedule(createStudy('gamma', at - DAY), 'good', at - DAY);
+  const legacy = JSON.stringify({ schemaVersion: 3, words: [{ ...desktop.storage.get(desktop.prefix + 'word:beta'), word: 'gamma' }],
+    history: [], book: [card], recall: [card], settings: { retention: 0.95 }, siteRules: [{ type: 'domain', value: 'docs.example.com' }] });
+  const { files, connect } = nutstoreFixture([['lexi-sync.json', legacy]]);
+  phone.storage.set(phone.prefix + 'event:phone-only-1', { id: 'phone-only-1', word: 'alpha', at: 100 });
+  connect(phone, 1);
+  connect(desktop, 2);
+  await phone.start();
+  await phone.finish();
+  assert.match(phone.shadow.querySelector('.toast').textContent, /同步完成/);
+  assert.equal(phone.storage.has(phone.prefix + 'word:gamma'), true);
+  assert.deepEqual(json(phone.storage.get(phone.prefix + 'study:gamma')), card);
+  assert.deepEqual(json(phone.storage.get(phone.prefix + 'recall:gamma')), card);
+  assert.equal(phone.storage.has(phone.prefix + 'settings'), false);
+  assert.equal(phone.storage.has(phone.prefix + 'disabled:domain:docs.example.com'), false);
+  assert.equal(files.size, 2);
+  assert.equal(files.get('lexi-sync.json'), legacy);
+  await desktop.start();
+  await desktop.finish();
+  assert.equal(desktop.storage.has(desktop.prefix + 'event:phone-only-1'), true, 'the computer receives the phone’s local changes');
+  assert.ok(desktop.requests.every(request => request.method !== 'PUT'), 'no unchanged snapshot is uploaded');
+});
+
+test('Nutstore first sync is manual, creates a new file, and does not export credentials', async () => {
   const app = await setupNutstore();
-  const { requests, start, last, reply, config, shadow, click, downloads } = app;
+  const { requests, start, finish, config, shadow, click, downloads } = app;
+  const { files, connect } = nutstoreFixture();
+  let release;
+  connect(app, 1, (request, _name, respond) => {
+    if (request.method !== 'GET' || release) return false;
+    release = respond;
+    return true;
+  });
   await click(findButton(shadow, '导出 JSON 备份'));
   const backup = await [...downloads.values()][0].text();
   assert.doesNotMatch(backup, /fixture-app-password|lexi@example\.com/);
   await start();
   await start();
   assert.equal(requests.length, 1, 'a pending sync cannot be started a second time');
-  assert.equal(last().method, 'GET');
-  assert.equal(last().url, 'https://dav.jianguoyun.com/dav/%E8%AF%8D%E5%BA%93%202026/lexi-sync.json');
-  assert.equal(last().headers.Authorization, 'Basic ' + btoa('lexi@example.com:fixture-app-password'));
-  assert.equal(last().redirect, 'error');
-  await reply(404);
-  assert.equal(last().method, 'PUT');
-  assert.equal(last().headers['If-None-Match'], '*');
-  const uploaded = JSON.parse(last().data);
+  assert.equal(requests[0].url, 'https://dav.jianguoyun.com/dav/%E8%AF%8D%E5%BA%93%202026/lexi-sync.json');
+  assert.equal(requests[0].headers.Authorization, 'Basic ' + btoa('lexi@example.com:fixture-app-password'));
+  assert.equal(requests[0].redirect, 'error');
+  release();
+  await finish();
+  const put = requests.find(request => request.method === 'PUT');
+  assert.equal(put.headers['If-None-Match'], '*');
+  assert.equal(put.headers['If-Match'], undefined);
+  assert.match(put.url, /\/lexi-sync-snapshot-[0-9a-f-]{36}\.json$/);
+  const uploaded = JSON.parse(put.data);
   assert.deepEqual(Object.keys(uploaded), ['schemaVersion', 'words', 'history', 'book', 'recall']);
   assert.equal(uploaded.history.length, 3);
-  await reply(201);
+  assert.equal(files.size, 1);
   assert.equal(config().lastSyncAt, app.context.Date.now());
-  await start();
-  await reply(200, uploaded, '"version-1"');
-  assert.equal(requests.length, 3, 'an unchanged cloud file is not re-uploaded');
+  const count = requests.length;
   await click(findButton(shadow, '清除同步配置'));
   assert.equal(config(), undefined);
   assert.equal(app.storage.has(app.prefix + 'word:alpha'), true);
-  assert.equal(requests.length, 3);
+  assert.equal(requests.length, count);
 });
 
-test('Nutstore merges both sides and does not import server settings or site rules', async () => {
-  const app = await setupNutstore();
-  const { storage, prefix, context, start, reply, last, config } = app;
-  const at = context.Date.now();
-  const card = schedule(createStudy('gamma', at - DAY), 'good', at - DAY);
-  const remote = { schemaVersion: 3, words: [{ ...storage.get(prefix + 'word:beta'), word: 'gamma' }],
-    history: [{ id: 'remote-event-1', word: 'gamma', at, context: 'a reading example' }], book: [card], recall: [card],
-    settings: { retention: 0.95 }, siteRules: [{ type: 'domain', value: 'docs.example.com' }] };
-  await start();
-  await reply(200, remote, '"version-2"');
-  const sent = JSON.parse(last().data);
-  assert.equal(last().headers['If-Match'], '"version-2"');
-  assert.deepEqual(sent.words.map(item => item.word), ['alpha', 'beta', 'gamma']);
-  assert.equal(sent.history.length, 4);
-  assert.equal(sent.history.at(-1).context, 'a reading example');
-  assert.deepEqual(sent.recall.map(item => item.word), ['gamma']);
-  assert.equal(storage.has(prefix + 'word:gamma'), false, 'local changes wait for a successful cloud write');
-  await reply(412);
-  assert.match(app.shadow.querySelector('.toast').textContent, /云端文件已变化/);
-  assert.equal(storage.has(prefix + 'word:gamma'), false);
-  assert.equal(config().lastSyncAt, 0);
-
-  await start();
-  await reply(200, remote, '"version-3"');
-  await reply(204);
-  assert.equal(storage.get(prefix + 'event:remote-event-1').context, 'a reading example');
-  assert.deepEqual(json(storage.get(prefix + 'study:gamma')), card);
-  assert.deepEqual(json(storage.get(prefix + 'recall:gamma')), card);
-  assert.equal(storage.has(prefix + 'settings'), false);
-  assert.equal(storage.has(prefix + 'disabled:domain:docs.example.com'), false);
-});
-
-test('Nutstore imports an existing cloud backup when no safe upload version is available', async () => {
-  const app = await setupNutstore();
-  const { storage, prefix, shadow, requests, start, reply, config } = app;
-  const remote = { schemaVersion: 3, words: [{ ...storage.get(prefix + 'word:beta'), word: 'gamma' }],
-    history: [{ id: 'remote-event-2', word: 'gamma', at: 100 }], book: [], recall: [] };
-  await start();
-  await reply(200, remote);
-  assert.equal(app.last().method, 'PROPFIND');
-  await reply(405);
-  assert.equal(storage.has(prefix + 'word:gamma'), true, 'the phone still receives the cloud data');
-  assert.equal(storage.has(prefix + 'word:alpha'), true, 'existing local data is kept');
-  assert.equal(requests.some(request => request.method === 'PUT'), false, 'no unsafe overwrite');
-  assert.match(shadow.querySelector('.toast').textContent, /已合并到本机.*未上传/);
-  assert.equal(config().lastSyncAt, 0, 'a one-way import is not marked as a completed sync');
-});
-
-test('Nutstore recovers the matching file version via WebDAV and aborts if its content changes', async () => {
-  const app = await setupNutstore();
-  const { storage, prefix, context, requests, start, last, reply, config } = app;
-  const remote = { schemaVersion: 3, words: [{ ...storage.get(prefix + 'word:beta'), word: 'gamma' }],
-    history: [], book: [], recall: [] };
-  const dav = (localName, content) => ({
-    namespaceURI: 'DAV:', localName, textContent: typeof content === 'string' ? content : '',
-    children: typeof content === 'string' ? [] : content
+test('Nutstore preserves concurrent uploads and compacts only snapshots that were actually merged', async () => {
+  const phone = await setupNutstore(), desktop = await setupNutstore();
+  const { files, connect } = nutstoreFixture([['unrelated.json', 'keep']]);
+  let holdUpload = false, releaseUpload;
+  connect(phone, 1, (request, _name, respond) => {
+    if (request.method !== 'PUT' || !holdUpload) return false;
+    releaseUpload = respond;
+    return true;
   });
-  const property = (tag, status = 200) => dav('propstat', [
-    dav('prop', [dav('getetag', tag)]), dav('status', `HTTP/1.1 ${status} Status`)
-  ]);
-  const resource = (href, ...properties) => dav('response', [dav('href', href), ...properties]);
-  context.DOMParser = class {
-    parseFromString() {
-      return { documentElement: dav('multistatus', [
-        resource('/dav/词库%202026/another.json', property('"wrong-file"')),
-        resource('/dav/词库%202026/lexi-sync.json', property('"not-found"', 404), property('"matching-version"'))
-      ]) };
-    }
-  };
-  async function recoverVersion() {
-    await start();
-    await reply(200, remote, 'W/"weak-version"');
-    assert.equal(last().method, 'PROPFIND');
-    assert.equal(last().headers.Depth, '1');
-    assert.ok(last().url.endsWith('%E8%AF%8D%E5%BA%93%202026/'));
-    await reply(207, '<multistatus xmlns="DAV:"/>');
-    assert.equal(last().method, 'GET');
-    assert.equal(last().headers['If-Match'], '"matching-version"');
-  }
-  await recoverVersion();
-  await reply(200, { ...remote, history: [{ id: 'added-remotely', word: 'gamma', at: 100 }] });
-  assert.equal(requests.some(request => request.method === 'PUT'), false);
-  assert.equal(storage.has(prefix + 'word:gamma'), false);
-  assert.match(app.shadow.querySelector('.toast').textContent, /云端文件已变化/);
-  await recoverVersion();
-  await reply(200, remote);
-  assert.equal(last().method, 'PUT');
-  assert.equal(last().headers['If-Match'], '"matching-version"');
-  await reply(204);
-  assert.equal(storage.has(prefix + 'word:gamma'), true);
-  assert.equal(config().lastSyncAt, context.Date.now());
+  connect(desktop, 2);
+  await phone.start();
+  await phone.finish();
+  phone.storage.set(phone.prefix + 'event:only-phone-1', { id: 'only-phone-1', word: 'alpha', at: 100 });
+  desktop.storage.set(desktop.prefix + 'event:only-desktop-1', { id: 'only-desktop-1', word: 'beta', at: 200 });
+  // Hold the phone's upload until the desktop has merged and compacted the common baseline.
+  holdUpload = true;
+  await phone.start();
+  for (let i = 0; i < 20 && !releaseUpload; i++) await new Promise(setImmediate);
+  assert.ok(releaseUpload);
+  await desktop.start();
+  await desktop.finish();
+  holdUpload = false;
+  releaseUpload();
+  await phone.finish();
+  assert.equal(files.size, 3, 'both concurrent uploads survive along with the unrelated file');
+  await desktop.start();
+  await desktop.finish();
+  assert.equal(files.size, 2, 'both snapshots are compacted into one');
+  assert.equal(files.get('unrelated.json'), 'keep');
+  await phone.start();
+  await phone.finish();
+  assert.ok(phone.storage.has(phone.prefix + 'event:only-desktop-1'));
+  assert.ok(desktop.storage.has(desktop.prefix + 'event:only-phone-1'));
 });
 
 test('Nutstore refuses invalid cloud data and preserves concurrent local edits', async () => {
   const app = await setupNutstore();
-  const { storage, prefix, shadow, requests, start, reply, config } = app;
+  const { storage, prefix, shadow, requests, start, finish, config } = app;
+  const { files, connect } = nutstoreFixture([['lexi-sync.json', '<html>not a backup</html>']]);
+  let rejectUpload = false;
+  connect(app, 1, (request, _name, respond) => {
+    if (request.method !== 'PUT') return false;
+    if (rejectUpload) request.onload({ status: 412 });
+    else {
+      storage.delete(prefix + 'event:history-event-0');
+      storage.set(prefix + 'revision', 'edited-by-another-tab');
+      respond();
+    }
+    return true;
+  });
   const toast = () => shadow.querySelector('.toast').textContent;
   await start();
-  await reply(401);
-  assert.match(toast(), /认证失败/);
-  await start();
-  await reply(200, '<html>not a backup</html>', '"existing"');
+  await finish();
   assert.match(toast(), /不是有效的 Lexi JSON/);
   const remote = { schemaVersion: 3, words: [storage.get(prefix + 'word:beta')],
     history: [{ id: 'remote-event-2', word: 'beta', at: 100 }], book: [], recall: [] };
+  files.set('lexi-sync.json', JSON.stringify(remote));
+  rejectUpload = true;
   await start();
-  await reply(200, remote, '"existing"');
-  storage.delete(prefix + 'event:history-event-0');
-  storage.set(prefix + 'revision', 'edited-by-another-tab');
-  await reply(204);
+  await finish();
+  assert.match(toast(), /云端文件已变化/);
+  assert.equal(storage.has(prefix + 'event:remote-event-2'), false);
+  rejectUpload = false;
+  await start();
+  await finish();
   assert.match(toast(), /本机数据或配置已变化/);
+  assert.ok(requests.every(request => request.method !== 'DELETE'));
   assert.equal(storage.has(prefix + 'event:history-event-0'), false);
   assert.equal(storage.has(prefix + 'event:remote-event-2'), false);
   assert.equal(config().lastSyncAt, 0);
+});
+
+test('Nutstore refreshes a listing when a concurrent sync compacts it before download', async () => {
+  const app = await setupNutstore();
+  const old = 'lexi-sync-snapshot-00000000-0000-4000-8000-000000000001.json';
+  const next = 'lexi-sync-snapshot-00000000-0000-4000-8000-000000000002.json';
+  const backup = word => JSON.stringify({ schemaVersion: 3, words: [{ ...app.storage.get(app.prefix + 'word:alpha'), word }],
+    history: [], book: [], recall: [] });
+  const { files, connect } = nutstoreFixture([[old, backup('gamma')]]);
+  // The replacement includes the old record and one new record from the other device.
+  const replacement = JSON.parse(backup('gamma'));
+  replacement.words.push(JSON.parse(backup('delta')).words[0]);
+  connect(app, 1, (request, name) => {
+    if (request.method === 'GET' && name === old) {
+      files.delete(old);
+      files.set(next, JSON.stringify(replacement));
+    }
+    return false;
+  });
+  await app.start();
+  await app.finish();
+  assert.equal(app.requests.filter(request => request.method === 'PROPFIND').length, 2);
+  assert.ok(app.storage.has(app.prefix + 'word:gamma'));
+  assert.ok(app.storage.has(app.prefix + 'word:delta'));
+  assert.equal(files.size, 1);
 });
 
 test('settings can still import v1 and v2 progress backups', async () => {
