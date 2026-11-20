@@ -4097,7 +4097,7 @@ SOFTWARE.
       });
       container.append(section);
     }
-    container.append(examplesBlock(entry, autoLoad), wordFormsBlock(entry, autoLoad));
+    container.append(wordFormsBlock(entry, autoLoad));
     return container;
   }
   const exampleRequests = new Map();
@@ -4319,6 +4319,7 @@ SOFTWARE.
     if (entry.sourceUrl) source.append(link('词条出处', entry.sourceUrl));
     if (entry.license.name) source.append(link(entry.license.name, entry.license.url || entry.sourceUrl));
     node.append(source);
+    node.append(examplesBlock(entry));
     return node;
   }
 
@@ -4842,6 +4843,7 @@ SOFTWARE.
       const back = el('div', 'review-answer');
       back.append(senses(wordEntry, autoLoad));
       if (!recall) back.append(chineseDefinitions(wordEntry, autoLoad));
+      back.append(examplesBlock(wordEntry, autoLoad));
       card.append(back);
     }
     const actions = el('div', 'review-grades');

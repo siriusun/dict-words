@@ -951,6 +951,7 @@ test('usage examples share enrichment requests, render safe bilingual text and p
   const progress = JSON.stringify(storage.get(prefix + 'study:alpha'));
   await click(shadow.querySelector('.item'));
   await click(shadow.querySelector('.item'));
+  if (findButton(shadow, '获取用法例句')) await click(findButton(shadow, '获取用法例句'));
   assert.equal(requests.length, 1);
   assert.deepEqual(JSON.parse(new URL(requests[0].url).searchParams.get('dicts')),
     { count: 3, dicts: [['ec', 'blng_sents_part']] });
@@ -960,6 +961,7 @@ test('usage examples share enrichment requests, render safe bilingual text and p
   const block = shadow.querySelector('.usage-examples');
   assert.equal(textOf(block.querySelector('.example-en')), sentence);
   assert.equal(block.querySelector('.example-zh').textContent, '测试双语例句');
+  assert.equal(block.parent.children.at(-1), block, 'usage examples are the final definition-card section');
   assert.deepEqual(block.querySelectorAll('strong').map(node => node.textContent), ['Alpha', 'alpha']);
   assert.equal(block.querySelectorAll('img').length, 0);
   assert.match(textOf(block), /Fixture source/);
@@ -975,6 +977,8 @@ test('usage examples share enrichment requests, render safe bilingual text and p
   assert.equal(shadow.querySelector('.usage-examples'), null);
   await click(findButton(shadow, '显示释义'));
   assert.equal(textOf(shadow.querySelector('.review-answer').querySelector('.example-en')), sentence);
+  assert.equal(shadow.querySelector('.review-answer').children.at(-1).className, 'usage-examples sense',
+    'usage examples follow the English and Chinese explanations in review answers');
   assert.equal(requests.length, 1);
   storage.set(prefix + 'word:alpha', { ...storage.get(prefix + 'word:alpha'), fetchedAt: 1 });
   const query = shadow.querySelector('.search');
@@ -1019,6 +1023,7 @@ test('late example responses cannot recreate a deleted word or write after disab
     const requests = [];
     context.GM_xmlhttpRequest = request => { requests.push(request); return { abort() {} }; };
     await click(shadow.querySelector('.item'));
+    if (findButton(shadow, '获取用法例句')) await click(findButton(shadow, '获取用法例句'));
     if (disable) {
       storage.set(prefix + 'disabled:domain:docs.example.com', { type: 'domain', value: 'docs.example.com' });
       app.valueListeners.get(prefix + 'revision')();
