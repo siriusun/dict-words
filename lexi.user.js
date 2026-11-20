@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Lexi · 划词词典与复习
 // @namespace    lexi-local
-// @version      0.6.8
+// @version      0.6.9
 // @description  英文划词、发音、跨网站历史、生词复习与本地备份，可选坚果云同步。
 // @match        http://*/*
 // @match        https://*/*
@@ -2516,6 +2516,25 @@ SOFTWARE.
     if (translation.length > 16000) throw new Error('中文响应过长，请稍后重试');
     return translation;
   }
+  const validExamples = value => Array.isArray(value) && value.length <= 3 && value.every(item =>
+    item && typeof item.sentence === 'string' && !!item.sentence.trim() && item.sentence.length <= 600 &&
+    typeof item.translation === 'string' && item.translation.length <= 600 &&
+    typeof item.source === 'string' && item.source.length <= 120);
+  function youdaoExamples(raw, word) {
+    if (normalize(raw?.input) !== word) throw new Error('例句词条不匹配，请稍后重试');
+    const block = raw.blng_sents_part;
+    if (block === undefined) return [];
+    const pairs = block?.['sentence-pair'];
+    if (!Array.isArray(pairs)) throw new Error('例句数据格式异常，请稍后重试');
+    const examples = pairs.map(item => ({
+      sentence: typeof item?.sentence === 'string' ? item.sentence.trim() : item?.sentence,
+      translation: item?.['sentence-translation'] ?? '',
+      source: item?.source ?? ''
+    }));
+    if (!examples.every(item => validExamples([item]))) throw new Error('例句数据格式异常，请稍后重试');
+    return examples.filter((item, index) =>
+      examples.findIndex(other => other.sentence.toLowerCase() === item.sentence.toLowerCase()) === index).slice(0, 3);
+  }
   const validWordForms = value => value && typeof value === 'object' &&
     typeof value.base === 'string' && !!value.base && normalize(value.base) === value.base &&
     Array.isArray(value.forms) && value.forms.length <= 20 && value.forms.every(item =>
@@ -2596,12 +2615,16 @@ SOFTWARE.
         (!string(item.youdaoTranslation, 16000) || !item.youdaoTranslation.trim() || !timestamp(item.youdaoTranslatedAt))) fail();
       if (item.phoneticSource !== undefined && (!['youdao', 'datamuse'].includes(item.phoneticSource) || !item.phonetic.trim())) fail();
       if (item.wordForms !== undefined && !validWordForms(item.wordForms)) fail();
+      if ((item.examples !== undefined || item.examplesFetchedAt !== undefined) &&
+        (!validExamples(item.examples) || !timestamp(item.examplesFetchedAt))) fail();
       return splitTranslations({
         word: item.word, fetchedAt: item.fetchedAt, phonetic: item.phonetic.trim(), meanings,
         ...(item.phoneticSource ? { phoneticSource: item.phoneticSource } : {}),
         ...(item.wordForms ? { wordForms: {
           base: item.wordForms.base, forms: item.wordForms.forms.map(({ name, value }) => ({ name, value }))
         } } : {}),
+        ...(item.examples ? { examples: item.examples.map(({ sentence, translation, source }) => ({ sentence, translation, source })),
+          examplesFetchedAt: item.examplesFetchedAt } : {}),
         audio: audioUrl(item.audio), sourceUrl: safeUrl(item.sourceUrl),
         license: { name: text(item.license?.name, 120), url: safeUrl(item.license?.url) },
         ...(item.translation ? {
@@ -2689,6 +2712,9 @@ SOFTWARE.
       const youdao = [old, item].filter(value => value?.youdaoTranslation)
         .sort((a, b) => b.youdaoTranslatedAt - a.youdaoTranslatedAt)[0];
       const combined = { ...newer };
+      const examples = [old, item].filter(value => value?.examples)
+        .sort((a, b) => b.examplesFetchedAt - a.examplesFetchedAt)[0];
+      if (examples) Object.assign(combined, { examples: examples.examples, examplesFetchedAt: examples.examplesFetchedAt });
       const wordForms = [newer, old, item].find(value => value?.wordForms)?.wordForms;
       if (wordForms) combined.wordForms = wordForms;
       const phonetic = [newer, old, item].find(value => value?.phonetic?.trim());
@@ -2751,7 +2777,7 @@ SOFTWARE.
     (oldest ? 1 : -1) * (a.at - b.at || a.id.localeCompare(b.id)));
   if (typeof window === 'undefined') {
     loadMemory();
-    module.exports = { normalize, schedule, scheduleAll, migrateStudy, createStudy, reviewInterval, csv, dictionary, validateBackup, mergeBackup, ordered, audioUrl, translationSource, translationChunks, youdaoTranslation, youdaoPhonetic, datamusePhonetic, youdaoWordForms,
+    module.exports = { normalize, schedule, scheduleAll, migrateStudy, createStudy, reviewInterval, csv, dictionary, validateBackup, mergeBackup, ordered, audioUrl, translationSource, translationChunks, youdaoTranslation, youdaoExamples, youdaoPhonetic, datamusePhonetic, youdaoWordForms,
       dayStart, nextDayStart, availableAt, planReview, createReviewSession, retentionStats, contextParts, isLeech,
       pageScope, siteState, validateSiteRules };
     return;
@@ -3107,6 +3133,7 @@ SOFTWARE.
     .bar,.row,.actions{display:flex;align-items:center;gap:10px}.bar{justify-content:space-between}.actions{flex-wrap:wrap}.brand{font-weight:750;letter-spacing:3px;font-size:12px}.muted,.meta{color:var(--muted);font-size:12px}.meta{margin-top:4px}.word{font:42px/1.2 Georgia,"Times New Roman",serif;overflow-wrap:anywhere;margin:20px 0 6px}.phonetic{color:var(--muted);font-size:14px;margin-bottom:14px}
     .button,.icon,.tab{border:1px solid var(--line);background:var(--surface);color:var(--ink);border-radius:10px;padding:8px 13px;transition:background .12s}.button:hover,.icon:hover{background:var(--tint)}.primary{background:var(--accent);color:white;border-color:var(--accent)}.primary:hover{filter:brightness(1.1);background:var(--accent)}.icon{padding:5px 9px;font-size:16px}.danger{color:var(--error)}.active{background:var(--tint);border-color:var(--accent);color:var(--accent)}
     .sense{border-top:1px solid var(--line);padding-top:15px;margin-top:18px}.pos{display:inline-block;color:var(--accent);font-size:12px;font-weight:650;margin-bottom:6px}.definition{margin:0 0 10px;line-height:1.75}.example{color:var(--muted);border-left:2px solid var(--line);padding-left:10px;margin:5px 0 14px;font-size:13px}.translation{background:var(--tint);padding:14px;border-radius:10px;margin-top:14px}.source{border-top:1px solid var(--line);margin-top:20px;padding-top:12px;display:flex;flex-wrap:wrap;gap:8px;font-size:11px}.link{color:var(--accent);text-decoration:none}.link:hover{text-decoration:underline}.context{font-size:13px;margin-top:18px;color:var(--muted);overflow-wrap:anywhere}.error{color:var(--error)}
+    .usage-examples{overflow-wrap:anywhere}.example-en{color:var(--ink);margin:0 0 4px;line-height:1.7}.example-zh{margin:0 0 4px;line-height:1.65}.example-word{color:var(--accent)}
     .overlay{pointer-events:auto;position:fixed;inset:0;background:#0d211f55;backdrop-filter:blur(5px);display:flex;align-items:center;justify-content:center;padding:24px}.studio{background:var(--paper);border:1px solid var(--line);border-radius:24px;box-shadow:0 30px 100px #081d2038;width:min(1060px,100%);height:min(760px,90vh);display:grid;grid-template-columns:166px minmax(0,1fr);overflow:hidden}.sidebar{padding:28px 18px;background:var(--surface);border-right:1px solid var(--line);display:flex;flex-direction:column;gap:8px}.logo{font:italic 34px Georgia,serif;margin:0 10px}.sidebar .muted{margin:0 10px 28px}.tab{text-align:left;border-color:transparent;background:transparent;padding:11px 14px}.tab.active{background:var(--tint);color:var(--accent);font-weight:650}.sidebar .footnote{margin-top:auto;font-size:11px;color:var(--muted);padding:12px}
     .main{min-width:0;display:flex;flex-direction:column}.top{padding:22px 26px;display:flex;align-items:center;gap:12px;border-bottom:1px solid var(--line)}.search{display:flex;gap:8px;flex:1;min-width:0}input,select{color:var(--ink);background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:9px 12px;min-width:0}input{width:100%}input::placeholder{color:var(--muted)}.view{padding:24px 26px;overflow:auto;min-height:0;flex:1}.heading{font-size:24px;letter-spacing:-.5px;margin:0;font-weight:650}.subheading{font-size:13px;color:var(--muted);margin:5px 0 22px}.split{display:grid;grid-template-columns:240px minmax(0,1fr);gap:24px}.list{display:flex;flex-direction:column;gap:6px;margin-top:12px;max-height:440px;overflow:auto;padding:4px}.item{display:block;width:100%;text-align:left;padding:11px 12px;border-radius:12px;background:transparent;border:1px solid transparent;color:var(--ink)}.item:hover{background:var(--surface)}.item.active{background:var(--tint);border-color:var(--line)}.item .term{font:22px Georgia,serif}.detail{min-width:0}.detail .word{margin-top:8px}.empty{color:var(--muted);text-align:center;padding:45px 15px;font-size:14px}.section{background:var(--surface);border:1px solid var(--line);border-radius:16px;padding:20px;margin:16px 0}.section h3{margin:0 0 14px;font-size:15px}.setting{display:flex;justify-content:space-between;align-items:center;gap:14px;margin:16px 0}.setting input{width:18px;height:18px;accent-color:var(--accent)}.notice{font-size:12px;color:var(--muted);margin-top:12px}.review{text-align:center;max-width:540px;margin:25px auto}.review .word{font-size:54px;margin:35px 0 12px}.review-answer{text-align:left;margin:25px 0}.stats{display:flex;gap:12px;margin:24px 0}.stat{flex:1;padding:18px;background:var(--surface);border:1px solid var(--line);border-radius:15px}.stat strong{display:block;font:32px Georgia,serif;color:var(--accent)}.toast{pointer-events:auto;position:fixed;left:50%;bottom:25px;transform:translateX(-50%);max-width:calc(100vw - 32px);background:var(--ink);color:var(--surface);padding:12px 20px;border-radius:12px;box-shadow:0 5px 25px #0002;z-index:2}
     .review-grades{display:grid;grid-template-columns:repeat(4,minmax(0,68px)) 40px;justify-content:center;gap:14px;margin:12px 0}
@@ -3825,6 +3852,7 @@ SOFTWARE.
           const fresh = dictionary(response, word, Date.now());
           const cached = get('word:' + word);
           if (cached?.wordForms) fresh.wordForms = cached.wordForms;
+          if (cached?.examples) Object.assign(fresh, { examples: cached.examples, examplesFetchedAt: cached.examplesFetchedAt });
           if (cached?.youdaoTranslation) Object.assign(fresh, {
             youdaoTranslation: cached.youdaoTranslation, youdaoTranslatedAt: cached.youdaoTranslatedAt
           });
@@ -4065,18 +4093,82 @@ SOFTWARE.
       section.append(el('div', 'pos', meaning.partOfSpeech || '释义'));
       meaning.definitions.forEach((def, index) => {
         section.append(el('p', 'definition', `${meaning.definitions.length > 1 ? index + 1 + '. ' : ''}${def.definition}`));
-        if (def.example) section.append(el('p', 'example', def.example));
+        if (def.example) section.append(el('p', 'example', '例句：' + def.example));
       });
       container.append(section);
     }
-    container.append(wordFormsBlock(entry, autoLoad));
+    container.append(examplesBlock(entry, autoLoad), wordFormsBlock(entry, autoLoad));
     return container;
+  }
+  const exampleRequests = new Map();
+  function examplesBlock(entry, autoLoad) {
+    const node = el('section', 'usage-examples sense');
+    const show = current => {
+      node.replaceChildren(el('div', 'pos', '用法例句'));
+      node.append(el('p', 'meta', '有道双语例句 · 展示用法与语境，不与上方释义逐条对应'));
+      for (const example of current.examples || []) {
+        const row = el('div', 'example');
+        const sentence = el('p', 'example-en');
+        sentence.setAttribute('lang', 'en');
+        let end = 0;
+        for (const match of example.sentence.matchAll(wordPattern(entry.word, 'gi'))) {
+          const start = match.index + match[1].length;
+          sentence.append(document.createTextNode(example.sentence.slice(end, start)), el('strong', 'example-word', match[2]));
+          end = start + match[2].length;
+        }
+        sentence.append(document.createTextNode(example.sentence.slice(end)));
+        row.append(sentence);
+        if (example.translation) row.append(el('p', 'example-zh', example.translation));
+        if (example.source) row.append(el('div', 'meta', example.source));
+        node.append(row);
+      }
+      node.append(link('有道例句 ↗', 'https://www.youdao.com/result?word=' + encodeURIComponent(entry.word) + '&lang=en'));
+    };
+    async function load() {
+      show(get('word:' + entry.word) || entry);
+      node.append(el('p', 'muted', '正在获取用法例句…'));
+      try {
+        if (!exampleRequests.has(entry.word)) {
+          const pending = (async () => {
+            const epoch = activityEpoch;
+            const examples = youdaoExamples(await requestYoudao(entry.word), entry.word);
+            checkActivity(epoch);
+            const current = get('word:' + entry.word);
+            if (!current) throw new Error('词条已删除，请重新查询');
+            const updated = { ...current, examples, examplesFetchedAt: Date.now() };
+            put('word:' + entry.word, updated);
+            notify();
+            return updated;
+          })();
+          exampleRequests.set(entry.word, pending);
+          pending.finally(() => exampleRequests.delete(entry.word)).catch(() => { });
+        }
+        const updated = await exampleRequests.get(entry.word);
+        show(updated);
+        if (!updated.examples.length) unavailable();
+      } catch (error) {
+        show(get('word:' + entry.word) || entry);
+        node.append(el('p', 'notice', '有道例句：' + error.message), button('重试用法例句', load));
+      }
+    }
+    function unavailable() {
+      node.append(el('p', 'muted', '暂未找到该词的双语例句'), button('重试用法例句', load));
+    }
+    if (entry.examples) {
+      show(entry);
+      if (!entry.examples.length) unavailable();
+    } else if (autoLoad) load();
+    else {
+      show(entry);
+      node.append(button('获取用法例句', load));
+    }
+    return node;
   }
   const youdaoRequests = new Map();
   function requestYoudao(word) {
     if (!youdaoRequests.has(word)) {
       const pending = request('https://dict.youdao.com/jsonapi?q=' + encodeURIComponent(word)
-        + '&dicts=' + encodeURIComponent(JSON.stringify({ count: 1, dicts: [['ec']] })));
+        + '&dicts=' + encodeURIComponent(JSON.stringify({ count: 3, dicts: [['ec', 'blng_sents_part']] })));
       youdaoRequests.set(word, pending);
       pending.finally(() => youdaoRequests.delete(word)).catch(() => { });
     }
@@ -5071,7 +5163,7 @@ SOFTWARE.
     cacheOnly.addEventListener('change', () => save('reviewCacheOnly', cacheOnly.checked, () => { cacheOnly.checked = settings.reviewCacheOnly; }, false));
     cacheRow.append(el('span', '', '复习仅用缓存'), cacheOnly);
     study.append(limitRow, retentionRow, reverseRow, cacheRow, el('p', 'notice',
-      '开启后，复习卡不自动联网补全音标、词形或中文释义；仍可手动获取。发音可能联网，不影响查词。'), el('p', 'notice',
+      '开启后，复习卡不自动联网补全音标、词形、用法例句或中文释义；仍可手动获取。发音可能联网，不影响查词。'), el('p', 'notice',
       '每天凌晨 4:00 开始新的学习日。记得率越高，间隔越短、复习越多，只影响之后的安排。反向卡在该词进入长期复习后加入，计入新词上限，进度独立保存；关闭后暂停反向卡，进度保留。'));
     const chinese = el('section', 'section');
     chinese.append(el('h3', '', '中文释义'), el('p', 'notice', '英文释义的机器翻译与有道中文词典释义同时显示、分别缓存。有道释义不与英文逐条对应；每路独立显示加载、失败与重试状态，一路失败不影响另一路。'));

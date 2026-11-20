@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const test = require('node:test');
 const fs = require('node:fs');
 const { createHash } = require('node:crypto');
-const { normalize, schedule, scheduleAll, migrateStudy, createStudy, reviewInterval, csv, dictionary, validateBackup, mergeBackup, ordered, audioUrl, translationSource, translationChunks, youdaoTranslation, youdaoPhonetic, datamusePhonetic, youdaoWordForms,
+const { normalize, schedule, scheduleAll, migrateStudy, createStudy, reviewInterval, csv, dictionary, validateBackup, mergeBackup, ordered, audioUrl, translationSource, translationChunks, youdaoTranslation, youdaoExamples, youdaoPhonetic, datamusePhonetic, youdaoWordForms,
   dayStart, nextDayStart, availableAt, planReview, createReviewSession, retentionStats, contextParts, isLeech,
   pageScope, siteState, validateSiteRules } = require('../lexi.user.js');
 const now = Date.UTC(2026, 10, 12);
@@ -265,6 +265,50 @@ test('Datamuse phonetics retain their reference source in backups and definition
   assert.equal(refreshed.words[0].phoneticSource, undefined);
   data.words[0].phonetic = '';
   assert.throws(() => validateBackup(data));
+});
+
+test('bilingual examples use plain sentences, deduplicate and bound results without inventing translations', () => {
+  const pair = { sentence: ' We test the new design. ', 'sentence-eng': '<b>ignored markup</b>',
+    'sentence-translation': '我们测试新设计。', source: 'Test fixture' };
+  const raw = { input: 'test', blng_sents_part: { 'sentence-pair': [
+    pair, { ...pair, sentence: 'We test the new design.' },
+    { sentence: 'Test it again.' }, { sentence: 'This is a test.' }, { sentence: 'One more test.' }
+  ] } };
+  assert.deepEqual(youdaoExamples(raw, 'test'), [
+    { sentence: 'We test the new design.', translation: '我们测试新设计。', source: 'Test fixture' },
+    { sentence: 'Test it again.', translation: '', source: '' },
+    { sentence: 'This is a test.', translation: '', source: '' }
+  ]);
+  assert.deepEqual(youdaoExamples({ input: 'test' }, 'test'), []);
+  assert.deepEqual(youdaoExamples({ input: 'test', blng_sents_part: { 'sentence-pair': [] } }, 'test'), []);
+  for (const invalid of [null, {}, { input: 'other' }, { input: 'test', blng_sents_part: null },
+    { input: 'test', blng_sents_part: { 'sentence-pair': [null] } },
+    ...[{ sentence: '' }, { sentence: 'a'.repeat(601) }, { sentence: 'test', 'sentence-translation': {} },
+      { sentence: 'test', source: 'a'.repeat(121) }].map(pair =>
+      ({ input: 'test', blng_sents_part: { 'sentence-pair': [pair] } }))]) {
+    assert.throws(() => youdaoExamples(invalid, 'test'));
+  }
+});
+test('example caches survive backup and definition refresh merges using their own timestamps', () => {
+  const data = backup();
+  const examples = [{ sentence: 'We test the design.', translation: '我们测试设计。', source: 'Fixture' }];
+  Object.assign(data.words[0], { examples, examplesFetchedAt: now });
+  const restored = validateBackup(JSON.parse(JSON.stringify(data)));
+  assert.deepEqual(restored.words[0].examples, examples);
+  const incoming = backup();
+  incoming.words[0].fetchedAt++;
+  assert.deepEqual(mergeBackup(restored, validateBackup(incoming)).words[0].examples, examples);
+  Object.assign(incoming.words[0], { examples: [], examplesFetchedAt: now + 1 });
+  for (const [local, remote] of [[restored, validateBackup(incoming)], [validateBackup(incoming), restored]]) {
+    const merged = mergeBackup(local, remote).words[0];
+    assert.deepEqual(merged.examples, []);
+    assert.equal(merged.examplesFetchedAt, now + 1);
+  }
+  for (const fields of [{ examples: null }, { examples: Array(4).fill(examples[0]) },
+    { examples: [{ ...examples[0], translation: false }] }, { examplesFetchedAt: 0 },
+    { examples: undefined }, { examplesFetchedAt: undefined }]) {
+    assert.throws(() => validateBackup({ ...data, words: [{ ...data.words[0], ...fields }] }));
+  }
 });
 
 test('word forms read exact-word prototypes, categories and alternative spellings without guessing', () => {

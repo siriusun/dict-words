@@ -103,6 +103,7 @@ function setup(phonetic = '/test/', phoneticSource = 'youdao', options = {}) {
   for (const word of ['alpha', 'beta']) {
     const entry = { word, fetchedAt: clockNow, phonetic, ...(phonetic && phoneticSource ? { phoneticSource } : {}),
       wordForms: { base: word, forms: [] },
+      examples: [], examplesFetchedAt: clockNow,
       audio: '', sourceUrl: '', license: { name: '', url: '' },
       meanings: [{ partOfSpeech: 'noun', definitions: [{ definition: word, example: '' }] }],
       translation: '中文', translatedAt: clockNow, youdaoTranslation: '有道中文', youdaoTranslatedAt: clockNow };
@@ -928,6 +929,104 @@ const takeForms = [
   { name: '复数', value: 'takes' }, { name: '第三人称单数', value: 'takes' },
   { name: '现在分词', value: 'taking' }, { name: '过去式', value: 'took' }, { name: '过去分词', value: 'taken' }
 ];
+
+const respondExamples = async (request, pairs, word = 'alpha') => {
+  request.onload({ status: 200, responseText: JSON.stringify({
+    input: word, ec: { word: [{ 'return-phrase': word, ukphone: 'test', wfs: [] }] },
+    blng_sents_part: { 'sentence-pair': pairs }
+  }) });
+  await new Promise(setImmediate);
+};
+test('usage examples share enrichment requests, render safe bilingual text and persist across library and review', async () => {
+  const app = setup();
+  const { shadow, storage, prefix, context, click } = app;
+  const entry = storage.get(prefix + 'word:alpha');
+  delete entry.examples;
+  delete entry.examplesFetchedAt;
+  delete entry.wordForms;
+  entry.meanings[0].definitions[0].example = 'An alpha example from the main dictionary.';
+  const requests = [];
+  context.GM_xmlhttpRequest = request => { requests.push(request); return { abort() {} }; };
+  const events = JSON.stringify(app.events);
+  const progress = JSON.stringify(storage.get(prefix + 'study:alpha'));
+  await click(shadow.querySelector('.item'));
+  await click(shadow.querySelector('.item'));
+  assert.equal(requests.length, 1);
+  assert.deepEqual(JSON.parse(new URL(requests[0].url).searchParams.get('dicts')),
+    { count: 3, dicts: [['ec', 'blng_sents_part']] });
+  storage.set(prefix + 'word:alpha', { ...entry, translation: 'Concurrent update' });
+  const sentence = 'Alpha and alpha, not alphabet. <img src=x onerror=alert(1)>';
+  await respondExamples(requests[0], [{ sentence, 'sentence-translation': '测试双语例句', source: 'Fixture source' }]);
+  const block = shadow.querySelector('.usage-examples');
+  assert.equal(textOf(block.querySelector('.example-en')), sentence);
+  assert.equal(block.querySelector('.example-zh').textContent, '测试双语例句');
+  assert.deepEqual(block.querySelectorAll('strong').map(node => node.textContent), ['Alpha', 'alpha']);
+  assert.equal(block.querySelectorAll('img').length, 0);
+  assert.match(textOf(block), /Fixture source/);
+  assert.match(textOf(shadow.querySelector('.detail')), /例句：An alpha example from the main dictionary/);
+  assert.equal(storage.get(prefix + 'word:alpha').translation, 'Concurrent update');
+  assert.equal(storage.get(prefix + 'word:alpha').examples.length, 1);
+  assert.equal(JSON.stringify(app.events), events);
+  assert.equal(JSON.stringify(storage.get(prefix + 'study:alpha')), progress);
+  await click(findButton(shadow, '生词本'));
+  await click(shadow.querySelector('.item'));
+  assert.equal(textOf(shadow.querySelector('.example-en')), sentence);
+  await openReview(app);
+  assert.equal(shadow.querySelector('.usage-examples'), null);
+  await click(findButton(shadow, '显示释义'));
+  assert.equal(textOf(shadow.querySelector('.review-answer').querySelector('.example-en')), sentence);
+  assert.equal(requests.length, 1);
+  storage.set(prefix + 'word:alpha', { ...storage.get(prefix + 'word:alpha'), fetchedAt: 1 });
+  const query = shadow.querySelector('.search');
+  query.querySelector('input').value = 'alpha';
+  await click(query.querySelector('button'));
+  requests[1].onload({ status: 200, responseText: JSON.stringify([{
+    meanings: [{ partOfSpeech: 'noun', definitions: [{ definition: 'alpha' }] }]
+  }]) });
+  await new Promise(setImmediate);
+  assert.equal(storage.get(prefix + 'word:alpha').examples[0].sentence, sentence);
+  assert.equal(requests.length, 2, 'dictionary refresh preserves the example cache');
+});
+test('missing examples support cache-only review, retry errors and cache explicit absence', async () => {
+  const app = setup('/test/', 'youdao', { settings: { reviewCacheOnly: true } });
+  const { shadow, storage, prefix, context, click } = app;
+  delete storage.get(prefix + 'word:alpha').examples;
+  delete storage.get(prefix + 'word:alpha').examplesFetchedAt;
+  const requests = [];
+  context.GM_xmlhttpRequest = request => { requests.push(request); return { abort() {} }; };
+  await openReview(app);
+  await click(findButton(shadow, '显示释义'));
+  assert.equal(requests.length, 0);
+  await click(findButton(shadow, '获取用法例句'));
+  requests[0].onerror();
+  await new Promise(setImmediate);
+  assert.ok(shadow.querySelector('.usage-examples').querySelector('.notice'));
+  assert.equal(storage.get(prefix + 'word:alpha').examples, undefined);
+  await click(findButton(shadow, '重试用法例句'));
+  await respondExamples(requests[1], []);
+  assert.match(textOf(shadow.querySelector('.usage-examples')), /暂未找到/);
+  assert.deepEqual(JSON.parse(JSON.stringify(storage.get(prefix + 'word:alpha').examples)), []);
+  await click(findButton(shadow, '查词历史'));
+  await click(shadow.querySelector('.item'));
+  assert.equal(requests.length, 2, 'known absence is not repeatedly fetched');
+});
+test('late example responses cannot recreate a deleted word or write after disabling the site', async () => {
+  for (const disable of [false, true]) {
+    const app = setup();
+    const { shadow, storage, prefix, context, click } = app;
+    delete storage.get(prefix + 'word:alpha').examples;
+    delete storage.get(prefix + 'word:alpha').examplesFetchedAt;
+    const requests = [];
+    context.GM_xmlhttpRequest = request => { requests.push(request); return { abort() {} }; };
+    await click(shadow.querySelector('.item'));
+    if (disable) {
+      storage.set(prefix + 'disabled:domain:docs.example.com', { type: 'domain', value: 'docs.example.com' });
+      app.valueListeners.get(prefix + 'revision')();
+    } else storage.delete(prefix + 'word:alpha');
+    await respondExamples(requests[0], [{ sentence: 'Alpha is a label.' }]);
+    assert.equal(storage.get(prefix + 'word:alpha')?.examples, undefined);
+  }
+});
 
 test('took keeps its definition and shows the full take paradigm with shared phonetics and persistent review reuse', async () => {
   const app = setup('/main/', '');
