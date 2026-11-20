@@ -1018,7 +1018,7 @@ test('review hides answers until recalled, shows state-only feedback and persist
   const original = structuredClone(storage.get(prefix + 'study:alpha'));
   await openReview(app);
   assert.equal(shadow.querySelector('.review-answer'), null);
-  assert.equal(findButton(shadow, '记得'), undefined);
+  for (const label of ['忘记', '困难', '记得', '轻松']) assert.ok(findButton(shadow, label));
   await click(findButton(shadow, '显示释义'));
   assert.ok(shadow.querySelector('.review-answer').querySelector('.sense'));
   for (const label of ['忘记', '困难', '记得', '轻松']) {
@@ -1040,20 +1040,33 @@ test('review hides answers until recalled, shows state-only feedback and persist
 
 test('state-only feedback still saves the correct FSRS schedule for new and learned words', async () => {
   for (const fresh of [true, false]) {
-    for (const [grade, label] of [['again', '忘记'], ['hard', '困难'], ['good', '记得'], ['easy', '轻松']]) {
-      const app = setup();
-      const { storage, prefix, context, shadow, click } = app;
-      if (fresh) storage.set(prefix + 'study:alpha', createStudy('alpha', context.Date.now()));
-      const before = structuredClone(storage.get(prefix + 'study:alpha'));
-      const expected = schedule(before, grade, context.Date.now());
-      await openReview(app);
-      await click(findButton(shadow, '显示释义'));
-      const action = findButton(shadow, label);
-      assert.equal(action.textContent, label);
-      await click(action);
-      assert.deepEqual(JSON.parse(JSON.stringify(storage.get(prefix + 'study:alpha'))), expected);
+    for (const revealed of [false, true]) {
+      for (const [grade, label] of [['again', '忘记'], ['hard', '困难'], ['good', '记得'], ['easy', '轻松']]) {
+        const app = setup();
+        const { storage, prefix, context, shadow, click } = app;
+        if (fresh) storage.set(prefix + 'study:alpha', createStudy('alpha', context.Date.now()));
+        const before = structuredClone(storage.get(prefix + 'study:alpha'));
+        const expected = schedule(before, grade, context.Date.now());
+        await openReview(app);
+        if (revealed) await click(findButton(shadow, '显示释义'));
+        else assert.equal(shadow.querySelector('.review-answer'), null);
+        const action = findButton(shadow, label);
+        assert.equal(action.textContent, label);
+        await click(action);
+        assert.deepEqual(JSON.parse(JSON.stringify(storage.get(prefix + 'study:alpha'))), expected);
+      }
     }
   }
+});
+
+test('review number shortcuts can grade before revealing the answer', async () => {
+  const app = setup();
+  const { storage, prefix, context } = app;
+  const original = structuredClone(storage.get(prefix + 'study:alpha'));
+  await openReview(app);
+  await press(app, '1');
+  assert.equal(app.shadow.querySelector('.review-answer'), null);
+  assert.deepEqual(json(storage.get(prefix + 'study:alpha')), schedule(original, 'again', context.Date.now()));
 });
 
 test('empty review overview lists the next review and automatically notices when it becomes due', async () => {

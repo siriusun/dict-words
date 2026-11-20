@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Lexi · 划词词典与复习
 // @namespace    lexi-local
-// @version      0.6.5
+// @version      0.6.6
 // @description  英文划词、发音、跨网站历史、生词复习与本地备份，可选坚果云同步。
 // @match        http://*/*
 // @match        https://*/*
@@ -2368,7 +2368,7 @@ SOFTWARE.
         return true;
       },
       grade(entry, grade) {
-        if (!entry || round?.current !== entry || !answer) return null;
+        if (!entry || round?.current !== entry) return null;
         const now = clock();
         const settings = options();
         const key = cardKey(entry);
@@ -2384,7 +2384,7 @@ SOFTWARE.
             return 'limited';
           }
         }
-        if (now - answer.at > ANSWER_LIMIT) {
+        if (answer && now - answer.at > ANSWER_LIMIT) {
           answer.at = now;
           return 'expired';
         }
@@ -4538,7 +4538,7 @@ SOFTWARE.
     }
     const entry = review.presented;
     if (event.ctrlKey || event.metaKey || typing || !entry) return false;
-    if (review.revealed && /^[1-4]$/.test(event.key)) { gradeCard(entry, Object.keys(GRADES)[event.key - 1]); return true; }
+    if (/^[1-4]$/.test(event.key)) { gradeCard(entry, Object.keys(GRADES)[event.key - 1]); return true; }
     if (!review.revealed && (event.key === ' ' || event.key === 'Enter') && !/^(BUTTON|A)$/.test(tag)) { showAnswer(entry); return true; }
     if (event.key.toLowerCase() === 'r' && (entry.kind === 'meaning' || review.revealed)) { speak(get('word:' + entry.word)); return true; }
     return false;
@@ -4695,7 +4695,9 @@ SOFTWARE.
     }
     if (!answer) {
       const reveal = button(recall ? '显示单词' : '显示释义', () => showAnswer(entry), 'button primary');
-      card.append(el('p', 'muted', recall ? '先回想这个英文单词，可在下方拼写' : '先回忆这个词的含义'));
+      card.append(el('p', 'muted', recall
+        ? '先回想这个英文单词；可以直接评分，也可先显示答案核对'
+        : '先回忆这个词的含义；可以直接评分，也可先显示释义'));
       if (recall) {
         const spelling = el('input', 'spelling');
         spelling.placeholder = '拼写（可选），Enter 显示答案';
@@ -4722,16 +4724,17 @@ SOFTWARE.
       const back = el('div', 'review-answer');
       back.append(senses(wordEntry, autoLoad));
       if (!recall) back.append(chineseDefinitions(wordEntry, autoLoad));
-      const actions = el('div', 'actions');
-      for (const [index, [grade, label, hint]] of [['again', '忘记', '没想起来，或答案不正确'], ['hard', '困难', '想对了，但回忆很吃力'],
-      ['good', '记得', '能够正确回忆'], ['easy', '轻松', '无需费力就想起来了']].entries()) {
-        const action = button(label, () => gradeCard(entry, grade), grade === 'good' ? 'button primary' : 'button',
-          `${label}；${hint}；快捷键 ${index + 1}`);
-        if (grade === 'good') focusTarget = action;
-        actions.append(action);
-      }
-      card.append(back, actions);
+      card.append(back);
     }
+    const actions = el('div', 'actions');
+    for (const [index, [grade, label, hint]] of [['again', '忘记', '没想起来，或答案不正确'], ['hard', '困难', '想对了，但回忆很吃力'],
+    ['good', '记得', '能够正确回忆'], ['easy', '轻松', '无需费力就想起来了']].entries()) {
+      const action = button(label, () => gradeCard(entry, grade), grade === 'good' ? 'button primary' : 'button',
+        `${label}；${hint}；快捷键 ${index + 1}`);
+      if (grade === 'good' && answer) focusTarget = action;
+      actions.append(action);
+    }
+    card.append(actions);
     if (review.undoWord) {
       const extra = el('div', 'actions review-actions');
       extra.append(undoButton());

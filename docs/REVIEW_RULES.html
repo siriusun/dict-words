@@ -98,7 +98,7 @@
   <p class="sub">五条规则覆盖了绝大多数情况。</p>
   <div class="grid">
     <div class="card"><strong>只复习收藏词</strong><p>查询历史不会自动变成学习任务。收藏后成为新词，按每日上限引入。</p></div>
-    <div class="card"><strong>先回忆，再看答案</strong><p>正面只给英文（和原句），回忆后再揭示释义并自评。</p></div>
+    <div class="card"><strong>先回忆，再自评</strong><p>正面只给英文（和原句），可直接按回忆结果评分，也可先揭示释义核对。</p></div>
     <div class="card"><strong>由记忆模型排期</strong><p>FSRS 根据稳定性、难度、实际间隔与反馈计算下次时间，目标记得率默认 90%。</p></div>
     <div class="card"><strong>永不“毕业”</strong><p>记住的词仍会定期强化，最长间隔 365 天，不会被永久移出。</p></div>
     <div class="card"><strong>逾期不惩罚</strong><p>错过的复习保留，按实际复习时间安排下一次，不需要补完错过的每一天。</p></div>
@@ -110,11 +110,11 @@
   <ol class="flow">
     <li><strong>看正面</strong><p>英文、音标、发音按钮；保存过阅读上下文时，显示该词所在的原句并高亮单词。</p></li>
     <li><strong>回忆含义</strong><p>在心里说出意思，原句帮助确定要回忆的是哪个词义。</p></li>
-    <li><strong>显示释义</strong><p>英文释义与中文辅助；缺少或过期的中文会自动补全，失败可重试。</p></li>
-    <li><strong>诚实评分</strong><p>只根据这次回忆选择“忘记／困难／记得／轻松”，按钮不显示复习时间，系统会自动安排下一次复习。</p></li>
+    <li><strong>可选：显示释义</strong><p>英文释义与中文辅助；缺少或过期的中文会自动补全，失败可重试。不查看释义也可以直接评分。</p></li>
+    <li><strong>诚实评分</strong><p>根据这次回忆选择“忘记／困难／记得／轻松”，按钮不显示复习时间，系统会自动安排下一次复习。</p></li>
     <li><strong>继续或回到本轮</strong><p>仍在学习中的卡片会在 20 分钟内回到本轮再练。</p></li>
   </ol>
-  <div class="note"><p>排程和反馈时间以提交评分为准，不以揭晓时间为准。显示答案超过 <strong>10 分钟</strong>后首次点击会请你重新确认评分。调度不加随机抖动（fuzz）。</p></div>
+  <div class="note"><p>排程和反馈时间以提交评分为准，不以揭晓时间为准。已显示答案超过 <strong>10 分钟</strong>后首次点击评分会请你重新确认；未显示答案时可直接评分。调度不加随机抖动（fuzz）。</p></div>
 </section>
 
 <section id="grades">
@@ -203,7 +203,7 @@
     <thead><tr><th>按键</th><th>作用</th></tr></thead>
     <tbody>
       <tr><td><kbd>空格</kbd> / <kbd>Enter</kbd></td><td>显示答案；答案显示后焦点落在“记得”，再按一次即选“记得”</td></tr>
-      <tr><td><kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd> <kbd>4</kbd></td><td>忘记 / 困难 / 记得 / 轻松</td></tr>
+      <tr><td><kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd> <kbd>4</kbd></td><td>随时选择：忘记 / 困难 / 记得 / 轻松</td></tr>
       <tr><td><kbd>R</kbd></td><td>播放发音（反向卡在显示答案后才可用）</td></tr>
       <tr><td><kbd>Ctrl</kbd>/<kbd>⌘</kbd> + <kbd>Z</kbd></td><td>撤销本轮最近一次评分，可连续撤销，恢复原进度并回到该卡正面</td></tr>
     </tbody>
