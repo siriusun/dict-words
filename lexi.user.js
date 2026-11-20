@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Lexi · 划词词典与复习
 // @namespace    lexi-local
-// @version      0.6.6
+// @version      0.6.7
 // @description  英文划词、发音、跨网站历史、生词复习与本地备份，可选坚果云同步。
 // @match        http://*/*
 // @match        https://*/*
@@ -3109,6 +3109,7 @@ SOFTWARE.
     .sense{border-top:1px solid var(--line);padding-top:15px;margin-top:18px}.pos{display:inline-block;color:var(--accent);font-size:12px;font-weight:650;margin-bottom:6px}.definition{margin:0 0 10px;line-height:1.75}.example{color:var(--muted);border-left:2px solid var(--line);padding-left:10px;margin:5px 0 14px;font-size:13px}.translation{background:var(--tint);padding:14px;border-radius:10px;margin-top:14px}.source{border-top:1px solid var(--line);margin-top:20px;padding-top:12px;display:flex;flex-wrap:wrap;gap:8px;font-size:11px}.link{color:var(--accent);text-decoration:none}.link:hover{text-decoration:underline}.context{font-size:13px;margin-top:18px;color:var(--muted);overflow-wrap:anywhere}.error{color:var(--error)}
     .overlay{pointer-events:auto;position:fixed;inset:0;background:#0d211f55;backdrop-filter:blur(5px);display:flex;align-items:center;justify-content:center;padding:24px}.studio{background:var(--paper);border:1px solid var(--line);border-radius:24px;box-shadow:0 30px 100px #081d2038;width:min(1060px,100%);height:min(760px,90vh);display:grid;grid-template-columns:166px minmax(0,1fr);overflow:hidden}.sidebar{padding:28px 18px;background:var(--surface);border-right:1px solid var(--line);display:flex;flex-direction:column;gap:8px}.logo{font:italic 34px Georgia,serif;margin:0 10px}.sidebar .muted{margin:0 10px 28px}.tab{text-align:left;border-color:transparent;background:transparent;padding:11px 14px}.tab.active{background:var(--tint);color:var(--accent);font-weight:650}.sidebar .footnote{margin-top:auto;font-size:11px;color:var(--muted);padding:12px}
     .main{min-width:0;display:flex;flex-direction:column}.top{padding:22px 26px;display:flex;align-items:center;gap:12px;border-bottom:1px solid var(--line)}.search{display:flex;gap:8px;flex:1;min-width:0}input,select{color:var(--ink);background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:9px 12px;min-width:0}input{width:100%}input::placeholder{color:var(--muted)}.view{padding:24px 26px;overflow:auto;min-height:0;flex:1}.heading{font-size:24px;letter-spacing:-.5px;margin:0;font-weight:650}.subheading{font-size:13px;color:var(--muted);margin:5px 0 22px}.split{display:grid;grid-template-columns:240px minmax(0,1fr);gap:24px}.list{display:flex;flex-direction:column;gap:6px;margin-top:12px;max-height:440px;overflow:auto;padding:4px}.item{display:block;width:100%;text-align:left;padding:11px 12px;border-radius:12px;background:transparent;border:1px solid transparent;color:var(--ink)}.item:hover{background:var(--surface)}.item.active{background:var(--tint);border-color:var(--line)}.item .term{font:22px Georgia,serif}.detail{min-width:0}.detail .word{margin-top:8px}.empty{color:var(--muted);text-align:center;padding:45px 15px;font-size:14px}.section{background:var(--surface);border:1px solid var(--line);border-radius:16px;padding:20px;margin:16px 0}.section h3{margin:0 0 14px;font-size:15px}.setting{display:flex;justify-content:space-between;align-items:center;gap:14px;margin:16px 0}.setting input{width:18px;height:18px;accent-color:var(--accent)}.notice{font-size:12px;color:var(--muted);margin-top:12px}.review{text-align:center;max-width:540px;margin:25px auto}.review .word{font-size:54px;margin:35px 0 12px}.review-answer{text-align:left;margin:25px 0}.stats{display:flex;gap:12px;margin:24px 0}.stat{flex:1;padding:18px;background:var(--surface);border:1px solid var(--line);border-radius:15px}.stat strong{display:block;font:32px Georgia,serif;color:var(--accent)}.toast{pointer-events:auto;position:fixed;left:50%;bottom:25px;transform:translateX(-50%);max-width:calc(100vw - 32px);background:var(--ink);color:var(--surface);padding:12px 20px;border-radius:12px;box-shadow:0 5px 25px #0002;z-index:2}
+    .review-grades{justify-content:center;gap:14px;margin:12px 0}.review-grades .button{min-width:68px}
     @media(prefers-color-scheme:dark){:host{--paper:#15201d;--surface:#1b2823;--ink:#e4ede5;--muted:#9aada1;--line:#304238;--accent:#9fd2b1;--tint:#263c30;--error:#f1a19b;color-scheme:dark}.primary,.launcher{background:#38684d;color:#fff;border-color:#497a5d}.primary:hover{background:#38684d}}
     @media(max-width:760px){.launcher{right:16px;bottom:16px}}
     @media(prefers-reduced-motion:reduce){*{transition:none!important;scroll-behavior:auto!important}}
@@ -4726,7 +4727,7 @@ SOFTWARE.
       if (!recall) back.append(chineseDefinitions(wordEntry, autoLoad));
       card.append(back);
     }
-    const actions = el('div', 'actions');
+    const actions = el('div', 'actions review-grades');
     for (const [index, [grade, label, hint]] of [['again', '忘记', '没想起来，或答案不正确'], ['hard', '困难', '想对了，但回忆很吃力'],
     ['good', '记得', '能够正确回忆'], ['easy', '轻松', '无需费力就想起来了']].entries()) {
       const action = button(label, () => gradeCard(entry, grade), grade === 'good' ? 'button primary' : 'button',
