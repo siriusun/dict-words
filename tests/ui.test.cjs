@@ -1038,6 +1038,36 @@ test('review hides answers until recalled, shows state-only feedback and persist
   assert.equal(shadow.querySelector('.review-plan').querySelector('.term').textContent, 'alpha');
 });
 
+test('review grade guide explains all four grades without changing progress', async () => {
+  const app = setup();
+  const { shadow, storage, click, prefix } = app;
+  const original = structuredClone(storage.get(prefix + 'study:alpha'));
+  await openReview(app);
+  for (const revealed of [false, true]) {
+    if (revealed) await click(findButton(shadow, '显示释义'));
+    const trigger = shadow.querySelector('.review-grade-help');
+    const guide = shadow.querySelector('.review-grade-guide');
+    assert.equal(shadow.querySelector('.review-grades').children.at(-1), trigger);
+    assert.equal(trigger.getAttribute('aria-controls'), guide.id);
+    assert.equal(trigger.getAttribute('aria-expanded'), 'false');
+    assert.equal(guide.hidden, true);
+    await click(trigger);
+    assert.equal(trigger.getAttribute('aria-expanded'), 'true');
+    assert.equal(guide.hidden, false);
+    assert.deepEqual(guide.querySelectorAll('dt').map(textOf), ['1忘记', '2困难', '3记得', '4轻松']);
+    assert.equal(guide.querySelectorAll('dd').length, 4);
+    assert.equal(Boolean(shadow.querySelector('.review-answer')), revealed);
+    if (revealed) {
+      await press(app, 'Escape', trigger);
+      assert.equal(shadow.activeElement, trigger);
+      assert.equal(shadow.querySelector('.overlay').hidden, false);
+    } else await click(trigger);
+    assert.equal(trigger.getAttribute('aria-expanded'), 'false');
+    assert.equal(guide.hidden, true);
+    assert.deepEqual(storage.get(prefix + 'study:alpha'), original);
+  }
+});
+
 test('state-only feedback still saves the correct FSRS schedule for new and learned words', async () => {
   for (const fresh of [true, false]) {
     for (const revealed of [false, true]) {
