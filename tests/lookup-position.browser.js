@@ -1,7 +1,7 @@
 async page => {
   const base = new URL(page.url()).origin;
   const results = [];
-  for (const [width, height, scaled] of [[390, 714, false], [320, 568, false], [740, 360, false], [390, 340, false], [390, 714, true]]) {
+  for (const [width, height, scaled] of [[390, 714, false], [320, 568, false], [430, 932, false], [740, 360, false], [390, 340, false], [390, 714, true]]) {
     const session = await page.context().newCDPSession(page);
     await session.send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: true });
     await session.send('Emulation.setTouchEmulationEnabled', { enabled: true });
@@ -68,6 +68,10 @@ async page => {
     });
     const result = { width, height, scaled, studio, popup };
     results.push(result);
+    if (Math.abs(popup.width - studio.width) * popup.scale > 1
+      || Math.abs(popup.left - studio.left) * popup.scale > 1) {
+      throw new Error('Mobile lookup and studio must share the width and side edges: ' + JSON.stringify(result));
+    }
     if (Math.abs(popup.bottom - studio.bottom) * popup.scale > 1) {
       throw new Error('Mobile lookup and studio must share the bottom edge: ' + JSON.stringify(result));
     }

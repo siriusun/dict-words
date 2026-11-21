@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Lexi · 划词词典与复习
 // @namespace    lexi-local
-// @version      0.8.7
+// @version      0.8.8
 // @description  英文划词与句子翻译、触屏选区操作、发音、跨网站历史、生词复习与本地备份。
 // @match        http://*/*
 // @match        https://*/*
@@ -3313,7 +3313,7 @@ SOFTWARE.
     .compact .review-grade-guide{padding:10px 12px}
     .compact .recall-prompt{padding:10px;margin:14px 0 6px}
     .compact .stats{gap:6px;margin:12px 0}.compact .stat{min-width:90px;padding:8px}.compact .stat strong{font-size:26px}
-    .compact .popover{width:min(380px,calc(var(--visible-width) - 16px));height:var(--panel-height);max-height:none;padding:14px;overflow-wrap:anywhere;transform:scale(var(--ui-scale)) translateY(calc(-100% - var(--panel-bottom-gap)));transform-origin:top left}
+    .compact .popover{width:min(600px,calc(var(--visible-width) - max(18px,env(safe-area-inset-left)) - max(18px,env(safe-area-inset-right))));height:var(--panel-height);max-height:none;padding:14px;overflow-wrap:anywhere;transform:scale(var(--ui-scale)) translateY(calc(-100% - var(--panel-bottom-gap)));transform-origin:top left}
     .compact input:not([type="checkbox"]),.compact select{font-size:16px}
   `;
   let launcherPosition = get('launcher-position', null);
