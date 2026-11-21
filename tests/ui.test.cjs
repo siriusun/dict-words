@@ -173,20 +173,22 @@ const openReview = async app => {
   await app.click(findButton(app.shadow, '开始复习'));
 };
 
-function selectWebsite(app, word) {
+function selectWebsite(app, word, pointerType = 'mouse') {
+  let value = word;
   const node = new app.Element('p');
   node.textContent = word;
   const text = { isConnected: true, parentElement: node };
   const range = { startContainer: text, endContainer: text, collapsed: false,
-    toString: () => word, getBoundingClientRect: () => node.getBoundingClientRect() };
+    toString: () => value, getBoundingClientRect: () => node.getBoundingClientRect() };
   range.getClientRects = () => [range.getBoundingClientRect()];
   range.cloneRange = () => ({ ...range });
-  app.context.window.getSelection = () => ({
+  const selection = {
     isCollapsed: false, rangeCount: 1, anchorNode: { parentElement: node },
-    toString: () => word, getRangeAt: () => range
-  });
-  app.context.document.listeners.pointerup.listener({ button: 0, target: node, composedPath: () => [node] });
-  return { node, range };
+    toString: () => value, getRangeAt: () => range
+  };
+  app.context.window.getSelection = () => selection;
+  app.context.document.listeners.pointerup.listener({ button: 0, pointerType, target: node, composedPath: () => [node] });
+  return { node, range, selection, setText: next => { value = next; } };
 }
 
 function launcherPointer(app, type, clientX, clientY, extra = {}) {
@@ -1939,6 +1941,82 @@ async function selectInside(app, node, raw, collapsed = false) {
   await new Promise(setImmediate);
 }
 const historyOf = app => [...app.storage.entries()].filter(([key]) => key.startsWith(app.prefix + 'event:')).map(([, event]) => event);
+
+test('touchscreen webpage selection waits for an explicit action and uses the expanded selection', async () => {
+  const app = setup('/test/', 'youdao', { open: false });
+  const { shadow, context } = app;
+  const requests = [];
+  context.GM_xmlhttpRequest = request => { requests.push(request); return { abort() {} }; };
+  const selected = selectWebsite(app, 'alpha', 'touch');
+  app.advance(250);
+  assert.equal(shadow.querySelector('.popover').hidden, true, 'initial touch selection must not open the word card');
+  const action = shadow.querySelector('.selection-action');
+  assert.ok(action, 'touch selection exposes an explicit action');
+  assert.equal(action.textContent, '查词');
+  assert.equal(action.getAttribute('aria-label'), '查词 alpha');
+  assert.equal(requests.length, 0);
+
+  selected.setText('alpha beta, now.');
+  context.document.listeners.selectionchange.listener();
+  assert.equal(action.textContent, '翻译');
+  assert.equal(action.getAttribute('aria-label'), '翻译所选句子');
+  let prevented = false;
+  action.listeners.pointerdown.listener({ preventDefault() { prevented = true; } });
+  assert.equal(prevented, true, 'the action preserves the native selection when pressed');
+  action.listeners.click.listener();
+  await new Promise(setImmediate);
+  assert.equal(shadow.querySelector('.popover').querySelector('.sentence-original').textContent, 'alpha beta, now.');
+  assert.equal(new URL(requests[0].url).searchParams.get('q'), 'alpha beta, now.');
+});
+
+test('touchscreen selection inside the plugin also waits for an action while mouse selection stays automatic', async () => {
+  const app = setup();
+  const { shadow, context } = app;
+  const requests = [];
+  context.GM_xmlhttpRequest = request => { requests.push(request); return { abort() {} }; };
+  await app.click(shadow.querySelector('.item'));
+  const pane = shadow.querySelector('.detail-pane');
+  const original = pane.querySelector('article');
+  const range = { startContainer: pane.querySelector('.definition'), endContainer: pane.querySelector('.definition'),
+    collapsed: false, toString: () => 'alpha beta', getBoundingClientRect: () => pane.getBoundingClientRect() };
+  range.cloneRange = () => ({ ...range });
+  setSelection(app, range);
+  shadow.listeners.pointerup.listener({ button: 0, pointerType: 'touch' });
+  app.advance(250);
+  await new Promise(setImmediate);
+  assert.equal(pane.querySelector('article'), original, 'the first internal touch selection does not navigate away');
+  assert.equal(shadow.querySelector('.selection-action').textContent, '翻译');
+  assert.equal(requests.length, 0);
+  shadow.querySelector('.selection-action').listeners.click.listener();
+  await new Promise(setImmediate);
+  const result = shadow.querySelector('.sentence-result');
+  assert.ok(result, `sentence result should be visible; toast=${shadow.querySelector('.toast').textContent}`);
+  assert.equal(result.querySelector('.sentence-original').textContent, 'alpha beta');
+  assert.equal(new URL(requests[0].url).searchParams.get('q'), 'alpha beta');
+  await app.click(pane.querySelector('.lookup-back'));
+
+  const mouse = setup('/test/', 'youdao', { open: false });
+  selectWebsite(mouse, 'beta');
+  mouse.advance(250);
+  await new Promise(setImmediate);
+  const popover = mouse.shadow.querySelector('.popover');
+  assert.ok(!popover.hidden, 'mouse selection should remain automatic');
+  assert.equal(popover.querySelector('.word')?.textContent, 'beta');
+});
+
+test('touch selection action disappears when the native selection is cleared', async () => {
+  const app = setup('/test/', 'youdao', { open: false });
+  const selected = selectWebsite(app, 'alpha', 'touch');
+  app.advance(250);
+  const action = app.shadow.querySelector('.selection-action');
+  assert.equal(action.hidden, false);
+  selected.setText('');
+  selected.selection.isCollapsed = true;
+  selected.range.collapsed = true;
+  app.context.document.listeners.selectionchange.listener();
+  app.advance(0);
+  assert.equal(action.hidden, true);
+});
 
 test('website sentence translation is temporary, uncached, cancellable and repeatable after closing', async () => {
   const app = setup('/test/', 'youdao', { open: false, settings: { autoBook: true, context: true } });

@@ -304,6 +304,62 @@ async page => {
   await click('.library-sheet-bar button', '关闭');
   await click('button', '关闭学习中心');
   check(await page.evaluate(() => !window.__lexiShadow.querySelector('.sentence-result')), 'Closing the studio leaves no sentence result');
+  await page.setViewportSize({ width: 390, height: 780 });
+  await page.evaluate(() => {
+    window.__lexiData.set('lexi:v1:settings', { auto: true });
+    window.dispatchEvent(new Event('focus'));
+    window.__beforeTouchSelection = JSON.stringify([...window.__lexiData]);
+    const origin = document.querySelector('#phrase');
+    origin.textContent = 'Mobile selection grows into a full sentence.';
+    const range = document.createRange();
+    range.setStart(origin.firstChild, 0);
+    range.setEnd(origin.firstChild, 6);
+    const selection = window.getSelection(); selection.removeAllRanges(); selection.addRange(range);
+    origin.dispatchEvent(new PointerEvent('pointerup', { button: 0, pointerType: 'touch', bubbles: true, composed: true }));
+  });
+  await page.waitForFunction(() => window.__lexiShadow.querySelector('.selection-action')?.getAttribute('aria-label') === '查词 mobile');
+  check(await page.evaluate(() => {
+    const action = window.__lexiShadow.querySelector('.selection-action');
+    return window.__lexiShadow.querySelector('.popover').hidden && window.getSelection().toString() === 'Mobile'
+      && action.getBoundingClientRect().height >= 44;
+  }), 'Touch word selection neither opens the card nor clears native selection, and has a 44px touch target');
+  await page.evaluate(() => {
+    const origin = document.querySelector('#phrase');
+    const range = document.createRange(); range.selectNodeContents(origin);
+    const selection = window.getSelection(); selection.removeAllRanges(); selection.addRange(range);
+    document.dispatchEvent(new Event('selectionchange'));
+  });
+  await page.waitForFunction(() => window.__lexiShadow.querySelector('.selection-action')?.getAttribute('aria-label') === '翻译所选句子');
+  check(await page.evaluate(() => window.__lexiShadow.querySelector('.popover').hidden
+    && window.getSelection().toString() === 'Mobile selection grows into a full sentence.'),
+  'Expanding the native selection updates the action without opening a lookup card');
+  await page.evaluate(() => {
+    const action = window.__lexiShadow.querySelector('.selection-action');
+    const down = new PointerEvent('pointerdown', { button: 0, pointerType: 'touch', bubbles: true, cancelable: true });
+    action.dispatchEvent(down);
+    window.__touchActionPreservedSelection = down.defaultPrevented && window.getSelection().toString()
+      === 'Mobile selection grows into a full sentence.';
+    action.dispatchEvent(new PointerEvent('pointerup', { button: 0, pointerType: 'touch', bubbles: true, cancelable: true }));
+    action.click();
+  });
+  await page.waitForFunction(() => window.__lexiShadow.querySelector('.popover .translation-copy')?.textContent === '模拟译文');
+  check(await page.evaluate(() => window.__touchActionPreservedSelection
+    && JSON.stringify([...window.__lexiData]) === window.__beforeTouchSelection),
+  'Touching the explicit action preserves the selection and only performs transient translation');
+  await fits('.popover');
+  await click('.popover button', '关闭查词卡');
+  await page.evaluate(() => {
+    const origin = document.querySelector('#serendipity');
+    const range = document.createRange(); range.selectNodeContents(origin);
+    const selection = window.getSelection(); selection.removeAllRanges(); selection.addRange(range);
+    origin.dispatchEvent(new PointerEvent('pointerup', { button: 0, pointerType: 'touch', bubbles: true, composed: true }));
+  });
+  await page.waitForFunction(() => window.__lexiShadow.querySelector('.selection-action')?.getAttribute('aria-label') === '查词 alpha');
+  check(await page.evaluate(() => window.__lexiShadow.querySelector('.popover').hidden),
+    'Touch word selection waits for an explicit lookup action');
+  await click('.selection-action', '查词');
+  await page.waitForFunction(() => window.__lexiShadow.querySelector('.popover .word')?.textContent === 'alpha');
+  await click('.popover button', '关闭查词卡');
   await page.setViewportSize({ width: 1100, height: 800 });
   await page.emulateMedia({ colorScheme: 'light' });
   await page.evaluate(() => {
@@ -342,5 +398,5 @@ async page => {
   await click('.popover button', '关闭查词卡');
   check(errors.length === 0, 'Page errors: ' + errors.join('; '));
   await page.evaluate(() => { window.__lexiBrowserCheckPassed = true; });
-  return 'Closed-shadow browser checks passed: word lookup, temporary sentence translation at all three entry points, no storage, navigation, paused selection, desktop and narrow dark layouts.';
+  return 'Closed-shadow browser checks passed: mouse auto-lookup, explicit touch selection, expanded-range translation, no storage, paused selection, desktop and narrow dark layouts.';
 }

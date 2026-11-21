@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Lexi · 划词词典与复习
 // @namespace    lexi-local
-// @version      0.8.0
-// @description  英文划词与句子翻译、发音、跨网站历史、生词复习与本地备份，可选坚果云同步。
+// @version      0.8.1
+// @description  英文划词与句子翻译、触屏选区操作、发音、跨网站历史、生词复习与本地备份。
 // @match        http://*/*
 // @match        https://*/*
 // @noframes
@@ -3099,6 +3099,10 @@ SOFTWARE.
   let internalLookup = null;
   let internalSelectionTimer;
   let internalPointerDown = false;
+  let selectionPointerDown = false;
+  let lastSelectionPointerType = '';
+  let pendingSelection = null;
+  let selectionActionRefreshTimer;
   let selectionTimer;
   let lastSelection = '';
   let lastSelectionAt = 0;
@@ -3143,6 +3147,7 @@ SOFTWARE.
     button:focus-visible,a:focus-visible{outline:3px solid #75ac8c;outline-offset:3px}input:focus-visible,select:focus-visible{outline:none;background:var(--tint)}
     .launcher{pointer-events:auto;position:fixed;right:24px;bottom:24px;width:46px;height:46px;border:1px solid #ffffff40;border-radius:16px;background:var(--accent);color:white;box-shadow:0 6px 25px #102a2025;font:italic 28px Georgia,serif;touch-action:none;user-select:none;cursor:grab}
     .launcher.dragging{cursor:grabbing}
+    .selection-action{pointer-events:auto;position:fixed;z-index:4;min-height:44px;max-width:min(220px,calc(100vw - 24px));touch-action:manipulation;user-select:none;white-space:nowrap;box-shadow:0 5px 20px #102a2030}
     .popover{pointer-events:auto;position:fixed;width:min(380px,calc(100vw - 24px));max-height:70vh;overflow:auto;background:var(--surface);border:1px solid var(--line);border-radius:18px;box-shadow:0 16px 65px #102a2026;padding:22px}
     .popover-footer{margin-top:20px;padding-top:16px;border-top:1px solid var(--line)}.popover-footer .button{display:block;width:100%;min-height:44px}
     .bar,.row,.actions{display:flex;align-items:center;gap:10px}.bar{justify-content:space-between}.actions{flex-wrap:wrap}.brand{font-weight:750;letter-spacing:3px;font-size:12px}.muted,.meta{color:var(--muted);font-size:12px}.meta{margin-top:4px}.word{font:42px/1.2 Georgia,"Times New Roman",serif;overflow-wrap:anywhere;margin:20px 0 6px}.phonetic{color:var(--muted);font-size:14px;margin-bottom:14px}
@@ -3240,6 +3245,7 @@ SOFTWARE.
     .compact .tab{min-height:40px;padding:0 2px;text-align:center;font-size:12px}
     .compact .top{padding:4px 8px;gap:4px}.compact .search{gap:4px}.compact .search input{padding:5px 8px;font-size:16px}
     .compact .button,.compact .icon{min-height:36px}.compact .button{padding:5px 10px;font-size:13px}.compact .icon{min-width:36px}
+    .compact .selection-action{min-height:44px}
     .compact .usage-examples>.button,.compact .popover-footer .button{min-height:44px}
     .compact .view{padding:10px;overflow:auto;overflow-wrap:anywhere}
     .compact .view.scope-view{display:block}.compact .view.library{display:flex}
@@ -3332,6 +3338,10 @@ SOFTWARE.
   readingMarks.setAttribute('aria-hidden', 'true');
   const readingReturn = button('回到原文', returnToReading, 'button reading-return');
   readingReturn.hidden = true;
+  const selectionAction = button('查词', runSelectedAction, 'button primary selection-action');
+  selectionAction.hidden = true;
+  selectionAction.addEventListener('pointerdown', event => event.preventDefault());
+  selectionAction.addEventListener('mousedown', event => event.preventDefault());
   const readingStyle = el('style');
   const readingHighlightName = 'lexi-reading-origin';
   let readingMarker = null;
@@ -3341,7 +3351,7 @@ SOFTWARE.
   main.append(top, view);
   studio.append(sidebar, main);
   overlay.append(studio);
-  app.append(readingMarks, launcher, readingReturn, popover, overlay, toast);
+  app.append(readingMarks, launcher, readingReturn, popover, overlay, selectionAction, toast);
   shadow.append(style, app);
   const visualViewport = window.visualViewport;
   const touchViewport = window.matchMedia?.('(pointer: coarse)');
@@ -3567,6 +3577,7 @@ SOFTWARE.
   function closePopover(keepReading = false) {
     const wasOpen = !popover.hidden;
     resetInternalLookup(); cancelInternalSelection(); popover.hidden = true; stopQuery(); stopAudio();
+    clearSelectionAction();
     if (popover.querySelector('.sentence-result')) popover.replaceChildren();
     if (wasOpen && readingMarker?.transient) {
       clearReadingMarker();
@@ -3577,6 +3588,7 @@ SOFTWARE.
   }
   function openStudio(nextScreen) {
     updateViewport();
+    clearSelectionAction();
     returnFocus = shadow.activeElement || document.activeElement;
     closePopover(true);
     if (nextScreen) screen = nextScreen;
@@ -3593,6 +3605,7 @@ SOFTWARE.
     resetInternalLookup();
     librarySheet?.close(false);
     cancelInternalSelection();
+    clearSelectionAction();
     if (classifyQuery(input.value)?.type === 'sentence') input.value = '';
     overlay.hidden = true;
     releaseReadingMarker();
@@ -3609,6 +3622,7 @@ SOFTWARE.
     clearTimeout(selectionTimer);
     clearTimeout(toastTimer);
     clearTimeout(reviewTimer);
+    clearSelectionAction();
     closePopover();
     clearReadingMarker();
     stopAudio();
@@ -3677,7 +3691,10 @@ SOFTWARE.
     else if (!event.shiftKey && shadow.activeElement === last) { event.preventDefault(); first?.focus(); }
   });
   document.addEventListener('keydown', event => {
-    if (event.key === 'Escape' && !popover.hidden) closePopover();
+    if (event.key === 'Escape') {
+      if (!popover.hidden) closePopover();
+      else clearSelectionAction();
+    }
   });
 
   function request(url, lookupRequest = false, noCache = false) {
@@ -3751,6 +3768,38 @@ SOFTWARE.
     clearTimeout(internalSelectionTimer);
     internalSelectionTimer = undefined;
   }
+  function rememberSelectionPointer(event) {
+    if (event?.pointerType) lastSelectionPointerType = event.pointerType;
+  }
+  function usesSelectionAction(event) {
+    rememberSelectionPointer(event);
+    return ['touch', 'pen'].includes(event?.pointerType || lastSelectionPointerType)
+      || (!event?.pointerType && !lastSelectionPointerType && Boolean(touchViewport?.matches));
+  }
+  function clearSelectionAction() {
+    clearTimeout(selectionActionRefreshTimer);
+    selectionActionRefreshTimer = undefined;
+    pendingSelection = null;
+    selectionAction.hidden = true;
+  }
+  function positionSelectionAction(range) {
+    selectionAction.hidden = false;
+    const viewport = compact ? visibleViewport : {
+      left: 0, top: 0, width: window.innerWidth, height: window.innerHeight, scale: 1
+    };
+    const unit = Math.min(1, viewport.scale);
+    const gap = 8 / unit;
+    const bounds = range.getBoundingClientRect();
+    const { width, height } = selectionAction.getBoundingClientRect();
+    const minLeft = viewport.left + gap;
+    const minTop = viewport.top + gap;
+    const maxLeft = Math.max(minLeft, viewport.left + viewport.width - width - gap);
+    const maxTop = Math.max(minTop, viewport.top + viewport.height - height - gap);
+    const above = bounds.top - height - gap;
+    const top = above >= minTop ? above : bounds.bottom + gap;
+    selectionAction.style.left = Math.max(minLeft, Math.min(maxLeft, bounds.left)) + 'px';
+    selectionAction.style.top = Math.max(minTop, Math.min(maxTop, top)) + 'px';
+  }
   function readingElement(node) {
     const element = node instanceof Element ? node : node?.parentElement;
     if (!element || element.closest('button,a,input,textarea,select,[contenteditable]:not([contenteditable="false"])')) return null;
@@ -3777,7 +3826,73 @@ SOFTWARE.
     if (!target || target.hidden || !target.getClientRects().length || (target !== popover && overlay.hidden)) return;
     const query = classifyQuery(range.toString());
     if (!query || query.type === 'word' && query.value === normalize(target.querySelector('.word')?.textContent)) return;
-    return { selection, query, target };
+    return { selection, range, query, target };
+  }
+  function selectedWebsiteQuery() {
+    const selection = window.getSelection();
+    if (!selection || selection.isCollapsed || !selection.rangeCount) return;
+    const range = selection.getRangeAt(0);
+    if (range.collapsed || host.contains(range.startContainer) || host.contains(range.endContainer)) return;
+    const anchor = selection.anchorNode?.parentElement;
+    if (anchor?.closest('input,textarea,select,[contenteditable]:not([contenteditable="false"])')) return;
+    const query = classifyQuery(selection.toString());
+    if (!query) return;
+    return { selection, range, query, target: null, anchor };
+  }
+  function currentSelectionQuery() {
+    return selectedInternalQuery() || selectedWebsiteQuery();
+  }
+  function updateSelectionAction() {
+    if (selectionPointerDown || !usesSelectionAction()) return;
+    const selected = currentSelectionQuery();
+    if (!selected) { clearSelectionAction(); return; }
+    if (selected.target && selected.query.type === 'word' &&
+      selected.query.value === normalize(selected.target.querySelector('.word')?.textContent)) {
+      clearSelectionAction();
+      return;
+    }
+    pendingSelection = { ...selected, range: selected.range.cloneRange() };
+    const isWord = selected.query.type === 'word';
+    selectionAction.textContent = isWord ? '查词' : '翻译';
+    selectionAction.setAttribute('aria-label', isWord ? `查词 ${selected.query.value}` : '翻译所选句子');
+    selectionAction.disabled = selected.query.type === 'sentence' && selected.query.value.length > MAX_SENTENCE_LENGTH;
+    positionSelectionAction(selected.range);
+  }
+  function scheduleSelectionActionUpdate() {
+    if (selectionAction.hidden || selectionPointerDown) return;
+    clearTimeout(selectionActionRefreshTimer);
+    selectionActionRefreshTimer = setTimeout(() => {
+      selectionActionRefreshTimer = undefined;
+      updateSelectionAction();
+    }, 0);
+  }
+  function selectedContext(selected) {
+    if (selected.query.type !== 'word' || !settings.context || !selected.anchor) return null;
+    const raw = selected.query.value;
+    const block = selected.anchor.closest('p,li,td,blockquote,figcaption') || selected.anchor;
+    const body = block?.textContent || '';
+    const index = body.toLowerCase().indexOf(raw.toLowerCase());
+    const url = new URL(location.href); url.search = ''; url.hash = '';
+    return {
+      context: body.slice(Math.max(0, index - 90), Math.max(0, index - 90) + 300).replace(/\s+/g, ' '),
+      title: text(document.title, 120), sourceUrl: safeUrl(url.href)
+    };
+  }
+  function runSelectedAction() {
+    const selected = currentSelectionQuery();
+    clearSelectionAction();
+    if (!selected) { message('选区已失效，请重新选择'); return; }
+    if (selected.query.type === 'sentence' && selected.query.value.length > MAX_SENTENCE_LENGTH) {
+      message(`英文翻译最多支持 ${MAX_SENTENCE_LENGTH} 个字符，请缩短后重试`);
+      return;
+    }
+    if (selected.target) {
+      selected.selection.removeAllRanges();
+      beginInternalLookup(selected.query.value, selected.target);
+      return;
+    }
+    captureReadingMarker(selected.range, selected.query.type === 'sentence');
+    lookup(selected.query.value, selected.range.getBoundingClientRect(), selectedContext(selected)).catch(showError);
   }
   function lookupInternalSelection() {
     cancelInternalSelection();
@@ -3794,25 +3909,37 @@ SOFTWARE.
     cancelInternalSelection();
     if (internalPointerDown) return;
     try {
+      if (usesSelectionAction()) {
+        updateSelectionAction();
+        return;
+      }
+      clearSelectionAction();
       if (selectedInternalQuery()) internalSelectionTimer = setTimeout(() => {
         try { lookupInternalSelection(); } catch (error) { showError(error); }
       }, 220);
     } catch (error) { showError(error); }
   }
   shadow.addEventListener('pointerup', event => {
+    rememberSelectionPointer(event);
     internalPointerDown = false;
     if (event.button === 0) scheduleInternalSelection();
   });
   shadow.addEventListener('keyup', event => { if (event.key.startsWith('Arrow') || event.key === 'Shift') scheduleInternalSelection(); });
   shadow.addEventListener('pointerdown', event => {
+    rememberSelectionPointer(event);
     cancelInternalSelection();
     const reading = readingElement(event.composedPath()[0]);
     internalPointerDown = event.button === 0 && Boolean(reading);
-    if (event.button === 0 && !reading) selectedInternalQuery()?.selection.removeAllRanges();
+    if (event.button === 0 && !reading && !event.composedPath().includes(selectionAction)) {
+      selectedInternalQuery()?.selection.removeAllRanges();
+    }
   });
   shadow.addEventListener('scroll', cancelInternalSelection, true);
   shadow.addEventListener('selectionchange', scheduleInternalSelection);
-  document.addEventListener('selectionchange', scheduleInternalSelection);
+  document.addEventListener('selectionchange', () => {
+    scheduleInternalSelection();
+    scheduleSelectionActionUpdate();
+  });
 
   function navigationFrame(target) {
     return {
@@ -5334,6 +5461,8 @@ SOFTWARE.
   }
 
   document.addEventListener('pointerup', event => {
+    selectionPointerDown = false;
+    rememberSelectionPointer(event);
     if (!checkSite()) return;
     clearTimeout(selectionTimer);
     if (internalPointerDown) {
@@ -5341,12 +5470,21 @@ SOFTWARE.
       scheduleInternalSelection();
       return;
     }
-    if (currentSite.disabled || event.button !== 0 || event.composedPath().includes(host) || !overlay.hidden || !settings.auto) return;
+    if (event.composedPath().includes(host)) {
+      if (usesSelectionAction(event)) updateSelectionAction();
+      return;
+    }
+    if (currentSite.disabled || event.button !== 0 || !overlay.hidden || !settings.auto) return;
     const target = event.target;
     if (target instanceof Element && target.closest('input,textarea,select,[contenteditable]:not([contenteditable="false"])')) return;
     selectionTimer = setTimeout(() => {
       if (!checkSite()) return;
       if (currentSite.disabled || !settings.auto || !overlay.hidden) return;
+      if (usesSelectionAction(event)) {
+        updateSelectionAction();
+        return;
+      }
+      clearSelectionAction();
       const selection = window.getSelection();
       if (!selection || selection.isCollapsed || !selection.rangeCount) return;
       const anchor = selection.anchorNode?.parentElement;
@@ -5397,12 +5535,15 @@ SOFTWARE.
   visualViewport?.addEventListener('scroll', onVisualViewportChange);
   document.addEventListener('scroll', updateReadingMarker, true);
   document.addEventListener('pointerdown', event => {
+    selectionPointerDown = true;
+    rememberSelectionPointer(event);
     if (!event.composedPath().includes(host)) {
       internalPointerDown = false;
       cancelInternalSelection();
       if (!popover.hidden) closePopover();
     }
   });
+  document.addEventListener('pointercancel', () => { selectionPointerDown = false; });
   return {
     applySite, refresh, showError,
     open: nextScreen => {
