@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Lexi · 划词词典与复习
 // @namespace    lexi-local
-// @version      0.7.0
-// @description  英文划词、发音、跨网站历史、生词复习与本地备份，可选坚果云同步。
+// @version      0.8.0
+// @description  英文划词与句子翻译、发音、跨网站历史、生词复习与本地备份，可选坚果云同步。
 // @match        http://*/*
 // @match        https://*/*
 // @noframes
@@ -2139,6 +2139,15 @@ SOFTWARE.
       .replace(/^[\s'"“”([{]+|[\s'"“”.,!?;:)\]}]+$/g, '').toLowerCase();
     return word.length <= 64 && /^[a-z]+(?:[-'][a-z]+)*$/.test(word) ? word : '';
   };
+  const MAX_SENTENCE_LENGTH = 5000;
+  function classifyQuery(value) {
+    const word = normalize(value);
+    if (word) return { type: 'word', value: word };
+    if (typeof value !== 'string') return null;
+    const sentence = value.trim();
+    const words = /(?:^|[^a-z0-9_'’-])[a-z]+(?:[-'’][a-z]+)*(?=$|[^a-z0-9_'’-])/gi;
+    return words.exec(sentence) && words.exec(sentence) ? { type: 'sentence', value: sentence } : null;
+  }
   const text = (value, max = 1200) => typeof value === 'string' ? value.slice(0, max) : '';
   const safeUrl = value => {
     try {
@@ -2777,7 +2786,7 @@ SOFTWARE.
     (oldest ? 1 : -1) * (a.at - b.at || a.id.localeCompare(b.id)));
   if (typeof window === 'undefined') {
     loadMemory();
-    module.exports = { normalize, schedule, scheduleAll, migrateStudy, createStudy, reviewInterval, csv, dictionary, validateBackup, mergeBackup, ordered, audioUrl, translationSource, translationChunks, youdaoTranslation, youdaoExamples, youdaoPhonetic, datamusePhonetic, youdaoWordForms,
+    module.exports = { normalize, classifyQuery, schedule, scheduleAll, migrateStudy, createStudy, reviewInterval, csv, dictionary, validateBackup, mergeBackup, ordered, audioUrl, translationSource, translationChunks, youdaoTranslation, youdaoExamples, youdaoPhonetic, datamusePhonetic, youdaoWordForms,
       dayStart, nextDayStart, availableAt, planReview, createReviewSession, retentionStats, contextParts, isLeech,
       pageScope, siteState, validateSiteRules };
     return;
@@ -3064,6 +3073,7 @@ SOFTWARE.
   let settings = cleanSettings(get('settings', {}));
   let queryEpoch = 0;
   let activeRequest;
+  let cancelSentence;
   let activeAudio;
   let audioEpoch = 0;
   let ownSpeech = false;
@@ -3089,6 +3099,10 @@ SOFTWARE.
   let internalLookup = null;
   let internalSelectionTimer;
   let internalPointerDown = false;
+  let selectionTimer;
+  let lastSelection = '';
+  let lastSelectionAt = 0;
+  let lastSelectionTransient = false;
   let refreshLibrary = null;
   let librarySheet = null;
   let activityEpoch = 0;
@@ -3163,6 +3177,8 @@ SOFTWARE.
     .item .term{font-size:21px;line-height:1.2;overflow-wrap:anywhere}
     .item .meta{margin-top:2px;font-size:11px;line-height:1.4}
     .translation-copy{white-space:pre-line;line-height:1.85}
+    .sentence-result{min-width:0;min-height:0;overflow:auto;overflow-wrap:anywhere}
+    .sentence-heading{font-size:20px;margin:12px 0 18px}.sentence-original{white-space:pre-wrap;line-height:1.75;margin:0}
     .logo .version{font:11px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:var(--muted);margin-left:6px;white-space:nowrap}
     .phonetic{display:flex;align-items:center;flex-wrap:wrap;gap:8px}.phonetic .icon{border:0;background:transparent;transition:transform .12s,color .12s,opacity .12s}.phonetic .icon:active{transform:scale(.85);color:var(--accent);opacity:.6}.phonetic .link{font-size:11px}.phonetic .button{font-size:12px;padding:2px 8px}.review>.phonetic{justify-content:center}
     .word-forms dl{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:5px 16px;margin:6px 0 10px}.word-forms dt{color:var(--muted);font-size:12px}.word-forms dd{margin:0;overflow-wrap:anywhere}
@@ -3297,13 +3313,12 @@ SOFTWARE.
   const top = el('header', 'top');
   const form = el('form', 'search');
   const input = el('input');
-  input.placeholder = '输入英文单词，按 Enter 查词';
-  input.setAttribute('aria-label', '查询英文单词');
+  input.placeholder = '输入英文单词或句子，按 Enter 查询';
+  input.setAttribute('aria-label', '查询英文单词或句子');
   input.autocomplete = 'off';
   input.autocapitalize = 'none';
   input.spellcheck = false;
   input.enterKeyHint = 'search';
-  input.maxLength = 80;
   form.append(input, button('查询', () => lookup(input.value), 'button primary'));
   form.addEventListener('submit', event => { event.preventDefault(); lookup(input.value).catch(showError); });
   top.append(form, button('×', closeStudio, 'icon', '关闭学习中心'));
@@ -3429,10 +3444,10 @@ SOFTWARE.
     paintReadingMarker(0.3);
     updateReadingMarker();
   }
-  function captureReadingMarker(range) {
+  function captureReadingMarker(range, transient = false) {
     clearReadingMarker();
     const native = Boolean(window.CSS?.highlights && typeof window.Highlight === 'function');
-    readingMarker = { range: range.cloneRange(), text: range.toString(), native };
+    readingMarker = { range: range.cloneRange(), text: range.toString(), native, transient };
     if (native) {
       window.CSS.highlights.set(readingHighlightName, new window.Highlight(readingMarker.range));
       document.documentElement.append(readingStyle);
@@ -3534,7 +3549,14 @@ SOFTWARE.
     if (event.key === 'Enter' || event.key === ' ') suppressLauncherClick = false;
   });
   positionLauncher();
-  function stopQuery() { queryEpoch++; activeRequest?.abort(); activeRequest = null; }
+  function stopQuery() {
+    queryEpoch++;
+    activeRequest?.abort();
+    activeRequest = null;
+    const cancel = cancelSentence;
+    cancelSentence = null;
+    cancel?.();
+  }
   function stopAudio() {
     audioEpoch++;
     activeAudio?.pause();
@@ -3545,7 +3567,13 @@ SOFTWARE.
   function closePopover(keepReading = false) {
     const wasOpen = !popover.hidden;
     resetInternalLookup(); cancelInternalSelection(); popover.hidden = true; stopQuery(); stopAudio();
-    if (wasOpen && !keepReading) releaseReadingMarker();
+    if (popover.querySelector('.sentence-result')) popover.replaceChildren();
+    if (wasOpen && readingMarker?.transient) {
+      clearReadingMarker();
+    } else if (wasOpen && !keepReading) releaseReadingMarker();
+    if (wasOpen && lastSelectionTransient) {
+      lastSelection = ''; lastSelectionAt = 0; lastSelectionTransient = false;
+    }
   }
   function openStudio(nextScreen) {
     updateViewport();
@@ -3565,6 +3593,7 @@ SOFTWARE.
     resetInternalLookup();
     librarySheet?.close(false);
     cancelInternalSelection();
+    if (classifyQuery(input.value)?.type === 'sentence') input.value = '';
     overlay.hidden = true;
     releaseReadingMarker();
     clearTimeout(reviewTimer);
@@ -3590,7 +3619,7 @@ SOFTWARE.
     launcher.hidden = currentSite.disabled;
     if (changed) {
       stopActivity();
-      lastSelection = '';
+      lastSelection = ''; lastSelectionAt = 0; lastSelectionTransient = false;
       if (currentSite.disabled) {
         closeStudio();
         host.remove();
@@ -3651,7 +3680,7 @@ SOFTWARE.
     if (event.key === 'Escape' && !popover.hidden) closePopover();
   });
 
-  function request(url, lookupRequest = false) {
+  function request(url, lookupRequest = false, noCache = false) {
     syncSite();
     if (currentSite.disabled && overlay.hidden) throw new Error('当前网页已禁用，查询已取消');
     const epoch = activityEpoch;
@@ -3665,10 +3694,10 @@ SOFTWARE.
       // Anonymous requests force fetch mode, whose native timeout is ignored on Chrome.
       timer = setTimeout(() => { reject(new Error('请求超时，请稍后重试')); handle?.abort(); }, 10000);
       handle = GM_xmlhttpRequest({
-        method: 'GET', url, timeout: 10000, anonymous: true,
+        method: 'GET', url, timeout: 10000, anonymous: true, ...(noCache ? { nocache: true } : {}),
         onload: response => {
           try { checkActivity(epoch); } catch (error) { reject(error); return; }
-          if (response.status === 404) { reject(new Error('没有找到这个词，试试原形或其他拼写')); return; }
+          if (response.status === 404 && !noCache) { reject(new Error('没有找到这个词，试试原形或其他拼写')); return; }
           if (response.status < 200 || response.status >= 300) { reject(new Error(`服务暂不可用（${response.status}），请稍后重试`)); return; }
           try {
             if (response.responseText.length > 300000) throw new Error('服务响应过大');
@@ -3679,7 +3708,7 @@ SOFTWARE.
         ontimeout: () => reject(new Error('请求超时，请稍后重试')),
         onabort: () => reject(new Error('查询已取消'))
       });
-      if (lookupRequest) activeRequest = handle;
+      if (lookupRequest) activeRequest = tracked;
     });
     return pending.finally(() => { clearTimeout(timer); requests.delete(tracked); });
   }
@@ -3725,9 +3754,9 @@ SOFTWARE.
   function readingElement(node) {
     const element = node instanceof Element ? node : node?.parentElement;
     if (!element || element.closest('button,a,input,textarea,select,[contenteditable]:not([contenteditable="false"])')) return null;
-    return element.closest('.word,.definition,.example,.translation-copy,.word-forms,.context,.context-line,.recall-prompt');
+    return element.closest('.word,.definition,.example,.translation-copy,.word-forms,.context,.context-line,.recall-prompt,.sentence-original');
   }
-  function selectedInternalWord() {
+  function selectedInternalQuery() {
     const selection = typeof shadow.getSelection === 'function' ? shadow.getSelection() : window.getSelection();
     if (!selection) return;
     let range;
@@ -3746,22 +3775,26 @@ SOFTWARE.
     if (!start || start !== readingElement(range.endContainer)) return;
     const target = start.closest('.popover,.detail-pane,.view');
     if (!target || target.hidden || !target.getClientRects().length || (target !== popover && overlay.hidden)) return;
-    const word = normalize(range.toString());
-    if (!word || word === normalize(target.querySelector('.word')?.textContent)) return;
-    return { selection, word, target };
+    const query = classifyQuery(range.toString());
+    if (!query || query.type === 'word' && query.value === normalize(target.querySelector('.word')?.textContent)) return;
+    return { selection, query, target };
   }
   function lookupInternalSelection() {
     cancelInternalSelection();
-    const selected = selectedInternalWord();
+    const selected = selectedInternalQuery();
     if (!selected) return;
     selected.selection.removeAllRanges();
-    beginInternalLookup(selected.word, selected.target);
+    if (selected.query.type === 'sentence' && selected.query.value.length > MAX_SENTENCE_LENGTH) {
+      message(`英文翻译最多支持 ${MAX_SENTENCE_LENGTH} 个字符，请缩短后重试`);
+      return;
+    }
+    beginInternalLookup(selected.query.value, selected.target);
   }
   function scheduleInternalSelection() {
     cancelInternalSelection();
     if (internalPointerDown) return;
     try {
-      if (selectedInternalWord()) internalSelectionTimer = setTimeout(() => {
+      if (selectedInternalQuery()) internalSelectionTimer = setTimeout(() => {
         try { lookupInternalSelection(); } catch (error) { showError(error); }
       }, 220);
     } catch (error) { showError(error); }
@@ -3775,7 +3808,7 @@ SOFTWARE.
     cancelInternalSelection();
     const reading = readingElement(event.composedPath()[0]);
     internalPointerDown = event.button === 0 && Boolean(reading);
-    if (event.button === 0 && !reading) selectedInternalWord()?.selection.removeAllRanges();
+    if (event.button === 0 && !reading) selectedInternalQuery()?.selection.removeAllRanges();
   });
   shadow.addEventListener('scroll', cancelInternalSelection, true);
   shadow.addEventListener('selectionchange', scheduleInternalSelection);
@@ -3783,7 +3816,8 @@ SOFTWARE.
 
   function navigationFrame(target) {
     return {
-      nodes: [...target.childNodes], word: target.querySelector('.word')?.textContent || '复习',
+      nodes: [...target.childNodes], word: target.querySelector('.word')?.textContent ||
+        (target.querySelector('.sentence-result') ? '句子翻译' : screen === 'review' ? '复习' : '学习中心'),
       focus: shadow.activeElement,
       scroll: [target, ...target.querySelectorAll('div,article,section')].map(node => ({ node, top: node.scrollTop, left: node.scrollLeft }))
     };
@@ -3811,13 +3845,13 @@ SOFTWARE.
     if (frame.focus?.getClientRects().length) frame.focus.focus({ preventScroll: true });
     else (target.querySelector('.lookup-back') || target).focus({ preventScroll: true });
   }
-  function beginInternalLookup(word, target) {
+  function beginInternalLookup(raw, target) {
     if (internalLookup && internalLookup.target !== target) resetInternalLookup();
     if (!internalLookup) internalLookup = { target, frames: [] };
     internalLookup.frames.push(navigationFrame(target));
     cancelInternalSelection();
     stopAudio();
-    lookup(word, null, null, target).catch(showError);
+    lookup(raw, null, null, target).catch(showError);
     target.querySelector('.lookup-back')?.focus({ preventScroll: true });
   }
   function internalResult(target, ...nodes) {
@@ -3833,8 +3867,21 @@ SOFTWARE.
   async function lookup(raw, rect, context = null, target = null) {
     syncSite();
     if (currentSite.disabled && overlay.hidden) { message('当前网页已禁用，请从油猴菜单手动打开学习中心'); return; }
-    const word = normalize(raw);
-    if (!word) { message('请输入单个英文单词，支持内部连字符和撇号'); return; }
+    const query = classifyQuery(raw);
+    if (!query) { message('请输入英文单词，或包含多个英文词的短语、句子'); return; }
+    if (query.type === 'sentence') {
+      if (query.value.length > MAX_SENTENCE_LENGTH) {
+        message(`英文翻译最多支持 ${MAX_SENTENCE_LENGTH} 个字符，请缩短后重试`);
+        return;
+      }
+      if (!target && !overlay.hidden) {
+        input.value = '';
+        beginInternalLookup(query.value, view);
+        return;
+      }
+      return translateSentence(query.value, rect, target);
+    }
+    const word = query.value;
     if (!target) { resetInternalLookup(); cancelInternalSelection(); }
     stopQuery();
     const epoch = queryEpoch;
@@ -3920,6 +3967,53 @@ SOFTWARE.
       } else showError(error);
     } finally { if (epoch === queryEpoch) activeRequest = null; }
   }
+  async function translateSentence(source, rect, target) {
+    if (!target) { resetInternalLookup(); cancelInternalSelection(); }
+    stopQuery();
+    const epoch = queryEpoch;
+    const activity = activityEpoch;
+    const current = () => { syncSite(); return epoch === queryEpoch; };
+    const check = () => {
+      checkActivity(activity);
+      if (epoch !== queryEpoch) throw new Error('查询已取消');
+    };
+    const panel = el('article', 'sentence-result');
+    const original = el('p', 'sentence-original', source);
+    original.setAttribute('lang', 'en');
+    const output = el('section', 'translation');
+    output.setAttribute('aria-live', 'polite');
+    panel.append(el('h2', 'sentence-heading', '英文翻译'), el('div', 'pos', '原文'), original,
+      output, el('p', 'notice', '仅本次显示，原文和译文不会保存'));
+    output.append(el('div', 'pos', '中文译文'), el('p', 'muted', '正在翻译…'));
+    const retry = () => translateSentence(source, rect, target);
+    cancelSentence = () => output.replaceChildren(el('div', 'pos', '中文译文'),
+      el('p', 'notice', '翻译已取消，可重试'), button('重试', retry));
+    if (target) internalResult(target, panel);
+    else {
+      popover.replaceChildren(popHeader(), panel);
+      positionPopover(rect);
+    }
+    try {
+      const { translation, translationProvider, primaryError } = await machineTranslationWithFallback(source, check, true);
+      check();
+      const translated = el('div', 'translation-copy', translation);
+      translated.setAttribute('lang', 'zh-CN');
+      output.replaceChildren(el('div', 'pos', translationProvider === 'google'
+        ? '中文译文 · Google Translate（备用）' : '中文译文 · MyMemory'), translated);
+      if (primaryError) output.append(el('p', 'notice', `MyMemory：${primaryError.message}；已使用 Google Translate 备用翻译`));
+    } catch (error) {
+      if (!current()) return;
+      output.replaceChildren(el('div', 'pos', '中文译文'), el('p', 'error', error.message),
+        button('重试', retry));
+    } finally {
+      if (epoch === queryEpoch) {
+        activeRequest = null;
+        cancelSentence = null;
+        if (!target) positionPopover(rect);
+        else if (target === popover) positionPopover(null, true);
+      }
+    }
+  }
   function speak(entry) {
     stopAudio();
     const epoch = audioEpoch;
@@ -3946,14 +4040,14 @@ SOFTWARE.
     });
   }
   const translations = new Map();
-  async function machineTranslation(source, provider, check) {
+  async function machineTranslation(source, provider, check, transient = false) {
     const translated = [];
     for (const chunk of translationChunks(source)) {
       check();
       let value;
       if (provider === 'google') {
         if (cleanSettings(get('settings', {})).translationFallback !== 'google') throw new Error('备用翻译已关闭');
-        const result = await request('https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=zh-CN&dt=t&q=' + encodeURIComponent(chunk));
+        const result = await request('https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=zh-CN&dt=t&q=' + encodeURIComponent(chunk), transient, transient);
         const segments = result?.[0];
         if (!Array.isArray(segments) || !segments.length ||
           !segments.every(segment => Array.isArray(segment) && typeof segment[0] === 'string')) {
@@ -3961,7 +4055,7 @@ SOFTWARE.
         }
         value = segments.map(segment => segment[0]).join('');
       } else {
-        const result = await request('https://api.mymemory.translated.net/get?langpair=en%7Czh-CN&q=' + encodeURIComponent(chunk));
+        const result = await request('https://api.mymemory.translated.net/get?langpair=en%7Czh-CN&q=' + encodeURIComponent(chunk), transient, transient);
         value = result?.responseData?.translatedText;
         if (Number(result?.responseStatus) !== 200 || result?.quotaFinished) {
           throw new Error('中文服务暂不可用或额度已用尽，可稍后重试');
@@ -3973,6 +4067,20 @@ SOFTWARE.
     const translation = translated.join('\n');
     if (translation.length > 16000) throw new Error('中文响应过长，请稍后重试');
     return translation;
+  }
+  async function machineTranslationWithFallback(source, check, transient = false) {
+    try {
+      return { translation: await machineTranslation(source, 'mymemory', check, transient), translationProvider: 'mymemory' };
+    } catch (error) {
+      check();
+      if (cleanSettings(get('settings', {})).translationFallback !== 'google') throw error;
+      try {
+        return { translation: await machineTranslation(source, 'google', check, transient),
+          translationProvider: 'google', primaryError: error };
+      } catch (fallbackError) {
+        throw new Error(`${error.message}；Google Translate：${fallbackError.message}`);
+      }
+    }
   }
   function translate(entry, provider) {
     const source = translationSource(entry);
@@ -3993,19 +4101,7 @@ SOFTWARE.
             if (!current) throw new Error('词条已删除，请重新查询');
             if (translationSource(current) !== source) throw new Error('词典释义已更新，请重新获取中文');
           };
-          try {
-            translation = await machineTranslation(source, 'mymemory', check);
-          } catch (error) {
-            check();
-            if (cleanSettings(get('settings', {})).translationFallback !== 'google') throw error;
-            primaryError = error;
-            try {
-              translation = await machineTranslation(source, 'google', check);
-              translationProvider = 'google';
-            } catch (fallbackError) {
-              throw new Error(`${error.message}；Google Translate：${fallbackError.message}`);
-            }
-          }
+          ({ translation, translationProvider, primaryError } = await machineTranslationWithFallback(source, check));
         }
         checkActivity(epoch);
         const current = get('word:' + entry.word);
@@ -5182,7 +5278,7 @@ SOFTWARE.
     translationFallback.value = settings.translationFallback;
     translationFallback.addEventListener('change', () => save('translationFallback', translationFallback.value, () => { translationFallback.value = settings.translationFallback; }, false));
     translationRow.append(el('span', '', 'MyMemory 不可用时的回落来源（fallback）'), translationFallback);
-    chinese.append(translationRow, el('p', 'notice', 'MyMemory 限流、额度耗尽、超时或返回异常时，自动向 Google Translate 发送相同的英文释义。成功后标注备用来源并缓存，可手动重试 MyMemory；关闭只停止新增备用请求，已有缓存保留。有道始终独立显示。Google 无密钥接口不保证可用性，部分网络可能无法访问。'));
+    chinese.append(translationRow, el('p', 'notice', 'MyMemory 限流、额度耗尽、超时或返回异常时，自动向 Google Translate 发送相同的英文释义或句子。单词释义成功后标注备用来源并缓存；句子翻译仅本次显示，不保存。关闭只停止新增备用请求，已有单词缓存保留。有道始终独立显示。Google 无密钥接口不保证可用性，部分网络可能无法访问。'));
     const phonetics = el('section', 'section');
     phonetics.append(el('h3', '', '音标'));
     const phoneticRow = el('label', 'setting fallback-setting');
@@ -5208,7 +5304,7 @@ SOFTWARE.
     actions.append(button('导入 JSON 合并', () => upload.click()));
     data.append(actions, upload, restoreRow, el('p', 'notice', `JSON 包含完整历史、复习进度和网页禁用规则，导出与导入上限均为 ${BACKUP_MIB} MiB。导入默认保留本机设置与禁用规则，CSV 便于表格查看。`));
     const privacy = el('section', 'section');
-    privacy.append(el('h3', '', '服务与隐私'), el('p', 'notice', '查词会向 Free Dictionary API 发送当前单词；缺少对应缓存时，向 MyMemory 发送最多 6 条英文释义、向有道发送当前单词，分别获取并同时显示两路中文。启用翻译回落后，MyMemory 失败时向 Google Translate 发送相同释义。获取音标和词形同样向有道发送单词，词形补全可能另查原形；进行中的有道请求复用。启用额外音标备用来源后，在有道失败且主词典无音标时向 Datamuse 发送当前单词。成功后本地保存，再次打开直接读取。网页上下文不会发送给词典服务。在线音频和浏览器朗读可能联网。服务可用性、内容与额度由提供方决定。'),
+    privacy.append(el('h3', '', '服务与隐私'), el('p', 'notice', '查词会向 Free Dictionary API 发送当前单词；缺少对应缓存时，向 MyMemory 发送最多 6 条英文释义、向有道发送当前单词，分别获取并同时显示两路中文。句子翻译向 MyMemory 发送所选原文，启用回落时失败后发送给 Google Translate；句子原文和译文不保存到本插件，第三方是否留存由其政策决定。获取音标和词形同样向有道发送单词，词形补全可能另查原形；进行中的有道请求复用。启用额外音标备用来源后，在有道失败且主词典无音标时向 Datamuse 发送当前单词。单词结果成功后本地保存，再次打开直接读取。网页上下文不会发送给词典服务。在线音频和浏览器朗读可能联网。服务可用性、内容与额度由提供方决定。'),
       link('Free Dictionary API', 'https://dictionaryapi.dev/'), document.createTextNode(' · '),
       link('MyMemory', 'https://mymemory.translated.net/doc/spec.php'), document.createTextNode(' · '),
       link('Google Translate', 'https://translate.google.com/'), document.createTextNode(' · '),
@@ -5237,9 +5333,6 @@ SOFTWARE.
     view.append(preferences, study, chinese, phonetics, renderNutstore(), data, privacy, cleanup);
   }
 
-  let selectionTimer;
-  let lastSelection = '';
-  let lastSelectionAt = 0;
   document.addEventListener('pointerup', event => {
     if (!checkSite()) return;
     clearTimeout(selectionTimer);
@@ -5259,17 +5352,21 @@ SOFTWARE.
       const anchor = selection.anchorNode?.parentElement;
       if (anchor?.closest('input,textarea,[contenteditable]:not([contenteditable="false"])')) return;
       const raw = selection.toString();
-      const word = normalize(raw);
-      if (!word) return;
+      const query = classifyQuery(raw);
+      if (!query) return;
+      if (query.type === 'sentence' && query.value.length > MAX_SENTENCE_LENGTH) {
+        message(`英文翻译最多支持 ${MAX_SENTENCE_LENGTH} 个字符，请缩短后重试`);
+        return;
+      }
       const range = selection.getRangeAt(0);
-      if (word === lastSelection && Date.now() - lastSelectionAt < 1200) {
-        captureReadingMarker(range);
+      if (query.value === lastSelection && Date.now() - lastSelectionAt < 1200) {
+        captureReadingMarker(range, query.type === 'sentence');
         if (popover.hidden) releaseReadingMarker();
         return;
       }
-      lastSelection = word; lastSelectionAt = Date.now();
+      lastSelection = query.value; lastSelectionAt = Date.now(); lastSelectionTransient = query.type === 'sentence';
       let context = null;
-      if (settings.context) {
+      if (query.type === 'word' && settings.context) {
         const block = anchor?.closest('p,li,td,blockquote,figcaption') || anchor;
         const body = block?.textContent || '';
         const index = body.toLowerCase().indexOf(raw.toLowerCase());
@@ -5279,8 +5376,8 @@ SOFTWARE.
           title: text(document.title, 120), sourceUrl: safeUrl(url.href)
         };
       }
-      captureReadingMarker(range);
-      lookup(word, range.getBoundingClientRect(), context).catch(showError);
+      captureReadingMarker(range, query.type === 'sentence');
+      lookup(query.value, range.getBoundingClientRect(), context).catch(showError);
     }, 220);
   });
   window.addEventListener('resize', () => {

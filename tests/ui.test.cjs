@@ -155,7 +155,7 @@ function setup(phonetic = '/test/', phoneticSource = 'youdao', options = {}) {
 const findButton = (shadow, label) => shadow.querySelectorAll('button').find(node => node.textContent.startsWith(label));
 test('opening the studio on a scaled-down mobile page does not focus the search field', async () => {
   const desktop = setup();
-  assert.equal(desktop.shadow.activeElement.getAttribute('aria-label'), '查询英文单词');
+  assert.equal(desktop.shadow.activeElement.getAttribute('aria-label'), '查询英文单词或句子');
 
   const app = setup('/test/', 'youdao', {
     open: false, viewport: { width: 980, height: 1900, scale: 0.4, offsetTop: 0, offsetLeft: 0 }
@@ -1940,6 +1940,277 @@ async function selectInside(app, node, raw, collapsed = false) {
 }
 const historyOf = app => [...app.storage.entries()].filter(([key]) => key.startsWith(app.prefix + 'event:')).map(([, event]) => event);
 
+test('website sentence translation is temporary, uncached, cancellable and repeatable after closing', async () => {
+  const app = setup('/test/', 'youdao', { open: false, settings: { autoBook: true, context: true } });
+  const { shadow, context, storage, click } = app;
+  const before = json([...storage]);
+  const requests = [];
+  let aborted = 0;
+  context.GM_xmlhttpRequest = request => { requests.push(request); return { abort() { aborted++; } }; };
+  const source = 'A small sentence without punctuation';
+  selectWebsite(app, source);
+  app.advance(220);
+  await new Promise(setImmediate);
+  const popover = shadow.querySelector('.popover');
+  assert.equal(popover.querySelector('.sentence-original').textContent, source);
+  assert.equal(requests.length, 1);
+  assert.equal(new URL(requests[0].url).searchParams.get('q'), source);
+  assert.equal(requests[0].anonymous, true);
+  assert.equal(requests[0].nocache, true);
+  requests[0].onload({ status: 200, responseText: JSON.stringify({
+    responseStatus: 200, responseData: { translatedText: '一个小句子' }
+  }) });
+  await new Promise(setImmediate);
+  assert.equal(popover.querySelector('.translation-copy').textContent, '一个小句子');
+  assert.ok(textOf(popover).includes('MyMemory'));
+  assert.equal(popover.querySelector('.detail-star'), null);
+  assert.deepEqual(json([...storage]), before, 'sentence translation changes no stored data, including context and auto-book');
+  assert.equal(shadow.querySelector('.reading-marks').children.length, 1);
+  await click(findButton(popover, '×'));
+  assert.equal(popover.children.length, 0, 'closing removes the original and translation from the card');
+  assert.equal(shadow.querySelector('.reading-marks').children.length, 0, 'sentence marker is removed immediately');
+  selectWebsite(app, source);
+  app.advance(220);
+  await new Promise(setImmediate);
+  assert.equal(requests.length, 2, 'reselecting the same sentence makes a new request');
+  await click(findButton(popover, '×'));
+  assert.equal(aborted, 1);
+  requests[1].onload({ status: 200, responseText: JSON.stringify({
+    responseStatus: 200, responseData: { translatedText: '迟到的译文' }
+  }) });
+  await new Promise(setImmediate);
+  assert.equal(popover.children.length, 0);
+  assert.deepEqual(json([...storage]), before);
+});
+
+test('manual sentence translation preserves the current view and words still use normal history and auto-book', async () => {
+  const app = setup('/test/', 'youdao', { settings: { auto: false, autoBook: true, context: true } });
+  const { shadow, context, storage, click, prefix } = app;
+  const requests = [];
+  context.GM_xmlhttpRequest = request => { requests.push(request); return { abort() {} }; };
+  await click(shadow.querySelector('.item'));
+  const pane = shadow.querySelector('.detail-pane');
+  const original = pane.querySelector('article');
+  const before = json([...storage]);
+  const input = shadow.querySelector('.search').querySelector('input');
+  input.value = 'take off';
+  await click(shadow.querySelector('.search').querySelector('button'));
+  assert.equal(input.value, '', 'the submitted sentence is cleared from the search input');
+  const view = shadow.querySelector('.view');
+  assert.equal(view.querySelector('.sentence-original').textContent, 'take off');
+  requests[0].onload({ status: 200, responseText: JSON.stringify({
+    responseStatus: 200, responseData: { translatedText: '起飞' }
+  }) });
+  await new Promise(setImmediate);
+  assert.equal(view.querySelector('.translation-copy').textContent, '起飞');
+  assert.deepEqual(json([...storage]), before);
+  await click(view.querySelector('.lookup-back'));
+  assert.equal(pane.querySelector('article'), original);
+  assert.equal(view.querySelector('.sentence-result'), null);
+  input.value = '“Beta!”';
+  await click(shadow.querySelector('.search').querySelector('button'));
+  assert.equal(historyOf(app).at(-1).word, 'beta');
+  assert.ok(storage.has(prefix + 'study:beta'));
+  assert.equal(requests.length, 1, 'cached single words still follow the existing lookup path');
+});
+
+test('sentence translation respects disabled sites while remaining available in manually opened study', async () => {
+  const rule = { type: 'domain', value: 'docs.example.com' };
+  const app = setup('/test/', 'youdao', { open: false, rules: [rule] });
+  const { context, storage, menus, click } = app;
+  const requests = [];
+  context.GM_xmlhttpRequest = request => { requests.push(request); return { abort() {} }; };
+  await menus.get('打开 Lexi 学习中心（手动）')();
+  const before = json([...storage]);
+  const search = app.shadow.querySelector('.search');
+  search.querySelector('input').value = 'Manual translation still works.';
+  await click(search.querySelector('button'));
+  requests[0].onload({ status: 200, responseText: JSON.stringify({
+    responseStatus: 200, responseData: { translatedText: '手动翻译仍可使用。' }
+  }) });
+  await new Promise(setImmediate);
+  assert.equal(app.shadow.querySelector('.sentence-result').querySelector('.translation-copy').textContent, '手动翻译仍可使用。');
+  assert.deepEqual(json([...storage]), before);
+  await click(app.shadow.querySelectorAll('button').find(node => node.getAttribute('aria-label') === '关闭学习中心'));
+  assert.equal(context.document.documentElement.children.length, 0);
+  selectWebsite(app, 'A disabled page sentence.');
+  app.advance(220);
+  await new Promise(setImmediate);
+  assert.equal(requests.length, 1);
+  assert.deepEqual(json([...storage]), before);
+});
+
+test('a newer sentence cancels the previous request and prevents late chunks or results', async () => {
+  const app = setup('/test/', 'youdao', { open: false });
+  const { shadow, context, storage } = app;
+  const before = json([...storage]);
+  const requests = [];
+  let aborted = 0;
+  context.GM_xmlhttpRequest = request => { requests.push(request); return { abort() { aborted++; } }; };
+  selectWebsite(app, 'Old source to cancel. '.repeat(30));
+  app.advance(220);
+  await new Promise(setImmediate);
+  selectWebsite(app, 'The newest sentence.');
+  app.advance(220);
+  await new Promise(setImmediate);
+  assert.equal(aborted, 1);
+  assert.equal(requests.length, 2);
+  requests[0].onload({ status: 200, responseText: JSON.stringify({
+    responseStatus: 200, responseData: { translatedText: '旧内容' }
+  }) });
+  await new Promise(setImmediate);
+  assert.equal(requests.length, 2, 'cancellation prevents further old chunks or fallback requests');
+  requests[1].onload({ status: 200, responseText: JSON.stringify({
+    responseStatus: 200, responseData: { translatedText: '新内容' }
+  }) });
+  await new Promise(setImmediate);
+  assert.equal(shadow.querySelector('.sentence-original').textContent, 'The newest sentence.');
+  assert.equal(shadow.querySelector('.translation-copy').textContent, '新内容');
+  assert.deepEqual(json([...storage]), before);
+});
+
+test('returning from a word selected during sentence translation offers a retry instead of a stuck loader', async () => {
+  const app = setup('/test/', 'youdao', { open: false });
+  const { shadow, context, click } = app;
+  const requests = [];
+  let aborted = 0;
+  context.GM_xmlhttpRequest = request => { requests.push(request); return { abort() { aborted++; } }; };
+  selectWebsite(app, 'alpha beta');
+  app.advance(220);
+  await new Promise(setImmediate);
+  const popover = shadow.querySelector('.popover');
+  await selectInside(app, popover.querySelector('.sentence-original'), 'alpha');
+  assert.equal(aborted, 1);
+  assert.equal(popover.querySelector('.word').textContent, 'alpha');
+  await press(app, 'Escape');
+  assert.equal(popover.querySelector('.sentence-original').textContent, 'alpha beta');
+  assert.ok(textOf(popover).includes('翻译已取消'));
+  await click(findButton(popover, '重试'));
+  assert.equal(requests.length, 2);
+  requests[1].onload({ status: 200, responseText: JSON.stringify({
+    responseStatus: 200, responseData: { translatedText: '重新翻译' }
+  }) });
+  await new Promise(setImmediate);
+  assert.equal(popover.querySelector('.translation-copy').textContent, '重新翻译');
+});
+
+test('internal sentence translation works while webpage selection is paused and restores the review without grading', async () => {
+  const app = setup('/test/', 'youdao', { settings: { auto: false, autoBook: true, reviewCacheOnly: true } });
+  const { shadow, context, storage, click, prefix } = app;
+  const requests = [];
+  context.GM_xmlhttpRequest = request => { requests.push(request); return { abort() {} }; };
+  await openReview(app);
+  await click(findButton(shadow, '显示释义'));
+  const answer = shadow.querySelector('.review-answer');
+  const before = json([...storage]);
+  await selectInside(app, answer.querySelector('.definition'), 'A useful example.');
+  const view = shadow.querySelector('.view');
+  assert.equal(view.querySelector('.sentence-original').textContent, 'A useful example.');
+  await press(app, '1');
+  assert.deepEqual(json([...storage]), before);
+  requests[0].onload({ status: 200, responseText: JSON.stringify({
+    responseStatus: 200, responseData: { translatedText: '一个有用的例子。' }
+  }) });
+  await new Promise(setImmediate);
+  assert.equal(view.querySelector('.translation-copy').textContent, '一个有用的例子。');
+  await press(app, 'Escape');
+  assert.equal(shadow.querySelector('.review-answer'), answer);
+  assert.equal(view.querySelector('.sentence-result'), null);
+  assert.deepEqual(json([...storage]), before);
+  await press(app, '3');
+  assert.equal(storage.get(prefix + 'study:alpha').reviews, 4);
+});
+
+test('sentence fallback restarts every chunk with Google without saving either provider response', async () => {
+  const app = setup();
+  const { shadow, context, storage, click } = app;
+  const before = json([...storage]);
+  const requests = [];
+  context.GM_xmlhttpRequest = request => { requests.push(request); return { abort() {} }; };
+  const input = shadow.querySelector('.search').querySelector('input');
+  const source = 'A useful example. '.repeat(35).trim();
+  input.value = source;
+  await click(shadow.querySelector('.search').querySelector('button'));
+  requests[0].onload({ status: 200, responseText: JSON.stringify({
+    responseStatus: 200, responseData: { translatedText: '不要混入' }
+  }) });
+  await new Promise(setImmediate);
+  assert.equal(requests.length, 2);
+  requests[1].onload({ status: 429, responseText: '{}' });
+  await new Promise(setImmediate);
+  assert.equal(requests.length, 3);
+  assert.equal(new URL(requests[2].url).origin, 'https://translate.googleapis.com');
+  assert.equal(new URL(requests[2].url).searchParams.get('q'), new URL(requests[0].url).searchParams.get('q'));
+  requests[2].onload({ status: 200, responseText: JSON.stringify([[['备用第一段']]]) });
+  await new Promise(setImmediate);
+  requests[3].onload({ status: 200, responseText: JSON.stringify([[['备用第二段']]]) });
+  await new Promise(setImmediate);
+  const result = shadow.querySelector('.sentence-result');
+  assert.equal(result.querySelector('.translation-copy').textContent, '备用第一段\n备用第二段');
+  assert.ok(textOf(result).includes('Google Translate（备用）'));
+  assert.ok(textOf(result).includes('MyMemory'));
+  assert.ok(requests.every(request => request.nocache && request.anonymous));
+  assert.deepEqual(json([...storage]), before);
+});
+
+test('sentence translation respects disabled fallback, reports errors and retries without caching', async () => {
+  const app = setup('/test/', 'youdao', { settings: { translationFallback: 'none' } });
+  const { shadow, context, storage, click } = app;
+  const before = json([...storage]);
+  const requests = [];
+  context.GM_xmlhttpRequest = request => { requests.push(request); return { abort() {} }; };
+  shadow.querySelector('.search').querySelector('input').value = 'A short sentence.';
+  await click(shadow.querySelector('.search').querySelector('button'));
+  requests[0].onerror();
+  await new Promise(setImmediate);
+  const result = shadow.querySelector('.sentence-result');
+  assert.ok(result.querySelector('.error').textContent.includes('网络连接失败'));
+  assert.equal(requests.length, 1);
+  await click(findButton(result, '重试'));
+  assert.equal(requests.length, 2);
+  requests[1].onload({ status: 200, responseText: JSON.stringify({
+    responseStatus: 200, responseData: { translatedText: '重试成功' }
+  }) });
+  await new Promise(setImmediate);
+  assert.equal(shadow.querySelector('.sentence-result').querySelector('.translation-copy').textContent, '重试成功');
+  assert.deepEqual(json([...storage]), before);
+});
+
+test('sentence length limit is enforced in all entry points without truncation or stray navigation', async () => {
+  const app = setup();
+  const { shadow, context, click } = app;
+  const requests = [];
+  let aborted = 0;
+  context.GM_xmlhttpRequest = request => { requests.push(request); return { abort() { aborted++; } }; };
+  const exact = 'a '.repeat(2499) + 'ab';
+  assert.equal(exact.length, 5000);
+  const input = shadow.querySelector('.search').querySelector('input');
+  input.value = exact + 'c';
+  await click(shadow.querySelector('.search').querySelector('button'));
+  assert.equal(requests.length, 0);
+  assert.equal(input.value.length, 5001, 'overlong input remains editable instead of being silently truncated');
+  assert.ok(shadow.querySelector('.toast').textContent.includes('5000'));
+  await click(shadow.querySelector('.item'));
+  const pane = shadow.querySelector('.detail-pane');
+  await selectInside(app, pane.querySelector('.definition'), exact + 'c');
+  assert.equal(requests.length, 0);
+  assert.equal(pane.querySelector('.lookup-back'), null);
+  input.value = exact;
+  await click(shadow.querySelector('.search').querySelector('button'));
+  assert.equal(requests.length, 1, 'exactly 5,000 characters are accepted');
+  assert.equal(shadow.querySelector('.sentence-original').textContent.length, 5000);
+  await click(shadow.querySelector('.view').querySelector('.lookup-back'));
+  assert.equal(aborted, 1);
+  input.value = exact + 'c';
+  await click(shadow.querySelectorAll('button').find(node => node.getAttribute('aria-label') === '关闭学习中心'));
+  assert.equal(input.value, '', 'closing also clears an overlong sentence that was not submitted');
+  selectWebsite(app, exact + 'c');
+  app.advance(220);
+  await new Promise(setImmediate);
+  assert.equal(requests.length, 1, 'overlong webpage selection is not sent');
+  assert.ok(shadow.querySelector('.toast').textContent.includes('5000'));
+});
+
 test('automatic internal lookup ignores the displayed word but still allows other words and earlier navigation words', async () => {
   const app = setup();
   const { shadow, click } = app;
@@ -2265,13 +2536,13 @@ test('review internal lookup preserves the revealed card and blocks grading unti
   assert.equal(storage.get(prefix + 'study:alpha').reviews, before.reviews + 1);
 });
 
-test('automatic internal lookup ignores controls, phrases, collapsed and cancelled selections', async () => {
+test('automatic internal lookup ignores controls, invalid text, collapsed and cancelled selections', async () => {
   const app = setup();
   const { shadow, click } = app;
   await click(shadow.querySelector('.item'));
   const definition = shadow.querySelector('.definition');
   for (const [node, raw, collapsed] of [
-    [definition, 'two words', false], [definition, 'beta', true],
+    [definition, 'abc123', false], [definition, 'beta', true],
     [findButton(shadow, '查询'), 'query', false], [shadow.querySelector('input'), 'beta', false],
     [app.context.document.activeElement, 'beta', false]
   ]) {
@@ -2279,7 +2550,7 @@ test('automatic internal lookup ignores controls, phrases, collapsed and cancell
     assert.equal(shadow.querySelector('.word').textContent, 'alpha');
     assert.equal(historyOf(app).length, 3);
   }
-  await selectInside(app, definition, 'two words');
+  await selectInside(app, definition, 'abc123');
   const range = { startContainer: definition, endContainer: definition, collapsed: false, toString: () => 'beta' };
   setSelection(app, range);
   app.context.document.listeners.selectionchange.listener();

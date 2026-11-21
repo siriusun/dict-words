@@ -21,7 +21,8 @@ async page => {
         word, fetchedAt: now, phonetic: '/test/', phoneticSource: 'youdao', wordForms: { base: word, forms: [] },
         audio: '', sourceUrl: '', license: { name: '', url: '' },
         meanings: [{ partOfSpeech: 'noun', definitions: [{ definition, example: 'Reading these words. '.repeat(70) }] }],
-        translation: '示例中文', translationSource: `1. noun: ${definition}`
+        translation: '示例中文', translationSource: `1. noun: ${definition}`,
+        youdaoTranslation: '有道示例', youdaoTranslatedAt: now, examples: [], examplesFetchedAt: now
       });
     }
     data.set(prefix + 'study:alpha', { word: 'alpha', addedAt: now - 1000, updatedAt: now - 1000,
@@ -112,7 +113,7 @@ async page => {
     window.__originalDetail = pane.querySelector('article');
     pane.scrollTop = 35;
   });
-  await click('input', '查询英文单词');
+  await click('input', '查询英文单词或句子');
   await page.keyboard.type('alpha');
   await page.keyboard.press('ControlOrMeta+A');
   await page.waitForTimeout(350);
@@ -149,11 +150,12 @@ async page => {
     const example = root.querySelector('.detail-pane .example');
     const range = document.createRange();
     range.selectNodeContents(example);
+    range.collapse(true);
     const selection = root.getSelection();
     selection.removeAllRanges(); selection.addRange(range);
   });
   await page.waitForTimeout(350);
-  check(await historyCount() === 3, 'Selecting a phrase does not query');
+  check(await historyCount() === 3, 'A collapsed selection does not query');
 
   await click('.tab', '复习');
   await click('button', '开始复习');
@@ -178,6 +180,7 @@ async page => {
   check(Boolean(await word('.detail-pane .word')), 'Narrow dark temporary detail is usable');
   await fits('.lookup-back');
   await page.keyboard.press('Escape');
+  await click('.library-sheet-bar button', '关闭');
   await click('button', '关闭学习中心');
   await page.evaluate(() => {
     window.__lexiData.set('lexi:v1:settings', { auto: true });
@@ -189,11 +192,11 @@ async page => {
   check(await word('.popover .word') === 'alpha', 'Website selection still opens the normal card');
   await page.mouse.move(0, 0);
   await favorite('.popover', 'alpha', true);
-  page.once('dialog', dialog => dialog.dismiss());
+  await page.evaluate(() => { window.confirm = () => false; });
   await click('.popover .detail-star', '取消收藏 alpha');
   await page.mouse.move(0, 0);
   await favorite('.popover', 'alpha', true);
-  page.once('dialog', dialog => dialog.accept());
+  await page.evaluate(() => { window.confirm = () => true; });
   const beforeUnstar = await historyCount();
   await click('.popover .detail-star', '取消收藏 alpha');
   await page.mouse.move(0, 0);
@@ -214,7 +217,130 @@ async page => {
   await click('.popover button', '关闭查词卡');
   check(await page.evaluate(() => window.__lexiShadow.querySelector('.popover').hidden), 'Close dismisses nested card');
   check(await page.evaluate(() => window.__lexiRequests === 0), 'Cached lookup and back make no network requests');
+  await page.evaluate(() => {
+    window.__sentenceRequests = [];
+    window.__beforeSentence = JSON.stringify([...window.__lexiData]);
+    window.GM_xmlhttpRequest = request => {
+      const url = new URL(request.url);
+      if (url.hostname !== 'api.mymemory.translated.net') throw new Error('Unexpected request: ' + url.hostname);
+      window.__sentenceRequests.push({ text: url.searchParams.get('q'), nocache: request.nocache, anonymous: request.anonymous });
+      const timer = setTimeout(() => request.onload({ status: 200, responseText: JSON.stringify({
+        responseStatus: 200, responseData: { translatedText: url.searchParams.get('q') === 'Make this translation long.'
+          ? '长译文'.repeat(250) : '模拟译文' }
+      }) }), 20);
+      return { abort() { clearTimeout(timer); request.onabort(); } };
+    };
+    const origin = document.querySelector('#phrase');
+    origin.textContent = 'alpha beta';
+    const range = document.createRange();
+    range.selectNodeContents(origin);
+    const selection = window.getSelection();
+    selection.removeAllRanges(); selection.addRange(range);
+    origin.dispatchEvent(new PointerEvent('pointerup', { button: 0, bubbles: true, composed: true }));
+  });
+  await page.waitForFunction(() => window.__lexiShadow.querySelector('.popover .translation-copy')?.textContent === '模拟译文');
+  check(await word('.popover .sentence-original') === 'alpha beta', 'Webpage phrases show the original text');
+  check(await page.evaluate(() => {
+    const request = window.__sentenceRequests[0];
+    return request.text === 'alpha beta' && request.nocache && request.anonymous &&
+      JSON.stringify([...window.__lexiData]) === window.__beforeSentence;
+  }), 'Webpage translation is anonymous, uncached and does not change stored data');
+  await fits('.popover');
+  await selectWord('.popover .sentence-original');
+  check(await word('.popover .word') === 'alpha', 'A word selected in the translation still uses the dictionary');
+  await page.keyboard.press('Escape');
+  check(await word('.popover .sentence-original') === 'alpha beta', 'Returning restores the temporary translation');
+  await click('.popover button', '关闭查词卡');
+  check(await page.evaluate(() => !window.__lexiShadow.querySelector('.popover').textContent.includes('alpha beta')),
+    'Closing removes the sentence from the hidden card');
+
+  await page.evaluate(() => {
+    window.__lexiData.set('lexi:v1:settings', { auto: false });
+    window.dispatchEvent(new Event('focus'));
+    const origin = document.querySelector('#phrase');
+    const range = document.createRange(); range.selectNodeContents(origin);
+    const selection = window.getSelection(); selection.removeAllRanges(); selection.addRange(range);
+    origin.dispatchEvent(new PointerEvent('pointerup', { button: 0, bubbles: true, composed: true }));
+  });
+  await page.waitForTimeout(300);
+  check(await page.evaluate(() => window.__sentenceRequests.length === 1), 'Paused webpage selection does not send sentences');
+  await click('.launcher');
+  await page.evaluate(() => { window.__beforeManualSentence = JSON.stringify([...window.__lexiData]); });
+  const search = await element('input', '查询英文单词或句子');
+  const longSentence = 'A useful sentence '.repeat(45).trim();
+  await search.fill(longSentence);
+  check((await search.inputValue()).length > 80, 'Manual search accepts sentences longer than the old word limit');
+  await search.press('Enter');
+  check(await search.inputValue() === '', 'Submitted sentence is cleared from the search input');
+  await search.dispose();
+  await page.waitForFunction(source => window.__lexiShadow.querySelector('.view .sentence-original')?.textContent === source
+    && Boolean(window.__lexiShadow.querySelector('.view .translation-copy')), longSentence);
+  check(await page.evaluate(() => JSON.stringify([...window.__lexiData]) === window.__beforeManualSentence),
+    'Manual translation does not change stored data');
+  check(await page.evaluate(() => {
+    const result = window.__lexiShadow.querySelector('.view .sentence-result');
+    result.scrollTop = result.scrollHeight;
+    return result.clientHeight > 0 && result.scrollTop > 0;
+  }), 'Long mobile translation results can be scrolled');
+  await fits('.lookup-back');
+  await page.keyboard.press('Escape');
+  check(await page.evaluate(() => !window.__lexiShadow.querySelector('.sentence-result')), 'Back removes the manual translation');
+
+  await click('.item');
+  await page.evaluate(() => {
+    const original = window.__lexiShadow.querySelector('.detail-pane .definition');
+    original.textContent = 'A phrase for internal lookup.';
+    window.__beforeInternalSentence = JSON.stringify([...window.__lexiData]);
+    const range = document.createRange(); range.selectNodeContents(original);
+    const selection = window.getSelection(); selection.removeAllRanges(); selection.addRange(range);
+    original.dispatchEvent(new PointerEvent('pointerup', { button: 0, bubbles: true, composed: true }));
+  });
+  await page.waitForFunction(() => window.__lexiShadow.querySelector('.detail-pane .sentence-original')?.textContent
+    === 'A phrase for internal lookup.' && Boolean(window.__lexiShadow.querySelector('.detail-pane .translation-copy')));
+  check(await page.evaluate(() => JSON.stringify([...window.__lexiData]) === window.__beforeInternalSentence),
+    'Internal selection translates while website lookup is paused without saving data');
+  await page.keyboard.press('Escape');
+  check(await word('.detail-pane .definition') === 'A phrase for internal lookup.', 'Back restores the previous mobile detail');
+  await click('.library-sheet-bar button', '关闭');
+  await click('button', '关闭学习中心');
+  check(await page.evaluate(() => !window.__lexiShadow.querySelector('.sentence-result')), 'Closing the studio leaves no sentence result');
+  await page.setViewportSize({ width: 1100, height: 800 });
+  await page.emulateMedia({ colorScheme: 'light' });
+  await page.evaluate(() => {
+    window.__lexiData.set('lexi:v1:settings', { auto: true });
+    window.dispatchEvent(new Event('focus'));
+    window.__beforeDesktopSentence = JSON.stringify([...window.__lexiData]);
+    const origin = document.querySelector('#phrase');
+    origin.textContent = 'A short desktop sentence.';
+    const range = document.createRange(); range.selectNodeContents(origin);
+    const selection = window.getSelection(); selection.removeAllRanges(); selection.addRange(range);
+    origin.dispatchEvent(new PointerEvent('pointerup', { button: 0, bubbles: true, composed: true }));
+  });
+  await page.waitForFunction(() => window.__lexiShadow.querySelector('.popover .translation-copy')?.textContent === '模拟译文');
+  await fits('.popover');
+  check(await page.evaluate(() => JSON.stringify([...window.__lexiData]) === window.__beforeDesktopSentence),
+    'Desktop translation also leaves stored data unchanged');
+  await click('.popover button', '关闭查词卡');
+  await page.evaluate(() => {
+    const origin = document.querySelector('#serendipity');
+    const range = document.createRange(); range.selectNodeContents(origin);
+    const selection = window.getSelection(); selection.removeAllRanges(); selection.addRange(range);
+    origin.dispatchEvent(new PointerEvent('pointerup', { button: 0, bubbles: true, composed: true }));
+  });
+  await page.waitForFunction(() => window.__lexiShadow.querySelector('.popover .word')?.textContent === 'alpha');
+  await page.evaluate(() => {
+    const root = window.__lexiShadow;
+    root.querySelector('.popover').style.top = (innerHeight - 160) + 'px';
+    const original = root.querySelector('.popover .definition');
+    original.textContent = 'Make this translation long.';
+    const range = document.createRange(); range.selectNodeContents(original);
+    const selection = window.getSelection(); selection.removeAllRanges(); selection.addRange(range);
+    original.dispatchEvent(new PointerEvent('pointerup', { button: 0, bubbles: true, composed: true }));
+  });
+  await page.waitForFunction(() => window.__lexiShadow.querySelector('.popover .sentence-result .translation-copy')?.textContent.length > 500);
+  await fits('.popover');
+  await click('.popover button', '关闭查词卡');
   check(errors.length === 0, 'Page errors: ' + errors.join('; '));
   await page.evaluate(() => { window.__lexiBrowserCheckPassed = true; });
-  return 'Closed-shadow browser checks passed: automatic selection lookup, no magnifier, input and phrase filtering, deduplicated history, nested back, favorites, review, narrow dark, website card and composed ranges.';
+  return 'Closed-shadow browser checks passed: word lookup, temporary sentence translation at all three entry points, no storage, navigation, paused selection, desktop and narrow dark layouts.';
 }

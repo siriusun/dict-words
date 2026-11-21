@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const test = require('node:test');
 const fs = require('node:fs');
 const { createHash } = require('node:crypto');
-const { normalize, schedule, scheduleAll, migrateStudy, createStudy, reviewInterval, csv, dictionary, validateBackup, mergeBackup, ordered, audioUrl, translationSource, translationChunks, youdaoTranslation, youdaoExamples, youdaoPhonetic, datamusePhonetic, youdaoWordForms,
+const { normalize, classifyQuery, schedule, scheduleAll, migrateStudy, createStudy, reviewInterval, csv, dictionary, validateBackup, mergeBackup, ordered, audioUrl, translationSource, translationChunks, youdaoTranslation, youdaoExamples, youdaoPhonetic, datamusePhonetic, youdaoWordForms,
   dayStart, nextDayStart, availableAt, planReview, createReviewSession, retentionStats, contextParts, isLeech,
   pageScope, siteState, validateSiteRules } = require('../lexi.user.js');
 const now = Date.UTC(2026, 10, 12);
@@ -81,6 +81,17 @@ test('vendored FSRS matches the pinned upstream bundle after whitespace normaliz
 test('only a single English word is queried; punctuation and contractions survive', () => {
   for (const [input, expected] of [['“Serendipity,”', 'serendipity'], ['DON’T', "don't"], ['mother-in-law', 'mother-in-law'], ['(hello)', 'hello'], ["'test'", 'test']]) assert.equal(normalize(input), expected);
   for (const input of ['hello world', 'abc123', '你好', '', 'a--b', '-test', 'x'.repeat(65), null, '<script>']) assert.equal(normalize(input), '');
+});
+test('query classification preserves single-word lookup and routes English phrases or sentences to translation', () => {
+  for (const [input, word] of [['“Apple!”', 'apple'], ['DON’T', "don't"], ['mother-in-law', 'mother-in-law']]) {
+    assert.deepEqual(classifyQuery(input), { type: 'word', value: word });
+  }
+  for (const input of ['take off', 'a beautiful day', 'Hello,world!', 'This is\nanother sentence.']) {
+    assert.deepEqual(classifyQuery('  ' + input + '  '), { type: 'sentence', value: input });
+  }
+  for (const input of ['', '你好', 'abc123', 'abc123-def', 'a--b', 'x'.repeat(65), null]) {
+    assert.equal(classifyQuery(input), null);
+  }
 });
 test('FSRS uses Anki learning steps and four grades without permanently retiring a word', () => {
   const results = ['again', 'hard', 'good', 'easy'].map(grade => schedule(study, grade, now));

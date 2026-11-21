@@ -1,6 +1,6 @@
 # Lexi：划词词典与个人复习库 · 初始设计
 
-> 复习部分已在 0.2.0 升级为成熟 FSRS 调度；当前规则、迁移与来源以 [REVIEW_DESIGN.md](REVIEW_DESIGN.md) 为准。下方固定阶梯记录的是初版设计。
+> 复习部分已在 0.2.0 升级为成熟 FSRS 调度；当前规则、迁移与来源以 [REVIEW_DESIGN.md](REVIEW_DESIGN.md) 为准。句子翻译已在 0.8.0 增加，当前功能以 [README.md](../README.md) 为准。下方记录的是初版设计。
 
 版本：0.1 / 2026-11-12。目标平台：桌面 Chrome、Edge、Firefox + Tampermonkey。
 
