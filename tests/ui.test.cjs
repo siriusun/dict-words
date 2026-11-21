@@ -1974,6 +1974,32 @@ test('touchscreen webpage selection waits for an explicit action and uses the ex
   assert.equal(new URL(requests[0].url).searchParams.get('q'), 'alpha beta, now.');
 });
 
+test('touch selection action stays at the bottom of the mobile viewport and temporarily hides the launcher', () => {
+  const app = setup('/test/', 'youdao', {
+    open: false, viewport: { width: 390, height: 844, scale: 1, offsetTop: 0, offsetLeft: 0 }
+  });
+  const { shadow, context } = app;
+  const selected = selectWebsite(app, 'alpha', 'touch');
+  app.advance(250);
+  const action = shadow.querySelector('.selection-action');
+  const launcher = shadow.querySelector('.launcher');
+
+  assert.equal(action.style.left, '145px');
+  assert.equal(action.style.top, '796px');
+  assert.ok(launcher.className.split(' ').includes('selection-active'));
+  assert.equal(launcher.inert, true);
+  assert.equal(launcher.getAttribute('aria-hidden'), 'true');
+
+  selected.setText('');
+  selected.selection.isCollapsed = true;
+  context.document.listeners.selectionchange.listener();
+  app.advance(0);
+  assert.equal(action.hidden, true);
+  assert.ok(!launcher.className.split(' ').includes('selection-active'));
+  assert.equal(launcher.inert, false);
+  assert.equal(launcher.getAttribute('aria-hidden'), null);
+});
+
 test('touchscreen selection inside the plugin also waits for an action while mouse selection stays automatic', async () => {
   const app = setup();
   const { shadow, context } = app;

@@ -3148,6 +3148,7 @@ SOFTWARE.
     button:focus-visible,a:focus-visible{outline:3px solid #75ac8c;outline-offset:3px}input:focus-visible,select:focus-visible{outline:none;background:var(--tint)}
     .launcher{pointer-events:auto;position:fixed;right:24px;bottom:24px;width:46px;height:46px;border:1px solid #ffffff40;border-radius:16px;background:var(--accent);color:white;box-shadow:0 6px 25px #102a2025;font:italic 28px Georgia,serif;touch-action:none;user-select:none;cursor:grab}
     .launcher.dragging{cursor:grabbing}
+    .launcher.selection-active{visibility:hidden;pointer-events:none}
     .selection-action{pointer-events:auto;position:fixed;z-index:4;min-height:44px;max-width:min(220px,calc(100vw - 24px));touch-action:manipulation;user-select:none;white-space:nowrap;box-shadow:0 5px 20px #102a2030}
     .popover{pointer-events:auto;position:fixed;width:min(380px,calc(100vw - 24px));max-height:70vh;overflow:auto;background:var(--surface);border:1px solid var(--line);border-radius:18px;box-shadow:0 16px 65px #102a2026;padding:22px}
     .popover-footer{margin-top:20px;padding-top:16px;border-top:1px solid var(--line)}.popover-footer .button{display:block;width:100%;min-height:44px}
@@ -3246,7 +3247,7 @@ SOFTWARE.
     .compact .tab{min-height:40px;padding:0 2px;text-align:center;font-size:12px}
     .compact .top{padding:4px 8px;gap:4px}.compact .search{gap:4px}.compact .search input{padding:5px 8px;font-size:16px}
     .compact .button,.compact .icon{min-height:36px}.compact .button{padding:5px 10px;font-size:13px}.compact .icon{min-width:36px}
-    .compact .selection-action{min-height:44px}
+    .compact .selection-action{min-height:44px;padding-bottom:max(8px,env(safe-area-inset-bottom))}
     .compact .usage-examples>.button,.compact .popover-footer .button{min-height:44px}
     .compact .view{padding:10px;overflow:auto;overflow-wrap:anywhere}
     .compact .view.scope-view{display:block}.compact .view.library{display:flex}
@@ -3784,20 +3785,32 @@ SOFTWARE.
     selectionActionRefreshTimer = undefined;
     pendingSelection = null;
     selectionAction.hidden = true;
+    launcher.classList.toggle('selection-active', false);
+    launcher.inert = false;
+    launcher.removeAttribute('aria-hidden');
   }
   function positionSelectionAction(range) {
     selectionAction.hidden = false;
+    launcher.classList.toggle('selection-active', compact);
+    launcher.inert = compact;
+    if (compact) launcher.setAttribute('aria-hidden', 'true');
+    else launcher.removeAttribute('aria-hidden');
     const viewport = compact ? visibleViewport : {
       left: 0, top: 0, width: window.innerWidth, height: window.innerHeight, scale: 1
     };
     const unit = Math.min(1, viewport.scale);
     const gap = 8 / unit;
-    const bounds = range.getBoundingClientRect();
     const { width, height } = selectionAction.getBoundingClientRect();
     const minLeft = viewport.left + gap;
     const minTop = viewport.top + gap;
     const maxLeft = Math.max(minLeft, viewport.left + viewport.width - width - gap);
     const maxTop = Math.max(minTop, viewport.top + viewport.height - height - gap);
+    if (compact) {
+      selectionAction.style.left = Math.max(minLeft, Math.min(maxLeft, viewport.left + (viewport.width - width) / 2)) + 'px';
+      selectionAction.style.top = Math.max(minTop, maxTop) + 'px';
+      return;
+    }
+    const bounds = range.getBoundingClientRect();
     const above = bounds.top - height - gap;
     const top = above >= minTop ? above : bounds.bottom + gap;
     selectionAction.style.left = Math.max(minLeft, Math.min(maxLeft, bounds.left)) + 'px';
