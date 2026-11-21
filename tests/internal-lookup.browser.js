@@ -222,12 +222,11 @@ async page => {
     window.__beforeSentence = JSON.stringify([...window.__lexiData]);
     window.GM_xmlhttpRequest = request => {
       const url = new URL(request.url);
-      if (url.hostname !== 'api.mymemory.translated.net') throw new Error('Unexpected request: ' + url.hostname);
+      if (url.hostname !== 'translate.googleapis.com') throw new Error('Unexpected request: ' + url.hostname);
       window.__sentenceRequests.push({ text: url.searchParams.get('q'), nocache: request.nocache, anonymous: request.anonymous });
-      const timer = setTimeout(() => request.onload({ status: 200, responseText: JSON.stringify({
-        responseStatus: 200, responseData: { translatedText: url.searchParams.get('q') === 'Make this translation long.'
-          ? '长译文'.repeat(250) : '模拟译文' }
-      }) }), 20);
+      const timer = setTimeout(() => request.onload({ status: 200, responseText: JSON.stringify([[[
+        url.searchParams.get('q') === 'Make this translation long.' ? '长译文'.repeat(250) : '模拟译文'
+      ]]]) }), 20);
       return { abort() { clearTimeout(timer); request.onabort(); } };
     };
     const origin = document.querySelector('#phrase');
@@ -396,7 +395,39 @@ async page => {
   await page.waitForFunction(() => window.__lexiShadow.querySelector('.popover .sentence-result .translation-copy')?.textContent.length > 500);
   await fits('.popover');
   await click('.popover button', '关闭查词卡');
+  await page.evaluate(() => {
+    window.__fallbackRequests = [];
+    window.__beforeFallbackSentence = JSON.stringify([...window.__lexiData]);
+    window.GM_xmlhttpRequest = request => {
+      const host = new URL(request.url).hostname;
+      window.__fallbackRequests.push({ host, method: request.method, data: request.data,
+        anonymous: request.anonymous, nocache: request.nocache });
+      const timer = setTimeout(() => {
+        if (host === 'translate.googleapis.com') request.onerror();
+        else if (host === 'edge.microsoft.com') request.onload({ status: 200,
+          responseText: JSON.stringify([{ translations: [{ text: '微软模拟译文', to: 'zh-Hans' }] }]) });
+        else throw new Error('Unexpected request: ' + host);
+      }, 20);
+      return { abort() { clearTimeout(timer); request.onabort(); } };
+    };
+    const origin = document.querySelector('#phrase');
+    origin.textContent = 'A Microsoft fallback sentence.';
+    const range = document.createRange(); range.selectNodeContents(origin);
+    const selection = window.getSelection(); selection.removeAllRanges(); selection.addRange(range);
+    origin.dispatchEvent(new PointerEvent('pointerup', { button: 0, pointerType: 'mouse', bubbles: true, composed: true }));
+  });
+  await page.waitForFunction(() => window.__lexiShadow.querySelector('.popover .translation-copy')?.textContent === '微软模拟译文');
+  check(await page.evaluate(() => {
+    const [google, microsoft] = window.__fallbackRequests;
+    return window.__fallbackRequests.length === 2 && google.host === 'translate.googleapis.com'
+      && microsoft.host === 'edge.microsoft.com' && microsoft.method === 'POST'
+      && JSON.parse(microsoft.data)[0] === 'A Microsoft fallback sentence.'
+      && google.anonymous && google.nocache && microsoft.anonymous && microsoft.nocache
+      && window.__lexiShadow.querySelector('.popover .sentence-result').textContent.includes('Microsoft Translator')
+      && JSON.stringify([...window.__lexiData]) === window.__beforeFallbackSentence;
+  }), 'Google failure displays Microsoft fallback without storing the sentence');
+  await click('.popover button', '关闭查词卡');
   check(errors.length === 0, 'Page errors: ' + errors.join('; '));
   await page.evaluate(() => { window.__lexiBrowserCheckPassed = true; });
-  return 'Closed-shadow browser checks passed: mouse auto-lookup, explicit touch selection, expanded-range translation, no storage, paused selection, desktop and narrow dark layouts.';
+  return 'Closed-shadow browser checks passed: sentence provider fallback, mouse and touch selection, no storage, paused selection, desktop and narrow dark layouts.';
 }

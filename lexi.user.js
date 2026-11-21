@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Lexi · 划词词典与复习
 // @namespace    lexi-local
-// @version      0.8.1
+// @version      0.8.2
 // @description  英文划词与句子翻译、触屏选区操作、发音、跨网站历史、生词复习与本地备份。
 // @match        http://*/*
 // @match        https://*/*
@@ -20,6 +20,7 @@
 // @connect      api.dictionaryapi.dev
 // @connect      api.mymemory.translated.net
 // @connect      translate.googleapis.com
+// @connect      edge.microsoft.com
 // @connect      dict.youdao.com
 // @connect      api.datamuse.com
 // @connect      dav.jianguoyun.com
@@ -3697,7 +3698,7 @@ SOFTWARE.
     }
   });
 
-  function request(url, lookupRequest = false, noCache = false) {
+  function request(url, lookupRequest = false, noCache = false, body) {
     syncSite();
     if (currentSite.disabled && overlay.hidden) throw new Error('当前网页已禁用，查询已取消');
     const epoch = activityEpoch;
@@ -3711,7 +3712,9 @@ SOFTWARE.
       // Anonymous requests force fetch mode, whose native timeout is ignored on Chrome.
       timer = setTimeout(() => { reject(new Error('请求超时，请稍后重试')); handle?.abort(); }, 10000);
       handle = GM_xmlhttpRequest({
-        method: 'GET', url, timeout: 10000, anonymous: true, ...(noCache ? { nocache: true } : {}),
+        method: body === undefined ? 'GET' : 'POST', url, timeout: 10000, anonymous: true,
+        ...(body === undefined ? {} : { data: body, headers: { 'Content-Type': 'application/json' } }),
+        ...(noCache ? { nocache: true } : {}),
         onload: response => {
           try { checkActivity(epoch); } catch (error) { reject(error); return; }
           if (response.status === 404 && !noCache) { reject(new Error('没有找到这个词，试试原形或其他拼写')); return; }
@@ -4121,13 +4124,14 @@ SOFTWARE.
       positionPopover(rect);
     }
     try {
-      const { translation, translationProvider, primaryError } = await machineTranslationWithFallback(source, check, true);
+      const { translation, translationProvider, failures } = await sentenceTranslation(source, check);
       check();
       const translated = el('div', 'translation-copy', translation);
       translated.setAttribute('lang', 'zh-CN');
-      output.replaceChildren(el('div', 'pos', translationProvider === 'google'
-        ? '中文译文 · Google Translate（备用）' : '中文译文 · MyMemory'), translated);
-      if (primaryError) output.append(el('p', 'notice', `MyMemory：${primaryError.message}；已使用 Google Translate 备用翻译`));
+      const providerLabel = sentenceProviderLabels[translationProvider];
+      output.replaceChildren(el('div', 'pos', `中文译文 · ${providerLabel}${failures.length ? '（备用）' : ''}`), translated);
+      if (failures.length) output.append(el('p', 'notice',
+        `${failures.map(({ provider, error }) => `${sentenceProviderLabels[provider]}：${error.message}`).join('；')}；已使用 ${providerLabel} 备用翻译`));
     } catch (error) {
       if (!current()) return;
       output.replaceChildren(el('div', 'pos', '中文译文'), el('p', 'error', error.message),
@@ -4167,27 +4171,37 @@ SOFTWARE.
     });
   }
   const translations = new Map();
+  const sentenceProviderLabels = { google: 'Google Translate', microsoft: 'Microsoft Translator', mymemory: 'MyMemory' };
   async function machineTranslation(source, provider, check, transient = false) {
     const translated = [];
     for (const chunk of translationChunks(source)) {
       check();
       let value;
       if (provider === 'google') {
-        if (cleanSettings(get('settings', {})).translationFallback !== 'google') throw new Error('备用翻译已关闭');
+        if (!transient && cleanSettings(get('settings', {})).translationFallback !== 'google') throw new Error('备用翻译已关闭');
         const result = await request('https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=zh-CN&dt=t&q=' + encodeURIComponent(chunk), transient, transient);
         const segments = result?.[0];
         if (!Array.isArray(segments) || !segments.length ||
           !segments.every(segment => Array.isArray(segment) && typeof segment[0] === 'string')) {
-          throw new Error('备用翻译返回格式异常，请稍后重试');
+          throw new Error('翻译服务返回格式异常，请稍后重试');
         }
         value = segments.map(segment => segment[0]).join('');
-      } else {
+      } else if (provider === 'microsoft') {
+        const result = await request('https://edge.microsoft.com/translate/translatetext?from=en&to=zh-Hans&isEnterpriseClient=false',
+          transient, transient, JSON.stringify([chunk]));
+        const candidates = result?.[0]?.translations;
+        if (!Array.isArray(result) || result.length !== 1 || !Array.isArray(candidates) || candidates.length !== 1 ||
+          typeof candidates[0]?.to !== 'string' || candidates[0].to.toLowerCase() !== 'zh-hans') {
+          throw new Error('翻译服务返回格式异常，请稍后重试');
+        }
+        value = candidates[0].text;
+      } else if (provider === 'mymemory') {
         const result = await request('https://api.mymemory.translated.net/get?langpair=en%7Czh-CN&q=' + encodeURIComponent(chunk), transient, transient);
         value = result?.responseData?.translatedText;
         if (Number(result?.responseStatus) !== 200 || result?.quotaFinished) {
           throw new Error('中文服务暂不可用或额度已用尽，可稍后重试');
         }
-      }
+      } else throw new Error('未知翻译服务');
       if (typeof value !== 'string' || !value.trim()) throw new Error('中文服务未返回有效翻译，请稍后重试');
       translated.push(value.trim());
     }
@@ -4195,14 +4209,32 @@ SOFTWARE.
     if (translation.length > 16000) throw new Error('中文响应过长，请稍后重试');
     return translation;
   }
-  async function machineTranslationWithFallback(source, check, transient = false) {
+  async function sentenceTranslation(source, check) {
+    const failures = [];
+    for (const [index, provider] of ['google', 'microsoft', 'mymemory'].entries()) {
+      check();
+      if (index && cleanSettings(get('settings', {})).translationFallback !== 'google') break;
+      const checkProvider = () => {
+        check();
+        if (index && cleanSettings(get('settings', {})).translationFallback !== 'google') throw new Error('备用翻译已关闭');
+      };
+      try {
+        return { translation: await machineTranslation(source, provider, checkProvider, true), translationProvider: provider, failures };
+      } catch (error) {
+        check();
+        failures.push({ provider, error });
+      }
+    }
+    throw new Error(failures.map(({ provider, error }) => `${sentenceProviderLabels[provider]}：${error.message}`).join('；'));
+  }
+  async function machineTranslationWithFallback(source, check) {
     try {
-      return { translation: await machineTranslation(source, 'mymemory', check, transient), translationProvider: 'mymemory' };
+      return { translation: await machineTranslation(source, 'mymemory', check), translationProvider: 'mymemory' };
     } catch (error) {
       check();
       if (cleanSettings(get('settings', {})).translationFallback !== 'google') throw error;
       try {
-        return { translation: await machineTranslation(source, 'google', check, transient),
+        return { translation: await machineTranslation(source, 'google', check),
           translationProvider: 'google', primaryError: error };
       } catch (fallbackError) {
         throw new Error(`${error.message}；Google Translate：${fallbackError.message}`);
@@ -5399,13 +5431,13 @@ SOFTWARE.
     chinese.append(el('h3', '', '中文释义'), el('p', 'notice', '英文释义的机器翻译与有道中文词典释义同时显示、分别缓存。有道释义不与英文逐条对应；每路独立显示加载、失败与重试状态，一路失败不影响另一路。'));
     const translationRow = el('label', 'setting fallback-setting');
     const translationFallback = el('select', 'translation-fallback');
-    for (const [value, label] of [['google', 'Google Translate（默认）'], ['none', '关闭备用翻译']]) {
+    for (const [value, label] of [['google', '开启自动回落（默认）'], ['none', '关闭备用翻译']]) {
       const option = el('option', '', label); option.value = value; translationFallback.append(option);
     }
     translationFallback.value = settings.translationFallback;
     translationFallback.addEventListener('change', () => save('translationFallback', translationFallback.value, () => { translationFallback.value = settings.translationFallback; }, false));
-    translationRow.append(el('span', '', 'MyMemory 不可用时的回落来源（fallback）'), translationFallback);
-    chinese.append(translationRow, el('p', 'notice', 'MyMemory 限流、额度耗尽、超时或返回异常时，自动向 Google Translate 发送相同的英文释义或句子。单词释义成功后标注备用来源并缓存；句子翻译仅本次显示，不保存。关闭只停止新增备用请求，已有单词缓存保留。有道始终独立显示。Google 无密钥接口不保证可用性，部分网络可能无法访问。'));
+    translationRow.append(el('span', '', '中文释义和句子的备用翻译'), translationFallback);
+    chinese.append(translationRow, el('p', 'notice', '单词释义优先 MyMemory，失败时回落至 Google Translate；句子翻译优先 Google Translate，失败后依次尝试 Microsoft Translator 和 MyMemory。关闭备用翻译后仅使用首选来源，只停止新增备用请求，已有单词缓存保留。句子原文和译文仅本次显示，不保存。有道始终独立显示。Google 和微软 Edge 的非公开无密钥接口不保证可用性。'));
     const phonetics = el('section', 'section');
     phonetics.append(el('h3', '', '音标'));
     const phoneticRow = el('label', 'setting fallback-setting');
@@ -5431,10 +5463,11 @@ SOFTWARE.
     actions.append(button('导入 JSON 合并', () => upload.click()));
     data.append(actions, upload, restoreRow, el('p', 'notice', `JSON 包含完整历史、复习进度和网页禁用规则，导出与导入上限均为 ${BACKUP_MIB} MiB。导入默认保留本机设置与禁用规则，CSV 便于表格查看。`));
     const privacy = el('section', 'section');
-    privacy.append(el('h3', '', '服务与隐私'), el('p', 'notice', '查词会向 Free Dictionary API 发送当前单词；缺少对应缓存时，向 MyMemory 发送最多 6 条英文释义、向有道发送当前单词，分别获取并同时显示两路中文。句子翻译向 MyMemory 发送所选原文，启用回落时失败后发送给 Google Translate；句子原文和译文不保存到本插件，第三方是否留存由其政策决定。获取音标和词形同样向有道发送单词，词形补全可能另查原形；进行中的有道请求复用。启用额外音标备用来源后，在有道失败且主词典无音标时向 Datamuse 发送当前单词。单词结果成功后本地保存，再次打开直接读取。网页上下文不会发送给词典服务。在线音频和浏览器朗读可能联网。服务可用性、内容与额度由提供方决定。'),
+    privacy.append(el('h3', '', '服务与隐私'), el('p', 'notice', '查词会向 Free Dictionary API 发送当前单词；缺少对应缓存时，向 MyMemory 发送最多 6 条英文释义、向有道发送当前单词，分别获取并同时显示两路中文。句子翻译先向 Google Translate 发送所选原文，启用回落时失败后依次发送给 Microsoft Translator 和 MyMemory；句子原文和译文不保存到本插件，第三方是否留存由其政策决定。获取音标和词形同样向有道发送单词，词形补全可能另查原形；进行中的有道请求复用。启用额外音标备用来源后，在有道失败且主词典无音标时向 Datamuse 发送当前单词。单词结果成功后本地保存，再次打开直接读取。网页上下文不会发送给词典服务。在线音频和浏览器朗读可能联网。服务可用性、内容与额度由提供方决定。'),
       link('Free Dictionary API', 'https://dictionaryapi.dev/'), document.createTextNode(' · '),
       link('MyMemory', 'https://mymemory.translated.net/doc/spec.php'), document.createTextNode(' · '),
       link('Google Translate', 'https://translate.google.com/'), document.createTextNode(' · '),
+      link('Microsoft Translator', 'https://www.microsoft.com/translator/'), document.createTextNode(' · '),
       link('有道词典', 'https://www.youdao.com/'), document.createTextNode(' · '),
       link('Datamuse', 'https://www.datamuse.com/api/'));
     const cleanup = el('section', 'section');

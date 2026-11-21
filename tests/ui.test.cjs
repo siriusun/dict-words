@@ -1941,6 +1941,11 @@ async function selectInside(app, node, raw, collapsed = false) {
   await new Promise(setImmediate);
 }
 const historyOf = app => [...app.storage.entries()].filter(([key]) => key.startsWith(app.prefix + 'event:')).map(([, event]) => event);
+const answerGoogle = (request, value) => request.onload({ status: 200, responseText: JSON.stringify([[[value]]]) });
+const answerMicrosoft = (request, value) => request.onload({ status: 200,
+  responseText: JSON.stringify([{ translations: [{ text: value, to: 'zh-Hans' }] }]) });
+const answerMyMemory = (request, value) => request.onload({ status: 200,
+  responseText: JSON.stringify({ responseStatus: 200, responseData: { translatedText: value } }) });
 
 test('touchscreen webpage selection waits for an explicit action and uses the expanded selection', async () => {
   const app = setup('/test/', 'youdao', { open: false });
@@ -2032,15 +2037,14 @@ test('website sentence translation is temporary, uncached, cancellable and repea
   const popover = shadow.querySelector('.popover');
   assert.equal(popover.querySelector('.sentence-original').textContent, source);
   assert.equal(requests.length, 1);
+  assert.equal(new URL(requests[0].url).origin, 'https://translate.googleapis.com');
   assert.equal(new URL(requests[0].url).searchParams.get('q'), source);
   assert.equal(requests[0].anonymous, true);
   assert.equal(requests[0].nocache, true);
-  requests[0].onload({ status: 200, responseText: JSON.stringify({
-    responseStatus: 200, responseData: { translatedText: '一个小句子' }
-  }) });
+  answerGoogle(requests[0], '一个小句子');
   await new Promise(setImmediate);
   assert.equal(popover.querySelector('.translation-copy').textContent, '一个小句子');
-  assert.ok(textOf(popover).includes('MyMemory'));
+  assert.ok(textOf(popover).includes('Google Translate'));
   assert.equal(popover.querySelector('.detail-star'), null);
   assert.deepEqual(json([...storage]), before, 'sentence translation changes no stored data, including context and auto-book');
   assert.equal(shadow.querySelector('.reading-marks').children.length, 1);
@@ -2053,9 +2057,7 @@ test('website sentence translation is temporary, uncached, cancellable and repea
   assert.equal(requests.length, 2, 'reselecting the same sentence makes a new request');
   await click(findButton(popover, '×'));
   assert.equal(aborted, 1);
-  requests[1].onload({ status: 200, responseText: JSON.stringify({
-    responseStatus: 200, responseData: { translatedText: '迟到的译文' }
-  }) });
+  answerGoogle(requests[1], '迟到的译文');
   await new Promise(setImmediate);
   assert.equal(popover.children.length, 0);
   assert.deepEqual(json([...storage]), before);
@@ -2076,9 +2078,7 @@ test('manual sentence translation preserves the current view and words still use
   assert.equal(input.value, '', 'the submitted sentence is cleared from the search input');
   const view = shadow.querySelector('.view');
   assert.equal(view.querySelector('.sentence-original').textContent, 'take off');
-  requests[0].onload({ status: 200, responseText: JSON.stringify({
-    responseStatus: 200, responseData: { translatedText: '起飞' }
-  }) });
+  answerGoogle(requests[0], '起飞');
   await new Promise(setImmediate);
   assert.equal(view.querySelector('.translation-copy').textContent, '起飞');
   assert.deepEqual(json([...storage]), before);
@@ -2103,9 +2103,7 @@ test('sentence translation respects disabled sites while remaining available in 
   const search = app.shadow.querySelector('.search');
   search.querySelector('input').value = 'Manual translation still works.';
   await click(search.querySelector('button'));
-  requests[0].onload({ status: 200, responseText: JSON.stringify({
-    responseStatus: 200, responseData: { translatedText: '手动翻译仍可使用。' }
-  }) });
+  answerGoogle(requests[0], '手动翻译仍可使用。');
   await new Promise(setImmediate);
   assert.equal(app.shadow.querySelector('.sentence-result').querySelector('.translation-copy').textContent, '手动翻译仍可使用。');
   assert.deepEqual(json([...storage]), before);
@@ -2133,14 +2131,10 @@ test('a newer sentence cancels the previous request and prevents late chunks or 
   await new Promise(setImmediate);
   assert.equal(aborted, 1);
   assert.equal(requests.length, 2);
-  requests[0].onload({ status: 200, responseText: JSON.stringify({
-    responseStatus: 200, responseData: { translatedText: '旧内容' }
-  }) });
+  answerGoogle(requests[0], '旧内容');
   await new Promise(setImmediate);
   assert.equal(requests.length, 2, 'cancellation prevents further old chunks or fallback requests');
-  requests[1].onload({ status: 200, responseText: JSON.stringify({
-    responseStatus: 200, responseData: { translatedText: '新内容' }
-  }) });
+  answerGoogle(requests[1], '新内容');
   await new Promise(setImmediate);
   assert.equal(shadow.querySelector('.sentence-original').textContent, 'The newest sentence.');
   assert.equal(shadow.querySelector('.translation-copy').textContent, '新内容');
@@ -2165,9 +2159,7 @@ test('returning from a word selected during sentence translation offers a retry 
   assert.ok(textOf(popover).includes('翻译已取消'));
   await click(findButton(popover, '重试'));
   assert.equal(requests.length, 2);
-  requests[1].onload({ status: 200, responseText: JSON.stringify({
-    responseStatus: 200, responseData: { translatedText: '重新翻译' }
-  }) });
+  answerGoogle(requests[1], '重新翻译');
   await new Promise(setImmediate);
   assert.equal(popover.querySelector('.translation-copy').textContent, '重新翻译');
 });
@@ -2186,9 +2178,7 @@ test('internal sentence translation works while webpage selection is paused and 
   assert.equal(view.querySelector('.sentence-original').textContent, 'A useful example.');
   await press(app, '1');
   assert.deepEqual(json([...storage]), before);
-  requests[0].onload({ status: 200, responseText: JSON.stringify({
-    responseStatus: 200, responseData: { translatedText: '一个有用的例子。' }
-  }) });
+  answerGoogle(requests[0], '一个有用的例子。');
   await new Promise(setImmediate);
   assert.equal(view.querySelector('.translation-copy').textContent, '一个有用的例子。');
   await press(app, 'Escape');
@@ -2199,7 +2189,41 @@ test('internal sentence translation works while webpage selection is paused and 
   assert.equal(storage.get(prefix + 'study:alpha').reviews, 4);
 });
 
-test('sentence fallback restarts every chunk with Google without saving either provider response', async () => {
+test('sentence translation uses Microsoft after Google fails without persisting the result', async () => {
+  const app = setup();
+  const { shadow, context, storage, click } = app;
+  const before = json([...storage]);
+  const requests = [];
+  context.GM_xmlhttpRequest = request => { requests.push(request); return { abort() {} }; };
+  const source = 'A short sentence.';
+  shadow.querySelector('.search').querySelector('input').value = source;
+  await click(shadow.querySelector('.search').querySelector('button'));
+  assert.equal(new URL(requests[0].url).origin, 'https://translate.googleapis.com');
+  requests[0].onerror();
+  await new Promise(setImmediate);
+  assert.equal(requests.length, 2);
+  const microsoft = requests[1];
+  const url = new URL(microsoft.url);
+  assert.equal(url.origin, 'https://edge.microsoft.com');
+  assert.equal(url.pathname, '/translate/translatetext');
+  assert.equal(url.searchParams.get('from'), 'en');
+  assert.equal(url.searchParams.get('to'), 'zh-Hans');
+  assert.equal(microsoft.method, 'POST');
+  assert.equal(microsoft.headers['Content-Type'], 'application/json');
+  assert.deepEqual(JSON.parse(microsoft.data), [source]);
+  assert.equal(microsoft.anonymous, true);
+  assert.equal(microsoft.nocache, true);
+  answerMicrosoft(microsoft, '微软译文');
+  await new Promise(setImmediate);
+  const result = shadow.querySelector('.sentence-result');
+  assert.equal(result.querySelector('.translation-copy').textContent, '微软译文');
+  assert.ok(textOf(result).includes('Microsoft Translator（备用）'));
+  assert.ok(textOf(result).includes('Google Translate：网络连接失败'));
+  assert.equal(requests.length, 2, 'successful Microsoft fallback must not contact MyMemory');
+  assert.deepEqual(json([...storage]), before);
+});
+
+test('sentence fallback restarts all chunks with each provider without mixing or saving results', async () => {
   const app = setup();
   const { shadow, context, storage, click } = app;
   const before = json([...storage]);
@@ -2209,26 +2233,102 @@ test('sentence fallback restarts every chunk with Google without saving either p
   const source = 'A useful example. '.repeat(35).trim();
   input.value = source;
   await click(shadow.querySelector('.search').querySelector('button'));
-  requests[0].onload({ status: 200, responseText: JSON.stringify({
-    responseStatus: 200, responseData: { translatedText: '不要混入' }
-  }) });
+  const firstChunk = new URL(requests[0].url).searchParams.get('q');
+  answerGoogle(requests[0], '不要混入谷歌');
   await new Promise(setImmediate);
   assert.equal(requests.length, 2);
   requests[1].onload({ status: 429, responseText: '{}' });
   await new Promise(setImmediate);
   assert.equal(requests.length, 3);
-  assert.equal(new URL(requests[2].url).origin, 'https://translate.googleapis.com');
-  assert.equal(new URL(requests[2].url).searchParams.get('q'), new URL(requests[0].url).searchParams.get('q'));
-  requests[2].onload({ status: 200, responseText: JSON.stringify([[['备用第一段']]]) });
+  assert.equal(new URL(requests[2].url).origin, 'https://edge.microsoft.com');
+  assert.equal(JSON.parse(requests[2].data)[0], firstChunk);
+  answerMicrosoft(requests[2], '不要混入微软');
   await new Promise(setImmediate);
-  requests[3].onload({ status: 200, responseText: JSON.stringify([[['备用第二段']]]) });
+  assert.equal(requests.length, 4);
+  requests[3].onerror();
+  await new Promise(setImmediate);
+  assert.equal(requests.length, 5);
+  assert.equal(new URL(requests[4].url).origin, 'https://api.mymemory.translated.net');
+  assert.equal(new URL(requests[4].url).searchParams.get('q'), firstChunk);
+  answerMyMemory(requests[4], '备用第一段');
+  await new Promise(setImmediate);
+  assert.equal(requests.length, 6);
+  answerMyMemory(requests[5], '备用第二段');
   await new Promise(setImmediate);
   const result = shadow.querySelector('.sentence-result');
   assert.equal(result.querySelector('.translation-copy').textContent, '备用第一段\n备用第二段');
-  assert.ok(textOf(result).includes('Google Translate（备用）'));
-  assert.ok(textOf(result).includes('MyMemory'));
+  assert.ok(textOf(result).includes('MyMemory（备用）'));
+  assert.ok(textOf(result).includes('Google Translate：'));
+  assert.ok(textOf(result).includes('Microsoft Translator：'));
   assert.ok(requests.every(request => request.nocache && request.anonymous));
   assert.deepEqual(json([...storage]), before);
+});
+
+test('invalid Microsoft translation falls back to MyMemory and reports all providers on failure', async () => {
+  const app = setup();
+  const { shadow, context, storage, click } = app;
+  const before = json([...storage]);
+  const requests = [];
+  context.GM_xmlhttpRequest = request => { requests.push(request); return { abort() {} }; };
+  shadow.querySelector('.search').querySelector('input').value = 'A short sentence.';
+  await click(shadow.querySelector('.search').querySelector('button'));
+  requests[0].ontimeout();
+  await new Promise(setImmediate);
+  requests[1].onload({ status: 200, responseText: JSON.stringify([{ translations: [{ text: 'wrong language', to: 'en' }] }]) });
+  await new Promise(setImmediate);
+  assert.equal(new URL(requests[2].url).origin, 'https://api.mymemory.translated.net');
+  requests[2].onload({ status: 429, responseText: '{}' });
+  await new Promise(setImmediate);
+  const result = shadow.querySelector('.sentence-result');
+  const error = result.querySelector('.error').textContent;
+  assert.ok(error.includes('Google Translate：'));
+  assert.ok(error.includes('Microsoft Translator：'));
+  assert.ok(error.includes('MyMemory：'));
+  await click(findButton(result, '重试'));
+  assert.equal(new URL(requests[3].url).origin, 'https://translate.googleapis.com');
+  answerGoogle(requests[3], '重试成功');
+  await new Promise(setImmediate);
+  assert.equal(shadow.querySelector('.sentence-result').querySelector('.translation-copy').textContent, '重试成功');
+  assert.deepEqual(json([...storage]), before);
+});
+
+test('cancelling Microsoft sentence fallback prevents later providers and late results', async () => {
+  const app = setup('/test/', 'youdao', { open: false });
+  const { shadow, context, storage, click } = app;
+  const before = json([...storage]);
+  const requests = [];
+  let aborted = 0;
+  context.GM_xmlhttpRequest = request => { requests.push(request); return { abort() { aborted++; } }; };
+  selectWebsite(app, 'A short sentence.');
+  app.advance(220);
+  await new Promise(setImmediate);
+  requests[0].onerror();
+  await new Promise(setImmediate);
+  assert.equal(new URL(requests[1].url).origin, 'https://edge.microsoft.com');
+  await click(findButton(shadow.querySelector('.popover'), '×'));
+  assert.equal(aborted, 1);
+  answerMicrosoft(requests[1], '迟到的译文');
+  await new Promise(setImmediate);
+  assert.equal(requests.length, 2);
+  assert.equal(shadow.querySelector('.popover').children.length, 0);
+  assert.deepEqual(json([...storage]), before);
+});
+
+test('disabling fallback during a Microsoft translation prevents additional chunks or providers', async () => {
+  const app = setup();
+  const { shadow, context, storage, click, prefix } = app;
+  const requests = [];
+  context.GM_xmlhttpRequest = request => { requests.push(request); return { abort() {} }; };
+  shadow.querySelector('.search').querySelector('input').value = 'A useful example. '.repeat(35).trim();
+  await click(shadow.querySelector('.search').querySelector('button'));
+  requests[0].onerror();
+  await new Promise(setImmediate);
+  assert.equal(new URL(requests[1].url).origin, 'https://edge.microsoft.com');
+  storage.set(prefix + 'settings', { translationFallback: 'none' });
+  answerMicrosoft(requests[1], '部分译文');
+  await new Promise(setImmediate);
+  assert.equal(requests.length, 2);
+  assert.ok(shadow.querySelector('.sentence-result').querySelector('.error').textContent.includes('备用翻译已关闭'));
 });
 
 test('sentence translation respects disabled fallback, reports errors and retries without caching', async () => {
@@ -2239,6 +2339,7 @@ test('sentence translation respects disabled fallback, reports errors and retrie
   context.GM_xmlhttpRequest = request => { requests.push(request); return { abort() {} }; };
   shadow.querySelector('.search').querySelector('input').value = 'A short sentence.';
   await click(shadow.querySelector('.search').querySelector('button'));
+  assert.equal(new URL(requests[0].url).origin, 'https://translate.googleapis.com');
   requests[0].onerror();
   await new Promise(setImmediate);
   const result = shadow.querySelector('.sentence-result');
@@ -2246,9 +2347,7 @@ test('sentence translation respects disabled fallback, reports errors and retrie
   assert.equal(requests.length, 1);
   await click(findButton(result, '重试'));
   assert.equal(requests.length, 2);
-  requests[1].onload({ status: 200, responseText: JSON.stringify({
-    responseStatus: 200, responseData: { translatedText: '重试成功' }
-  }) });
+  answerGoogle(requests[1], '重试成功');
   await new Promise(setImmediate);
   assert.equal(shadow.querySelector('.sentence-result').querySelector('.translation-copy').textContent, '重试成功');
   assert.deepEqual(json([...storage]), before);
