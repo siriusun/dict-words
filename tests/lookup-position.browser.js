@@ -71,7 +71,18 @@ async page => {
     if (Math.abs(popup.bottom - studio.bottom) * popup.scale > 1) {
       throw new Error('Mobile lookup and studio must share the bottom edge: ' + JSON.stringify(result));
     }
+    if (Math.abs(popup.height - studio.height) * popup.scale > 1) {
+      throw new Error('Mobile lookup and studio must share the height: ' + JSON.stringify(result));
+    }
     if (!popup.scrollable || popup.requests.length) throw new Error('Lookup must scroll locally: ' + JSON.stringify(result));
+    const shortHeight = await page.evaluate(() => {
+      const root = window.__lexiShadow;
+      root.querySelector('.popover .example').textContent = 'A short example.';
+      return root.querySelector('.popover').getBoundingClientRect().height;
+    });
+    if (Math.abs(shortHeight - studio.height) * popup.scale > 1) {
+      throw new Error('Short definitions must retain the same panel height: ' + JSON.stringify(result));
+    }
     await session.detach();
   }
   return results;
