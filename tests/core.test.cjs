@@ -278,6 +278,19 @@ test('Datamuse phonetics retain their reference source in backups and definition
   assert.throws(() => validateBackup(data));
 });
 
+test('dictionary retains examples for later senses and roundtrips expanded entries', () => {
+  const definitions = Array.from({ length: 20 }, (_, index) => ({
+    definition: `Meaning ${index + 1}.`, example: `Example for meaning ${index + 1}.`
+  }));
+  const entry = dictionary([{ meanings: [{ partOfSpeech: 'noun', definitions }] }], 'test', now);
+  assert.deepEqual(entry.meanings[0].definitions, definitions);
+  assert.deepEqual(validateBackup({ ...backup(), words: [entry] }).words[0].meanings, entry.meanings);
+  const oversized = [...definitions, { definition: 'Another meaning.', example: 'Another example.' }];
+  assert.equal(dictionary([{ meanings: [{ definitions: oversized }] }], 'test', now).meanings[0].definitions.length, 20);
+  entry.meanings[0].definitions = oversized;
+  assert.throws(() => validateBackup({ ...backup(), words: [entry] }));
+});
+
 test('bilingual examples use plain sentences, deduplicate and bound results without inventing translations', () => {
   const pair = { sentence: ' We test the new design. ', 'sentence-eng': '<b>ignored markup</b>',
     'sentence-translation': '我们测试新设计。', source: 'Test fixture' };
@@ -288,8 +301,17 @@ test('bilingual examples use plain sentences, deduplicate and bound results with
   assert.deepEqual(youdaoExamples(raw, 'test'), [
     { sentence: 'We test the new design.', translation: '我们测试新设计。', source: 'Test fixture' },
     { sentence: 'Test it again.', translation: '', source: '' },
-    { sentence: 'This is a test.', translation: '', source: '' }
+    { sentence: 'This is a test.', translation: '', source: '' },
+    { sentence: 'One more test.', translation: '', source: '' }
   ]);
+  const many = Array.from({ length: 15 }, (_, index) => ({ sentence: `Test example ${index + 1}.` }));
+  const expanded = youdaoExamples({ input: 'test', blng_sents_part: { 'sentence-pair': many } }, 'test');
+  assert.equal(expanded.length, 12);
+  assert.equal(expanded.at(-1).sentence, 'Test example 12.');
+  assert.deepEqual(youdaoExamples({ input: 'lj:test', blng_sents: { 'sentence-pair': many } }, 'test'), expanded);
+  assert.throws(() => youdaoExamples({ input: 'lj:other', blng_sents: { 'sentence-pair': many } }, 'test'), /不匹配/);
+  assert.deepEqual(validateBackup({ ...backup(), words: [{ ...word, examples: expanded, examplesFetchedAt: now }] })
+    .words[0].examples, expanded);
   assert.deepEqual(youdaoExamples({ input: 'test' }, 'test'), []);
   assert.deepEqual(youdaoExamples({ input: 'test', blng_sents_part: { 'sentence-pair': [] } }, 'test'), []);
   for (const invalid of [null, {}, { input: 'other' }, { input: 'test', blng_sents_part: null },
@@ -315,7 +337,7 @@ test('example caches survive backup and definition refresh merges using their ow
     assert.deepEqual(merged.examples, []);
     assert.equal(merged.examplesFetchedAt, now + 1);
   }
-  for (const fields of [{ examples: null }, { examples: Array(4).fill(examples[0]) },
+  for (const fields of [{ examples: null }, { examples: Array(13).fill(examples[0]) },
     { examples: [{ ...examples[0], translation: false }] }, { examplesFetchedAt: 0 },
     { examples: undefined }, { examplesFetchedAt: undefined }]) {
     assert.throws(() => validateBackup({ ...data, words: [{ ...data.words[0], ...fields }] }));

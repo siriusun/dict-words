@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Lexi · 划词词典与复习
 // @namespace    lexi-local
-// @version      0.8.3
+// @version      0.8.4
 // @description  英文划词与句子翻译、触屏选区操作、发音、跨网站历史、生词复习与本地备份。
 // @match        http://*/*
 // @match        https://*/*
@@ -2526,13 +2526,16 @@ SOFTWARE.
     if (translation.length > 16000) throw new Error('中文响应过长，请稍后重试');
     return translation;
   }
-  const validExamples = value => Array.isArray(value) && value.length <= 3 && value.every(item =>
+  const MAX_EXAMPLES = 12;
+  const MAX_DEFINITIONS = 20;
+  const validExamples = value => Array.isArray(value) && value.length <= MAX_EXAMPLES && value.every(item =>
     item && typeof item.sentence === 'string' && !!item.sentence.trim() && item.sentence.length <= 600 &&
     typeof item.translation === 'string' && item.translation.length <= 600 &&
     typeof item.source === 'string' && item.source.length <= 120);
   function youdaoExamples(raw, word) {
-    if (normalize(raw?.input) !== word) throw new Error('例句词条不匹配，请稍后重试');
-    const block = raw.blng_sents_part;
+    const full = typeof raw?.input === 'string' && raw.input.startsWith('lj:');
+    if (normalize(full ? raw.input.slice(3) : raw?.input) !== word) throw new Error('例句词条不匹配，请稍后重试');
+    const block = full ? raw.blng_sents : raw.blng_sents_part;
     if (block === undefined) return [];
     const pairs = block?.['sentence-pair'];
     if (!Array.isArray(pairs)) throw new Error('例句数据格式异常，请稍后重试');
@@ -2543,7 +2546,7 @@ SOFTWARE.
     }));
     if (!examples.every(item => validExamples([item]))) throw new Error('例句数据格式异常，请稍后重试');
     return examples.filter((item, index) =>
-      examples.findIndex(other => other.sentence.toLowerCase() === item.sentence.toLowerCase()) === index).slice(0, 3);
+      examples.findIndex(other => other.sentence.toLowerCase() === item.sentence.toLowerCase()) === index).slice(0, MAX_EXAMPLES);
   }
   const validWordForms = value => value && typeof value === 'object' &&
     typeof value.base === 'string' && !!value.base && normalize(value.base) === value.base &&
@@ -2572,7 +2575,7 @@ SOFTWARE.
       .filter(item => item && Array.isArray(item.definitions)).slice(0, 5).map(item => ({
         partOfSpeech: text(item.partOfSpeech, 50),
         definitions: item.definitions.filter(item => item && typeof item.definition === 'string' && item.definition.trim())
-          .slice(0, 3).map(item => ({ definition: text(item.definition), example: text(item.example, 600) }))
+          .slice(0, MAX_DEFINITIONS).map(item => ({ definition: text(item.definition), example: text(item.example, 600) }))
       })).filter(item => item.definitions.length);
     if (!meanings.length) throw new Error('未找到可显示的释义');
     const first = entries[0];
@@ -2610,7 +2613,7 @@ SOFTWARE.
         !Array.isArray(item.meanings) || !item.meanings.length || item.meanings.length > 5) fail();
       const meanings = item.meanings.map(meaning => {
         if (!object(meaning) || !string(meaning.partOfSpeech, 50) || !Array.isArray(meaning.definitions) ||
-          !meaning.definitions.length || meaning.definitions.length > 3) fail();
+          !meaning.definitions.length || meaning.definitions.length > MAX_DEFINITIONS) fail();
         return {
           partOfSpeech: meaning.partOfSpeech, definitions: meaning.definitions.map(def => {
             if (!object(def) || !string(def.definition, 1200) || !def.definition.trim() || !string(def.example, 600)) fail();
@@ -3188,6 +3191,7 @@ SOFTWARE.
     .sentence-result{min-width:0;min-height:0;overflow:auto;overflow-wrap:anywhere}
     .sentence-heading{font-size:20px;margin:12px 0 18px}.sentence-original{white-space:pre-wrap;line-height:1.75;margin:0}
     .logo .version{font:11px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:var(--muted);margin-left:6px;white-space:nowrap}
+    .settings-version{display:none}
     .phonetic{display:flex;align-items:center;flex-wrap:wrap;gap:8px}.phonetic .icon{border:0;background:transparent;transition:transform .12s,color .12s,opacity .12s}.phonetic .icon:active{transform:scale(.85);color:var(--accent);opacity:.6}.phonetic .link{font-size:11px}.phonetic .button{font-size:12px;padding:2px 8px}.review>.phonetic{justify-content:center}
     .word-forms dl{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:5px 16px;margin:6px 0 10px}.word-forms dt{color:var(--muted);font-size:12px}.word-forms dd{margin:0;overflow-wrap:anywhere}
     *{overscroll-behavior:contain}
@@ -3261,6 +3265,8 @@ SOFTWARE.
     .compact .view{padding:10px;overflow:auto;overflow-wrap:anywhere}
     .compact .view.scope-view{display:block}.compact .view.library{display:flex}
     .compact .heading{font-size:18px}.compact .subheading{font-size:11px;margin:4px 0 8px}
+    .compact .settings-heading{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
+    .compact .settings-version{display:block;padding:3px 8px;border-radius:6px;background:var(--tint);color:var(--ink);font:500 11px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;letter-spacing:0;white-space:nowrap}
     .compact .library .split{display:flex;flex-direction:column;min-height:220px}.compact .library-list{flex:1}.compact .library .list{max-height:none}
     .compact .library-row>.item{position:relative;min-height:44px;padding:4px 60px 4px 8px}.compact .history-row>.item{padding-right:96px}
     .compact .library-row>.item::after{content:'›';position:absolute;right:42px;top:50%;transform:translateY(-50%);font-size:22px;color:var(--muted)}.compact .history-row>.item::after{right:78px}
@@ -4034,6 +4040,26 @@ SOFTWARE.
     if (target === popover) positionPopover(null, true);
     if (focused) bar.querySelector('button').focus({ preventScroll: true });
   }
+  function preserveWordEnrichment(fresh) {
+    const cached = get('word:' + fresh.word);
+    if (cached?.wordForms) fresh.wordForms = cached.wordForms;
+    if (cached?.examples) Object.assign(fresh, { examples: cached.examples, examplesFetchedAt: cached.examplesFetchedAt });
+    if (cached?.youdaoTranslation) Object.assign(fresh, {
+      youdaoTranslation: cached.youdaoTranslation, youdaoTranslatedAt: cached.youdaoTranslatedAt
+    });
+    if (cached?.phonetic?.trim() && (cached.phoneticSource === 'youdao' || !fresh.phonetic)) {
+      fresh.phonetic = cached.phonetic;
+      if (cached.phoneticSource) fresh.phoneticSource = cached.phoneticSource;
+    }
+    if (cached?.translation && translationMatches(cached, fresh)) {
+      Object.assign(fresh, {
+        translation: cached.translation, translatedAt: cached.translatedAt,
+        ...(cached.translationSource ? { translationSource: cached.translationSource } : {}),
+        ...(cached.translationProvider ? { translationProvider: cached.translationProvider } : {})
+      });
+    }
+    return fresh;
+  }
   async function lookup(raw, rect, context = null, target = null) {
     syncSite();
     if (currentSite.disabled && overlay.hidden) { message('当前网页已禁用，请从油猴菜单手动打开学习中心'); return; }
@@ -4069,25 +4095,7 @@ SOFTWARE.
         try {
           const response = await request('https://api.dictionaryapi.dev/api/v2/entries/en/' + encodeURIComponent(word), true);
           if (!current()) return;
-          const fresh = dictionary(response, word, Date.now());
-          const cached = get('word:' + word);
-          if (cached?.wordForms) fresh.wordForms = cached.wordForms;
-          if (cached?.examples) Object.assign(fresh, { examples: cached.examples, examplesFetchedAt: cached.examplesFetchedAt });
-          if (cached?.youdaoTranslation) Object.assign(fresh, {
-            youdaoTranslation: cached.youdaoTranslation, youdaoTranslatedAt: cached.youdaoTranslatedAt
-          });
-          if (cached?.phonetic?.trim() && (cached.phoneticSource === 'youdao' || !fresh.phonetic)) {
-            fresh.phonetic = cached.phonetic;
-            if (cached.phoneticSource) fresh.phoneticSource = cached.phoneticSource;
-          }
-          if (entry?.translation && translationMatches(entry, fresh)) {
-            Object.assign(fresh, {
-              translation: entry.translation, translatedAt: entry.translatedAt,
-              ...(entry.translationSource ? { translationSource: entry.translationSource } : {}),
-              ...(entry.translationProvider ? { translationProvider: entry.translationProvider } : {})
-            });
-          }
-          entry = fresh;
+          entry = preserveWordEnrichment(dictionary(response, word, Date.now()));
         } catch (error) {
           if (!current()) return;
           if (!entry) throw error;
@@ -4423,15 +4431,19 @@ SOFTWARE.
         node.append(row);
       }
       node.append(link('有道例句 ↗', 'https://www.youdao.com/result?word=' + encodeURIComponent(entry.word) + '&lang=en'));
+      if (current.examples?.length) node.append(button('更新用法例句', () => load(true),
+        'button', '从有道完整例句结果获取更多用法例句（最多 12 条）'));
     };
-    async function load() {
+    async function load(more = false) {
       show(get('word:' + entry.word) || entry);
+      node.querySelector('button')?.remove();
       node.append(el('p', 'muted', '正在获取用法例句…'));
       try {
-        if (!exampleRequests.has(entry.word)) {
+        const key = more ? 'lj:' + entry.word : entry.word;
+        if (!exampleRequests.has(key)) {
           const pending = (async () => {
             const epoch = activityEpoch;
-            const examples = youdaoExamples(await requestYoudao(entry.word), entry.word);
+            const examples = youdaoExamples(await requestYoudao(entry.word, more), entry.word);
             checkActivity(epoch);
             const current = get('word:' + entry.word);
             if (!current) throw new Error('词条已删除，请重新查询');
@@ -4440,19 +4452,20 @@ SOFTWARE.
             notify();
             return updated;
           })();
-          exampleRequests.set(entry.word, pending);
-          pending.finally(() => exampleRequests.delete(entry.word)).catch(() => { });
+          exampleRequests.set(key, pending);
+          pending.finally(() => exampleRequests.delete(key)).catch(() => { });
         }
-        const updated = await exampleRequests.get(entry.word);
+        const updated = await exampleRequests.get(key);
         show(updated);
         if (!updated.examples.length) unavailable();
       } catch (error) {
         show(get('word:' + entry.word) || entry);
-        node.append(el('p', 'notice', '有道例句：' + error.message), button('重试用法例句', load));
+        node.querySelector('button')?.remove();
+        node.append(el('p', 'notice', '有道例句：' + error.message), button('重试用法例句', () => load(more)));
       }
     }
     function unavailable() {
-      node.append(el('p', 'muted', '暂未找到该词的双语例句'), button('重试用法例句', load));
+      node.append(el('p', 'muted', '暂未找到该词的双语例句'), button('重试用法例句', () => load(true)));
     }
     if (entry.examples) {
       show(entry);
@@ -4465,14 +4478,17 @@ SOFTWARE.
     return node;
   }
   const youdaoRequests = new Map();
-  function requestYoudao(word) {
-    if (!youdaoRequests.has(word)) {
-      const pending = request('https://dict.youdao.com/jsonapi?q=' + encodeURIComponent(word)
-        + '&dicts=' + encodeURIComponent(JSON.stringify({ count: 3, dicts: [['ec', 'blng_sents_part']] })));
-      youdaoRequests.set(word, pending);
-      pending.finally(() => youdaoRequests.delete(word)).catch(() => { });
+  function requestYoudao(word, fullExamples = false) {
+    const query = fullExamples ? 'lj:' + word : word;
+    if (!youdaoRequests.has(query)) {
+      const pending = request('https://dict.youdao.com/jsonapi?q=' + encodeURIComponent(query)
+        + '&dicts=' + encodeURIComponent(JSON.stringify(fullExamples
+          ? { count: MAX_EXAMPLES, dicts: [['blng_sents']] }
+          : { count: 3, dicts: [['ec', 'blng_sents_part']] })));
+      youdaoRequests.set(query, pending);
+      pending.finally(() => youdaoRequests.delete(query)).catch(() => { });
     }
-    return youdaoRequests.get(word);
+    return youdaoRequests.get(query);
   }
   const inflections = new Map();
   function wordFormsBlock(entry, autoLoad) {
@@ -4591,8 +4607,8 @@ SOFTWARE.
     }
     return node;
   }
-  function wordDetail(entry, event = null, allowStar = true) {
-    const node = el('article', 'detail');
+  function wordDetail(entry, event = null, allowStar = true, node = el('article', 'detail')) {
+    node.replaceChildren();
     const title = el('div', 'bar word-heading');
     const actions = el('div', 'actions');
     if (allowStar) {
@@ -4603,8 +4619,32 @@ SOFTWARE.
       star.setAttribute('data-star-word', entry.word);
       actions.append(star);
     }
+    const refreshNotice = el('p', 'notice');
+    refreshNotice.hidden = true;
+    const refresh = button('更新释义', async () => {
+      refresh.disabled = true;
+      refreshNotice.hidden = true;
+      refresh.textContent = '正在更新…';
+      try {
+        const epoch = activityEpoch;
+        const response = await request('https://api.dictionaryapi.dev/api/v2/entries/en/' + encodeURIComponent(entry.word));
+        checkActivity(epoch);
+        if (!get('word:' + entry.word)) throw new Error('词条已删除，请重新查询');
+        const updated = preserveWordEnrichment(dictionary(response, entry.word, Date.now()));
+        put('word:' + entry.word, updated);
+        notify();
+        wordDetail(updated, event, allowStar, node);
+      } catch (error) {
+        refreshNotice.textContent = '更新释义失败：' + error.message;
+        refreshNotice.hidden = false;
+      } finally {
+        refresh.disabled = false;
+        refresh.textContent = '更新释义';
+      }
+    }, 'button', '重新获取英文释义及各含义的例句，保留收藏和复习进度');
+    actions.append(refresh);
     title.append(el('h2', 'word', entry.word), actions);
-    node.append(title, phoneticBlock(entry));
+    node.append(title, refreshNotice, phoneticBlock(entry));
     node.append(senses(entry));
     node.append(chineseDefinitions(entry));
     if (event?.context || event?.sourceUrl) {
@@ -5400,7 +5440,9 @@ SOFTWARE.
     return section;
   }
   function renderSettings() {
-    view.append(el('h1', 'heading', '设置与数据'), el('p', 'subheading', '跨网站共用，数据保存在本机油猴存储'));
+    const heading = el('h1', 'heading settings-heading', '设置与数据');
+    heading.append(el('span', 'settings-version', 'v' + GM_info.script.version));
+    view.append(heading, el('p', 'subheading', '跨网站共用，数据保存在本机油猴存储'));
     const save = (key, value, revert, resetReview = true) => {
       try {
         const next = cleanSettings({ ...get('settings', {}), [key]: value });

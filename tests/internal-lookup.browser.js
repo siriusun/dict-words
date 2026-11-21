@@ -427,6 +427,27 @@ async page => {
       && JSON.stringify([...window.__lexiData]) === window.__beforeFallbackSentence;
   }), 'Google failure displays Microsoft fallback without storing the sentence');
   await click('.popover button', '关闭查词卡');
+  await page.evaluate(() => window.__lexiMenus.get('打开 Lexi 学习中心')());
+  await click('.tab', '设置');
+  for (const [width, height, scheme] of [
+    [390, 780, 'light'], [320, 568, 'dark'], [740, 360, 'dark'], [1100, 800, 'light']
+  ]) {
+    await page.setViewportSize({ width, height });
+    await page.emulateMedia({ colorScheme: scheme });
+    await page.waitForFunction(compact => window.__lexiShadow.querySelector('.app').classList.contains('compact') === compact, width <= 760);
+    check(await page.evaluate(compact => {
+      const root = window.__lexiShadow;
+      const badge = root.querySelector('.settings-version');
+      if (!badge || badge.textContent !== 'v' + GM_info.script.version) return false;
+      if (!compact) return badge.getClientRects().length === 0 && root.querySelector('.logo .version').getClientRects().length > 0;
+      const rect = badge.getBoundingClientRect();
+      const view = root.querySelector('.view').getBoundingClientRect();
+      const title = document.createRange();
+      title.selectNodeContents(root.querySelector('.settings-heading').firstChild);
+      return rect.width > 0 && rect.left >= title.getBoundingClientRect().right + 8
+        && rect.top >= view.top && rect.bottom <= view.bottom && rect.right <= view.right;
+    }, width <= 760), `Settings version is visible without overlapping the title on mobile, with desktop unchanged (${width}px)`);
+  }
   check(errors.length === 0, 'Page errors: ' + errors.join('; '));
   await page.evaluate(() => { window.__lexiBrowserCheckPassed = true; });
   return 'Closed-shadow browser checks passed: sentence provider fallback, mouse and touch selection, no storage, paused selection, desktop and narrow dark layouts.';

@@ -934,9 +934,10 @@ const takeForms = [
 ];
 
 const respondExamples = async (request, pairs, word = 'alpha') => {
+  const full = new URL(request.url).searchParams.get('q') === 'lj:' + word;
   request.onload({ status: 200, responseText: JSON.stringify({
-    input: word, ec: { word: [{ 'return-phrase': word, ukphone: 'test', wfs: [] }] },
-    blng_sents_part: { 'sentence-pair': pairs }
+    input: full ? 'lj:' + word : word, ec: { word: [{ 'return-phrase': word, ukphone: 'test', wfs: [] }] },
+    [full ? 'blng_sents' : 'blng_sents_part']: { 'sentence-pair': pairs }
   }) });
   await new Promise(setImmediate);
 };
@@ -994,6 +995,78 @@ test('usage examples share enrichment requests, render safe bilingual text and p
   assert.equal(storage.get(prefix + 'word:alpha').examples[0].sentence, sentence);
   assert.equal(requests.length, 2, 'dictionary refresh preserves the example cache');
 });
+test('expanded examples refresh old caches and remain available in cache-only review', async () => {
+  const app = setup('/test/', 'youdao', { settings: { reviewCacheOnly: true } });
+  const { shadow, storage, prefix, context, click } = app;
+  const entry = storage.get(prefix + 'word:alpha');
+  entry.examples = [{ sentence: 'Old alpha example.', translation: '', source: '' }];
+  const requests = [];
+  context.GM_xmlhttpRequest = request => { requests.push(request); return { abort() {} }; };
+  const progress = JSON.stringify(storage.get(prefix + 'study:alpha'));
+  const events = JSON.stringify(app.events);
+  await click(shadow.querySelector('.item'));
+  await click(findButton(shadow, '更新用法例句'));
+  assert.equal(new URL(requests[0].url).searchParams.get('q'), 'lj:alpha');
+  assert.deepEqual(JSON.parse(new URL(requests[0].url).searchParams.get('dicts')),
+    { count: 12, dicts: [['blng_sents']] });
+  const pairs = Array.from({ length: 12 }, (_, index) => ({ sentence: `Alpha usage ${index + 1}.` }));
+  await respondExamples(requests[0], pairs);
+  assert.equal(shadow.querySelectorAll('.example-en').length, 12);
+  assert.equal(textOf(shadow.querySelectorAll('.example-en').at(-1)), pairs.at(-1).sentence);
+  await click(findButton(shadow, '更新释义'));
+  const definitions = Array.from({ length: 20 }, (_, index) => ({
+    definition: `Alpha meaning ${index + 1}.`, example: `Alpha sense example ${index + 1}.`
+  }));
+  requests[1].onload({ status: 200, responseText: JSON.stringify([{
+    meanings: [{ partOfSpeech: 'noun', definitions }]
+  }]) });
+  await new Promise(setImmediate);
+  assert.equal(shadow.querySelectorAll('.definition').length, 20);
+  assert.match(textOf(shadow.querySelector('.detail')), /Alpha sense example 20/);
+  assert.equal(shadow.querySelectorAll('.example-en').length, 12);
+  assert.equal(storage.get(prefix + 'word:alpha').meanings[0].definitions.length, 20);
+  assert.equal(storage.get(prefix + 'word:alpha').translation, undefined, 'obsolete translation is not reused');
+  const refreshCount = requests.length;
+  await click(findButton(shadow, '更新释义'));
+  requests[refreshCount].onload({ status: 200, responseText: JSON.stringify([{
+    meanings: [{ partOfSpeech: 'noun', definitions: definitions.map(def => ({
+      ...def, example: def.example + ' Updated.'
+    })) }]
+  }]) });
+  await new Promise(setImmediate);
+  assert.match(textOf(shadow.querySelector('.detail')), /Alpha sense example 20\. Updated\./,
+    'repeated refreshes update the visible detail rather than a detached container');
+  await openReview(app);
+  assert.equal(shadow.querySelector('.usage-examples'), null);
+  await click(findButton(shadow, '显示释义'));
+  assert.match(textOf(shadow.querySelector('.review-answer')), /Alpha sense example 20/);
+  assert.equal(shadow.querySelectorAll('.example-en').length, 12);
+  assert.equal(JSON.stringify(storage.get(prefix + 'study:alpha')), progress);
+  assert.equal(JSON.stringify(app.events), events);
+});
+
+test('failed refreshes keep cached examples and definitions and offer retries', async () => {
+  const app = setup();
+  const { shadow, storage, prefix, context, click } = app;
+  const entry = storage.get(prefix + 'word:alpha');
+  entry.examples = [{ sentence: 'Old alpha example.', translation: '', source: '' }];
+  const requests = [];
+  context.GM_xmlhttpRequest = request => { requests.push(request); return { abort() {} }; };
+  await click(shadow.querySelector('.item'));
+  const cached = JSON.stringify(storage.get(prefix + 'word:alpha'));
+  await click(findButton(shadow, '更新释义'));
+  requests[0].onerror();
+  await new Promise(setImmediate);
+  assert.match(textOf(shadow.querySelector('.detail')), /更新释义失败/);
+  assert.equal(findButton(shadow, '更新释义').disabled, false);
+  await click(findButton(shadow, '更新用法例句'));
+  requests[1].onerror();
+  await new Promise(setImmediate);
+  assert.equal(textOf(shadow.querySelector('.example-en')), 'Old alpha example.');
+  assert.ok(findButton(shadow, '重试用法例句'));
+  assert.equal(JSON.stringify(storage.get(prefix + 'word:alpha')), cached);
+});
+
 test('missing examples support cache-only review, retry errors and cache explicit absence', async () => {
   const app = setup('/test/', 'youdao', { settings: { reviewCacheOnly: true } });
   const { shadow, storage, prefix, context, click } = app;
