@@ -2107,8 +2107,8 @@ test('touch word lookup snapshots the latest selection and its reading position 
   const popover = app.shadow.querySelector('.popover');
   assert.equal(selected.selection.isCollapsed, true);
   assert.equal(popover.querySelector('.word').textContent, 'beta');
-  assert.equal(popover.style.left, '180px');
-  assert.equal(popover.style.top, '352px');
+  assert.equal(popover.style.left, '145px', 'the mobile card is horizontally centered rather than anchored to the word');
+  assert.equal(popover.style.top, '844px', 'CSS anchors the card above the visible bottom edge');
   assert.equal(app.shadow.querySelector('.reading-marks').children[0].style.left, '180px');
   assert.equal(historyOf(app).at(-1).context, 'Earlier beta in the sentence.');
 });

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Lexi · 划词词典与复习
 // @namespace    lexi-local
-// @version      0.8.5
+// @version      0.8.6
 // @description  英文划词与句子翻译、触屏选区操作、发音、跨网站历史、生词复习与本地备份。
 // @match        http://*/*
 // @match        https://*/*
@@ -3263,7 +3263,8 @@ SOFTWARE.
     .scope-rule-list{flex:1;min-height:0;overflow:auto;border-top:1px solid var(--line)}.scope-rule{display:flex;align-items:center;gap:10px;padding:5px 0;border-bottom:1px solid var(--line)}
     .scope-kind{flex-shrink:0;font-size:11px;color:var(--muted);background:var(--tint);border-radius:4px;padding:1px 5px}.scope-address{min-width:0;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:12px}
     .scope-remove{font-size:12px;padding:3px 8px;border-color:transparent}.scope-pagination{display:flex;align-items:center;gap:8px;flex-shrink:0}.scope-pagination .meta{flex:1}.scope-pagination .button{font-size:12px;padding:5px 10px}.scope-pagination .button:disabled{cursor:default}
-    .compact .overlay{inset:auto;left:var(--visible-left);top:var(--visible-top);width:var(--visible-width);height:var(--visible-height);transform:scale(var(--ui-scale));transform-origin:top left;overflow:hidden;align-items:flex-end;background:#0d211f44;backdrop-filter:none;padding:max(12px,env(safe-area-inset-top)) max(18px,env(safe-area-inset-right)) max(14px,env(safe-area-inset-bottom)) max(18px,env(safe-area-inset-left))}
+    .compact{--panel-bottom-gap:max(14px,env(safe-area-inset-bottom))}
+    .compact .overlay{inset:auto;left:var(--visible-left);top:var(--visible-top);width:var(--visible-width);height:var(--visible-height);transform:scale(var(--ui-scale));transform-origin:top left;overflow:hidden;align-items:flex-end;background:#0d211f44;backdrop-filter:none;padding:max(12px,env(safe-area-inset-top)) max(18px,env(safe-area-inset-right)) var(--panel-bottom-gap) max(18px,env(safe-area-inset-left))}
     .compact .studio{width:min(600px,100%);height:min(680px,86%);border-radius:18px;grid-template:auto minmax(0,1fr) / minmax(0,1fr);outline:none;font-size:13px;line-height:1.5}
     .compact .sidebar{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:2px;overflow:visible;padding:4px 6px;border-right:0;border-bottom:1px solid var(--line)}
     .compact .sidebar .logo,.compact .sidebar .muted,.compact .sidebar .footnote{display:none}
@@ -3312,7 +3313,7 @@ SOFTWARE.
     .compact .review-grade-guide{padding:10px 12px}
     .compact .recall-prompt{padding:10px;margin:14px 0 6px}
     .compact .stats{gap:6px;margin:12px 0}.compact .stat{min-width:90px;padding:8px}.compact .stat strong{font-size:26px}
-    .compact .popover{width:min(380px,calc(var(--visible-width) - 16px));max-height:min(65vh,calc(var(--visible-height) - 16px));padding:14px;overflow-wrap:anywhere;transform:scale(var(--ui-scale));transform-origin:top left}
+    .compact .popover{width:min(380px,calc(var(--visible-width) - 16px));max-height:min(calc(var(--visible-height) * .65),calc(var(--visible-height) - var(--panel-bottom-gap) - 12px));padding:14px;overflow-wrap:anywhere;transform:scale(var(--ui-scale)) translateY(calc(-100% - var(--panel-bottom-gap)));transform-origin:top left}
     .compact input:not([type="checkbox"]),.compact select{font-size:16px}
   `;
   let launcherPosition = get('launcher-position', null);
@@ -3779,15 +3780,20 @@ SOFTWARE.
   }
   function positionPopover(rect, keepPosition = false) {
     popover.hidden = false;
-    const viewport = compact ? visibleViewport : { left: 0, top: 0, width: window.innerWidth, height: window.innerHeight, scale: 1 };
-    const unit = Math.min(1, viewport.scale);
-    const gap = (compact ? 8 : 12) / unit;
+    if (compact) {
+      const { left, top, width, height } = visibleViewport;
+      popover.style.left = left + (width - popover.getBoundingClientRect().width) / 2 + 'px';
+      popover.style.top = top + height + 'px';
+      return;
+    }
+    const viewport = { left: 0, top: 0, width: window.innerWidth, height: window.innerHeight };
+    const gap = 12;
     const { width, height } = popover.getBoundingClientRect();
     const maxLeft = Math.max(viewport.left + gap, viewport.left + viewport.width - width - gap);
     const maxTop = Math.max(viewport.top + gap, viewport.top + viewport.height - height - gap);
-    const anchorTop = rect?.top ?? viewport.top + 80 / unit;
-    const below = (rect?.bottom ?? anchorTop) + 10 / unit;
-    const top = below <= maxTop ? below : anchorTop - height - 10 / unit;
+    const anchorTop = rect?.top ?? viewport.top + 80;
+    const below = (rect?.bottom ?? anchorTop) + 10;
+    const top = below <= maxTop ? below : anchorTop - height - 10;
     const currentLeft = keepPosition ? parseFloat(popover.style.left) : NaN;
     const currentTop = keepPosition ? parseFloat(popover.style.top) : NaN;
     popover.style.left = Math.max(viewport.left + gap, Math.min(maxLeft, Number.isFinite(currentLeft) ? currentLeft : rect?.left ?? maxLeft - gap)) + 'px';
