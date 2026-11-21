@@ -184,7 +184,8 @@ function selectWebsite(app, word, pointerType = 'mouse') {
   range.cloneRange = () => ({ ...range });
   const selection = {
     isCollapsed: false, rangeCount: 1, anchorNode: { parentElement: node },
-    toString: () => value, getRangeAt: () => range
+    toString() { return this.rangeCount ? value : ''; }, getRangeAt: () => range,
+    removeAllRanges() { this.rangeCount = 0; this.isCollapsed = true; this.anchorNode = null; }
   };
   app.context.window.getSelection = () => selection;
   app.context.document.listeners.pointerup.listener({ button: 0, pointerType, target: node, composedPath: () => [node] });
@@ -1957,21 +1958,62 @@ test('touchscreen webpage selection waits for an explicit action and uses the ex
   assert.equal(shadow.querySelector('.popover').hidden, true, 'initial touch selection must not open the word card');
   const action = shadow.querySelector('.selection-action');
   assert.ok(action, 'touch selection exposes an explicit action');
-  assert.equal(action.textContent, '查词');
+  assert.equal(action.querySelector('.selection-verb').textContent, '查词');
+  assert.equal(action.querySelector('.selection-preview').textContent, 'alpha');
   assert.equal(action.getAttribute('aria-label'), '查词 alpha');
   assert.equal(requests.length, 0);
+  assert.equal(selected.selection.isCollapsed, false, 'native selection stays active before the action');
 
   selected.setText('alpha beta, now.');
   context.document.listeners.selectionchange.listener();
-  assert.equal(action.textContent, '翻译');
+  assert.equal(action.querySelector('.selection-verb').textContent, '翻译');
+  assert.equal(action.querySelector('.selection-preview').textContent, 'alpha beta, now.');
   assert.equal(action.getAttribute('aria-label'), '翻译所选句子');
   let prevented = false;
   action.listeners.pointerdown.listener({ preventDefault() { prevented = true; } });
   assert.equal(prevented, true, 'the action preserves the native selection when pressed');
   action.listeners.click.listener();
   await new Promise(setImmediate);
+  assert.equal(selected.selection.isCollapsed, true, 'the native selection is cleared after the action');
+  assert.equal(selected.selection.toString(), '');
+  assert.equal(action.querySelector('.selection-preview').textContent, '', 'the hidden action does not retain the sentence');
+  assert.equal(action.getAttribute('aria-label'), null);
+  assert.equal(shadow.querySelector('.reading-marks').children.length, 1, 'the original text stays highlighted');
   assert.equal(shadow.querySelector('.popover').querySelector('.sentence-original').textContent, 'alpha beta, now.');
   assert.equal(new URL(requests[0].url).searchParams.get('q'), 'alpha beta, now.');
+});
+
+test('touch word lookup snapshots the latest selection and its reading position before clearing it', async () => {
+  const app = setup('/test/', 'youdao', {
+    open: false, settings: { context: true },
+    viewport: { width: 390, height: 844, scale: 1, offsetTop: 0, offsetLeft: 0 }
+  });
+  const selected = selectWebsite(app, 'alpha', 'touch');
+  const rect = { left: 180, right: 220, top: 320, bottom: 342, width: 40, height: 22 };
+  selected.node.textContent = 'Earlier beta in the sentence.';
+  selected.range.getBoundingClientRect = () => selected.selection.isCollapsed
+    ? { left: 0, right: 0, top: 0, bottom: 0, width: 0, height: 0 } : rect;
+  selected.range.getClientRects = () => [rect];
+  app.advance(250);
+  selected.setText('beta');
+  app.context.document.listeners.selectionchange.listener();
+  const action = app.shadow.querySelector('.selection-action');
+  assert.equal(action.getAttribute('aria-label'), '查词 beta');
+  const remove = selected.selection.removeAllRanges;
+  selected.selection.removeAllRanges = function () {
+    assert.equal(app.shadow.querySelector('.reading-marks').children.length, 1, 'highlight is captured first');
+    assert.equal(app.shadow.querySelector('.popover').hidden, true, 'selection is cleared before the card opens');
+    remove.call(this);
+  };
+  await app.click(action);
+
+  const popover = app.shadow.querySelector('.popover');
+  assert.equal(selected.selection.isCollapsed, true);
+  assert.equal(popover.querySelector('.word').textContent, 'beta');
+  assert.equal(popover.style.left, '180px');
+  assert.equal(popover.style.top, '352px');
+  assert.equal(app.shadow.querySelector('.reading-marks').children[0].style.left, '180px');
+  assert.equal(historyOf(app).at(-1).context, 'Earlier beta in the sentence.');
 });
 
 test('touch selection action stays at the bottom of the mobile viewport and temporarily hides the launcher', () => {
@@ -1990,6 +2032,12 @@ test('touch selection action stays at the bottom of the mobile viewport and temp
   assert.equal(launcher.inert, true);
   assert.equal(launcher.getAttribute('aria-hidden'), 'true');
 
+  Object.assign(context.window.visualViewport, { width: 320, height: 568, offsetLeft: 20, offsetTop: 10 });
+  context.window.visualViewport.listeners.resize.listener();
+  app.advance(0);
+  assert.equal(action.style.left, '130px', 'the action follows the visible viewport when it changes');
+  assert.equal(action.style.top, '530px');
+
   selected.setText('');
   selected.selection.isCollapsed = true;
   context.document.listeners.selectionchange.listener();
@@ -1998,6 +2046,23 @@ test('touch selection action stays at the bottom of the mobile viewport and temp
   assert.ok(!launcher.className.split(' ').includes('selection-active'));
   assert.equal(launcher.inert, false);
   assert.equal(launcher.getAttribute('aria-hidden'), null);
+});
+
+test('a long touch selection can be shortened without losing the native selection', () => {
+  const app = setup('/test/', 'youdao', { open: false });
+  const overlong = 'a '.repeat(2500) + 'bb';
+  const selected = selectWebsite(app, overlong, 'touch');
+  app.advance(250);
+  const action = app.shadow.querySelector('.selection-action');
+  assert.equal(action.disabled, true);
+  assert.equal(selected.selection.toString(), overlong);
+  assert.ok(action.querySelector('.selection-preview').textContent.length < overlong.length);
+
+  selected.setText('alpha beta');
+  app.context.document.listeners.selectionchange.listener();
+  assert.equal(action.disabled, false);
+  assert.equal(selected.selection.toString(), 'alpha beta');
+  assert.equal(action.querySelector('.selection-preview').textContent, 'alpha beta');
 });
 
 test('touchscreen selection inside the plugin also waits for an action while mouse selection stays automatic', async () => {
@@ -2016,7 +2081,8 @@ test('touchscreen selection inside the plugin also waits for an action while mou
   app.advance(250);
   await new Promise(setImmediate);
   assert.equal(pane.querySelector('article'), original, 'the first internal touch selection does not navigate away');
-  assert.equal(shadow.querySelector('.selection-action').textContent, '翻译');
+  assert.equal(shadow.querySelector('.selection-action').querySelector('.selection-verb').textContent, '翻译');
+  assert.equal(shadow.querySelector('.selection-action').querySelector('.selection-preview').textContent, 'alpha beta');
   assert.equal(requests.length, 0);
   shadow.querySelector('.selection-action').listeners.click.listener();
   await new Promise(setImmediate);

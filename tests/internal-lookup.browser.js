@@ -356,7 +356,7 @@ async page => {
   await page.waitForFunction(() => window.__lexiShadow.querySelector('.selection-action')?.getAttribute('aria-label') === '查词 alpha');
   check(await page.evaluate(() => window.__lexiShadow.querySelector('.popover').hidden),
     'Touch word selection waits for an explicit lookup action');
-  await click('.selection-action', '查词');
+  await click('.selection-action');
   await page.waitForFunction(() => window.__lexiShadow.querySelector('.popover .word')?.textContent === 'alpha');
   await click('.popover button', '关闭查词卡');
   await page.setViewportSize({ width: 1100, height: 800 });

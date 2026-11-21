@@ -3150,6 +3150,7 @@ SOFTWARE.
     .launcher.dragging{cursor:grabbing}
     .launcher.selection-active{visibility:hidden;pointer-events:none}
     .selection-action{pointer-events:auto;position:fixed;z-index:4;min-height:44px;max-width:min(220px,calc(100vw - 24px));touch-action:manipulation;user-select:none;white-space:nowrap;box-shadow:0 5px 20px #102a2030}
+    .selection-emblem,.selection-summary,.selection-arrow{display:none}
     .popover{pointer-events:auto;position:fixed;width:min(380px,calc(100vw - 24px));max-height:70vh;overflow:auto;background:var(--surface);border:1px solid var(--line);border-radius:18px;box-shadow:0 16px 65px #102a2026;padding:22px}
     .popover-footer{margin-top:20px;padding-top:16px;border-top:1px solid var(--line)}.popover-footer .button{display:block;width:100%;min-height:44px}
     .bar,.row,.actions{display:flex;align-items:center;gap:10px}.bar{justify-content:space-between}.actions{flex-wrap:wrap}.brand{font-weight:750;letter-spacing:3px;font-size:12px}.muted,.meta{color:var(--muted);font-size:12px}.meta{margin-top:4px}.word{font:42px/1.2 Georgia,"Times New Roman",serif;overflow-wrap:anywhere;margin:20px 0 6px}.phonetic{color:var(--muted);font-size:14px;margin-bottom:14px}
@@ -3247,7 +3248,15 @@ SOFTWARE.
     .compact .tab{min-height:40px;padding:0 2px;text-align:center;font-size:12px}
     .compact .top{padding:4px 8px;gap:4px}.compact .search{gap:4px}.compact .search input{padding:5px 8px;font-size:16px}
     .compact .button,.compact .icon{min-height:36px}.compact .button{padding:5px 10px;font-size:13px}.compact .icon{min-width:36px}
-    .compact .selection-action{min-height:44px;padding-bottom:max(8px,env(safe-area-inset-bottom))}
+    .compact .selection-action{display:flex;align-items:center;gap:10px;width:min(340px,calc(var(--visible-width) - 24px));max-width:calc(var(--visible-width) - 24px);min-height:60px;padding:7px;border:1px solid var(--line);border-radius:18px;background:var(--surface);color:var(--ink);box-shadow:0 12px 30px #102a2030,0 2px 6px #102a2015;text-align:left;transform:scale(var(--ui-scale)) translateY(calc(0px - env(safe-area-inset-bottom)));transform-origin:top left}
+    .compact .selection-action:hover{background:var(--surface);filter:none}
+    .compact .selection-emblem{display:grid;place-items:center;flex:0 0 38px;height:38px;border-radius:12px;background:var(--tint);color:var(--accent);font:italic 24px/1 Georgia,serif}
+    .compact .selection-summary{display:flex;flex:1;min-width:0;flex-direction:column;gap:3px;line-height:1.2}
+    .compact .selection-caption{color:var(--ink);opacity:.7;font-size:10px;font-weight:650;letter-spacing:.04em}
+    .compact .selection-preview{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:600 15px/1.3 Georgia,"Times New Roman",serif}
+    .compact .selection-call{display:flex;align-items:center;justify-content:center;gap:8px;flex-shrink:0;min-width:82px;height:44px;padding:0 12px;border-radius:12px;background:var(--accent);color:var(--surface);font-size:13px;font-weight:650}
+    .compact .selection-arrow{display:inline;font-size:16px;line-height:1}
+    .compact .selection-action:active .selection-call{filter:brightness(1.12)}
     .compact .usage-examples>.button,.compact .popover-footer .button{min-height:44px}
     .compact .view{padding:10px;overflow:auto;overflow-wrap:anywhere}
     .compact .view.scope-view{display:block}.compact .view.library{display:flex}
@@ -3340,7 +3349,18 @@ SOFTWARE.
   readingMarks.setAttribute('aria-hidden', 'true');
   const readingReturn = button('回到原文', returnToReading, 'button reading-return');
   readingReturn.hidden = true;
-  const selectionAction = button('查词', runSelectedAction, 'button primary selection-action');
+  const selectionAction = button('', runSelectedAction, 'button primary selection-action');
+  const selectionEmblem = el('span', 'selection-emblem', 'L');
+  selectionEmblem.setAttribute('aria-hidden', 'true');
+  const selectionSummary = el('span', 'selection-summary');
+  const selectionPreview = el('span', 'selection-preview');
+  selectionSummary.append(el('span', 'selection-caption', '已选内容'), selectionPreview);
+  const selectionCall = el('span', 'selection-call');
+  const selectionVerb = el('span', 'selection-verb', '查词');
+  const selectionArrow = el('span', 'selection-arrow', '→');
+  selectionArrow.setAttribute('aria-hidden', 'true');
+  selectionCall.append(selectionVerb, selectionArrow);
+  selectionAction.append(selectionEmblem, selectionSummary, selectionCall);
   selectionAction.hidden = true;
   selectionAction.addEventListener('pointerdown', event => event.preventDefault());
   selectionAction.addEventListener('mousedown', event => event.preventDefault());
@@ -3785,6 +3805,8 @@ SOFTWARE.
     selectionActionRefreshTimer = undefined;
     pendingSelection = null;
     selectionAction.hidden = true;
+    selectionPreview.textContent = '';
+    selectionAction.removeAttribute('aria-label');
     launcher.classList.toggle('selection-active', false);
     launcher.inert = false;
     launcher.removeAttribute('aria-hidden');
@@ -3869,7 +3891,9 @@ SOFTWARE.
     }
     pendingSelection = { ...selected, range: selected.range.cloneRange() };
     const isWord = selected.query.type === 'word';
-    selectionAction.textContent = isWord ? '查词' : '翻译';
+    const preview = selected.range.toString().replace(/\s+/g, ' ').trim();
+    selectionPreview.textContent = preview.length > 120 ? preview.slice(0, 120) + '…' : preview;
+    selectionVerb.textContent = isWord ? '查词' : '翻译';
     selectionAction.setAttribute('aria-label', isWord ? `查词 ${selected.query.value}` : '翻译所选句子');
     selectionAction.disabled = selected.query.type === 'sentence' && selected.query.value.length > MAX_SENTENCE_LENGTH;
     positionSelectionAction(selected.range);
@@ -3907,8 +3931,11 @@ SOFTWARE.
       beginInternalLookup(selected.query.value, selected.target);
       return;
     }
+    const rect = selected.range.getBoundingClientRect();
+    const context = selectedContext(selected);
     captureReadingMarker(selected.range, selected.query.type === 'sentence');
-    lookup(selected.query.value, selected.range.getBoundingClientRect(), selectedContext(selected)).catch(showError);
+    selected.selection.removeAllRanges();
+    lookup(selected.query.value, rect, context).catch(showError);
   }
   function lookupInternalSelection() {
     cancelInternalSelection();
@@ -5571,11 +5598,13 @@ SOFTWARE.
     cancelInternalSelection();
     updateReadingMarker();
     if (!popover.hidden) positionPopover(null, true);
+    scheduleSelectionActionUpdate();
   });
   function onVisualViewportChange() {
     if (!compact && !touchViewport?.matches) return;
     updateViewport();
     if (!popover.hidden) positionPopover(null, true);
+    scheduleSelectionActionUpdate();
   }
   visualViewport?.addEventListener('resize', onVisualViewportChange);
   visualViewport?.addEventListener('scroll', onVisualViewportChange);
