@@ -1383,7 +1383,7 @@ test('overview resets today at the learning-day boundary and cancels its refresh
   assert.equal(timers.size, backgroundTimers);
 });
 
-test('deleting one repeated history event preserves other events, cache and study progress', async () => {
+test('grouped history deletes one event at a time without changing cache or study progress', async () => {
   const { shadow, storage, events, click, prefix } = setup();
   const cache = storage.get(prefix + 'word:alpha');
   const study = storage.get(prefix + 'study:alpha');
@@ -1394,20 +1394,39 @@ test('deleting one repeated history event preserves other events, cache and stud
   assert.ok(storage.has(prefix + 'event:' + events[1].id));
   assert.equal(storage.get(prefix + 'word:alpha'), cache);
   assert.equal(storage.get(prefix + 'study:alpha'), study);
-  assert.equal(shadow.querySelectorAll('.history-delete').length, 2);
-  assert.ok(shadow.querySelector('.subheading').textContent.startsWith('2 次查询'));
-  assert.equal(shadow.querySelector('.detail-pane').querySelector('.word').textContent, 'beta');
-  assert.equal(shadow.activeElement, shadow.querySelector('.history-delete'));
+  assert.equal(shadow.querySelectorAll('.history-delete').length, 1);
+  assert.ok(shadow.querySelector('.subheading').textContent.startsWith('2 个词 · 2 次查询'));
+  assert.equal(shadow.querySelector('.detail-pane').querySelector('.word').textContent, 'alpha');
   await click(shadow.querySelector('.history-delete'));
+  await click(shadow.querySelector('.item'));
   await click(shadow.querySelector('.history-delete'));
   assert.equal(shadow.querySelectorAll('.history-delete').length, 0);
-  assert.ok(shadow.querySelector('.subheading').textContent.startsWith('0 次查询'));
-  assert.equal(shadow.activeElement.attributes['aria-label'], '筛选已保存单词');
+  assert.ok(shadow.querySelector('.subheading').textContent.startsWith('0 个词 · 0 次查询'));
+  assert.equal(shadow.activeElement, shadow.querySelector('.library-list').querySelector('input'));
+});
+
+test('lookup cards and grouped rows show a word-specific query count and latest lookup', async () => {
+  const app = setup('/test/', 'youdao', { open: false });
+  selectWebsite(app, 'alpha');
+  app.advance(220);
+  await new Promise(setImmediate);
+  assert.match(app.shadow.querySelector('.popover').querySelector('.history-footprint').querySelector('summary').textContent,
+    /^查过 3 次 · 最近 /);
+  assert.equal(historyOf(app).length, 4, 'the successful lookup remains an individual event');
+  app.menus.get('打开 Lexi 学习中心')();
+  await app.click(app.shadow.querySelector('.tab'));
+  assert.equal(app.shadow.querySelectorAll('.item').length, 2, 'repeated alpha lookups share one row');
+  assert.match(app.shadow.querySelector('.item').querySelector('.meta').textContent, /^3 次查询 · 最近 /);
+  const sort = app.shadow.querySelectorAll('select').find(node => node.getAttribute('aria-label') === '历史排序');
+  sort.value = 'count';
+  sort.listeners.change.listener();
+  assert.equal(app.shadow.querySelector('.item').querySelector('.term').textContent, 'alpha');
 });
 
 test('failed deletion leaves the event and shows the storage error', async () => {
   const { shadow, storage, context, click } = setup();
   const before = [...storage.entries()];
+  await click(shadow.querySelector('.item'));
   context.GM_deleteValue = () => { throw new Error('Storage unavailable'); };
   await click(shadow.querySelector('.history-delete'));
   assert.deepEqual([...storage.entries()], before);
@@ -1744,7 +1763,7 @@ test('mobile definitions open a modal sheet, contain focus and return to the sam
   assert.equal(shadow.querySelector('.main').inert, true);
   assert.equal(shadow.activeElement, shadow.querySelector('.library-sheet'));
   assert.equal(shadow.querySelector('.detail-pane').querySelector('.word').textContent, 'alpha');
-  assert.equal(shadow.querySelector('.library-sheet-nav').querySelector('.meta').textContent, '1 / 3');
+  assert.equal(shadow.querySelector('.library-sheet-nav').querySelector('.meta').textContent, '1 / 2');
   assert.equal(findButton(layer, '‹ 上一个').disabled, true);
   const next = findButton(layer, '下一个');
   next.focus();
@@ -1806,7 +1825,7 @@ test('mobile definition navigation follows filtered and sorted records across pa
   }
 });
 
-test('mobile history keeps repeated-event context and nested lookup separate from sheet navigation', async () => {
+test('mobile grouped history shows each context and keeps nested lookup separate from word navigation', async () => {
   const app = setup('/test/', 'youdao', { viewport: { width: 390, height: 714, scale: 1 } });
   const { shadow, storage, prefix, click } = app;
   storage.get(prefix + 'event:history-event-2').context = 'Recent alpha context';
@@ -1817,9 +1836,13 @@ test('mobile history keeps repeated-event context and nested lookup separate fro
   await click(shadow.querySelector('.item'));
   const pane = shadow.querySelector('.detail-pane');
   const layer = shadow.querySelector('.library-detail');
-  assert.match(textOf(pane.querySelector('.context')), /Recent alpha/);
+  assert.match(textOf(pane.querySelector('.history-footprint')), /Recent alpha/);
+  assert.match(textOf(pane.querySelector('.history-footprint')), /Earlier alpha/);
+  search.value = '';
+  search.listeners.input.listener();
   await click(findButton(layer, '下一个'));
-  assert.match(textOf(pane.querySelector('.context')), /Earlier alpha/);
+  assert.equal(pane.querySelector('.word').textContent, 'beta');
+  await click(findButton(layer, '‹ 上一个'));
   const original = pane.querySelector('article');
   pane.scrollTop = 50;
   await selectInside(app, pane.querySelector('.definition'), 'beta');
@@ -1830,7 +1853,8 @@ test('mobile history keeps repeated-event context and nested lookup separate fro
   assert.equal(pane.scrollTop, 50);
   await press(app, 'Escape');
   assert.equal(layer.hidden, true);
-  assert.equal(shadow.querySelectorAll('.item')[1].getAttribute('aria-current'), 'true');
+  assert.equal(shadow.querySelectorAll('.item').find(row => row.getAttribute('aria-current') === 'true')
+    .querySelector('.term').textContent, 'alpha');
   assert.equal(historyOf(app).length, 4, 'only the nested lookup adds history');
 });
 
@@ -1942,13 +1966,13 @@ test('list star buttons toggle collection in history and vocabulary book while d
   await click(shadow.querySelector('.item'));
   assert.equal(shadow.querySelector('.detail-pane').querySelectorAll('button')
     .some(node => node.textContent.includes('收藏')), false);
-  assert.deepEqual(shadow.querySelectorAll('.list-star').map(node => node.textContent), ['★', '☆', '★']);
+  assert.deepEqual(shadow.querySelectorAll('.list-star').map(node => node.textContent), ['★', '☆']);
 
   shadow.querySelector('.list').scrollTop = 50;
   shadow.querySelector('.detail-pane').scrollTop = 90;
   await click(shadow.querySelectorAll('.list-star')[1]);
   assert.equal(storage.has(prefix + 'study:beta'), true);
-  assert.deepEqual(shadow.querySelectorAll('.list-star').map(node => node.textContent), ['★', '★', '★']);
+  assert.deepEqual(shadow.querySelectorAll('.list-star').map(node => node.textContent), ['★', '★']);
   assert.equal(shadow.querySelector('.detail-pane').querySelector('.word').textContent, 'alpha');
   assert.equal(shadow.querySelector('.list').scrollTop, 50);
   assert.equal(shadow.querySelector('.detail-pane').scrollTop, 90);
@@ -1960,7 +1984,7 @@ test('list star buttons toggle collection in history and vocabulary book while d
   context.confirm = () => true;
   await click(shadow.querySelectorAll('.list-star')[0]);
   assert.equal(storage.has(prefix + 'study:alpha'), false);
-  assert.deepEqual(shadow.querySelectorAll('.list-star').map(node => node.textContent), ['☆', '★', '☆']);
+  assert.deepEqual(shadow.querySelectorAll('.list-star').map(node => node.textContent), ['☆', '★']);
   assert.equal(shadow.querySelector('.detail-pane').querySelector('.word').textContent, 'alpha');
 
   await click(shadow.querySelectorAll('.tab')[1]);
@@ -2789,7 +2813,7 @@ test('automatic internal lookup works with website selection paused, saves histo
   assert.equal(shadow.querySelector('.selection-lookup'), null, 'there is no extra lookup icon to click');
   assert.equal(pane.querySelector('.word').textContent, 'beta');
   assert.equal(historyOf(app).length, 4);
-  assert.equal(shadow.querySelectorAll('.item').length, 4, 'the current history list updates without leaving the word');
+  assert.equal(shadow.querySelectorAll('.item').length, 2, 'the current word remains grouped in history');
   assert.ok(findButton(pane, '← 返回 alpha'));
   const star = pane.querySelector('.detail-star');
   assert.equal(star.textContent, '☆');
@@ -2817,7 +2841,7 @@ test('automatic internal lookup works with website selection paused, saves histo
   assert.equal(historyOf(app).length, 5, 'returning never records another lookup');
   assert.ok(shadow.querySelectorAll('.list-star').find(node => node.attributes['aria-label'] === '取消收藏 beta'));
   await click(shadow.querySelectorAll('.tab')[0]);
-  assert.equal(shadow.querySelectorAll('.item').length, 5, 'temporary queries appear in the normal history');
+  assert.equal(shadow.querySelectorAll('.item').length, 3, 'temporary queries appear in the grouped history');
 });
 
 test('lookup star preserves its state on cancellation or storage failure and clears progress only on confirmed removal', async () => {

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Lexi · 划词词典与复习
 // @namespace    lexi-local
-// @version      0.8.4
+// @version      0.8.5
 // @description  英文划词与句子翻译、触屏选区操作、发音、跨网站历史、生词复习与本地备份。
 // @match        http://*/*
 // @match        https://*/*
@@ -2788,9 +2788,25 @@ SOFTWARE.
   }
   const ordered = (events, oldest = false) => [...events].sort((a, b) =>
     (oldest ? 1 : -1) * (a.at - b.at || a.id.localeCompare(b.id)));
+  const groupHistory = (events, order = 'new') => {
+    const groups = new Map();
+    for (const event of events) {
+      if (!groups.has(event.word)) groups.set(event.word, []);
+      groups.get(event.word).push(event);
+    }
+    return [...groups].map(([word, records]) => {
+      const history = ordered(records);
+      return { word, events: history, latestAt: history[0].at, firstAt: history.at(-1).at };
+    }).sort((a, b) => {
+      if (order === 'count' && a.events.length !== b.events.length) return b.events.length - a.events.length;
+      if (order === 'old' && a.firstAt !== b.firstAt) return a.firstAt - b.firstAt;
+      if (order !== 'old' && a.latestAt !== b.latestAt) return b.latestAt - a.latestAt;
+      return a.word.localeCompare(b.word);
+    });
+  };
   if (typeof window === 'undefined') {
     loadMemory();
-    module.exports = { normalize, classifyQuery, schedule, scheduleAll, migrateStudy, createStudy, reviewInterval, csv, dictionary, validateBackup, mergeBackup, ordered, audioUrl, translationSource, translationChunks, youdaoTranslation, youdaoExamples, youdaoPhonetic, datamusePhonetic, youdaoWordForms,
+    module.exports = { normalize, classifyQuery, schedule, scheduleAll, migrateStudy, createStudy, reviewInterval, csv, dictionary, validateBackup, mergeBackup, ordered, groupHistory, audioUrl, translationSource, translationChunks, youdaoTranslation, youdaoExamples, youdaoPhonetic, datamusePhonetic, youdaoWordForms,
       dayStart, nextDayStart, availableAt, planReview, createReviewSession, retentionStats, contextParts, isLeech,
       pageScope, siteState, validateSiteRules };
     return;
@@ -3082,7 +3098,6 @@ SOFTWARE.
   let audioEpoch = 0;
   let ownSpeech = false;
   let selectedWord = '';
-  let selectedEvent = null;
   let screen = 'history';
   const libraryState = {
     history: { filter: '', page: 0 },
@@ -3090,7 +3105,7 @@ SOFTWARE.
   };
   let scopeFilter = '';
   let scopePage = 0;
-  let oldest = false;
+  let historyOrder = 'new';
   const review = createReviewSession({
     read: get, write: put, remove,
     inventory: () => ({ book: all('study'), recalls: all('recall') }),
@@ -3207,7 +3222,7 @@ SOFTWARE.
     .studio{position:relative}.library-detail,.library-sheet{display:flex;flex-direction:column;min-width:0;min-height:0}.library-sheet,.library-sheet>.detail-pane{flex:1}
     .library-sheet-bar,.library-sheet-nav{display:none}
     .list:focus-visible,.detail-pane:focus-visible{outline:2px solid #75ac8c;outline-offset:-2px}
-    .library-row{position:relative;flex-shrink:0}.library-row>.item{padding-right:42px}.history-row>.item{padding-right:70px}
+    .library-row{position:relative;flex-shrink:0}.library-row>.item{padding-right:42px}
     .library-row:hover>.item{background:var(--surface)}.library-row:hover>.item.active{background:var(--tint)}
     .row-actions{position:absolute;right:5px;top:50%;transform:translateY(-50%);display:flex;align-items:center;gap:2px}
     .detail-star,.list-star,.history-delete{border:0;background:transparent;padding:4px 7px;line-height:1;border-radius:8px}
@@ -3217,13 +3232,16 @@ SOFTWARE.
     .word-heading{margin:8px 0 6px}.word-heading .word{margin:0;min-width:0}
     .detail-star{display:flex;align-items:center;justify-content:center;width:44px;height:44px;padding:0;font-size:32px}
     .history-delete{opacity:0;pointer-events:none}
-    .history-row:hover .history-delete,.history-row:focus-within .history-delete{opacity:1;pointer-events:auto}
     .history-delete:hover{background:color-mix(in srgb,var(--error) 12%,transparent)}
     @media(hover:none){.history-delete{opacity:1;pointer-events:auto}}
     .stats{flex-wrap:wrap}.stat{min-width:110px}
     .context-line{margin:14px auto 4px;max-width:480px;color:var(--muted);font:15px/1.7 Georgia,"Times New Roman",serif;overflow-wrap:anywhere}
     .context-line mark{background:color-mix(in srgb,var(--accent) 18%,transparent);color:var(--ink);border-radius:4px;padding:0 3px}
     .context-line .cloze{color:var(--accent);font-weight:650;letter-spacing:1px}
+    .history-footprint{margin:10px 0 16px;border:1px solid var(--line);border-radius:10px;padding:8px 10px}
+    .history-footprint>summary{cursor:pointer;color:var(--muted);font-size:12px}.history-entry{display:flex;align-items:flex-start;justify-content:space-between;gap:8px;padding:9px 0;border-top:1px solid var(--line)}
+    .history-entry-content{min-width:0}.history-entry .history-delete{opacity:1;pointer-events:auto;flex-shrink:0}
+    .history-context{margin:4px 0;color:var(--ink);font-size:13px;line-height:1.55;overflow-wrap:anywhere}
     .recall-prompt{text-align:left;background:var(--tint);border-radius:12px;padding:16px;margin:25px 0 6px}.recall-prompt .definition{margin:0 0 6px}
     .spelling{display:block;width:min(320px,100%);margin:6px auto 14px;text-align:center;font:20px Georgia,serif;background:var(--surface);border:1px solid var(--line)}
     .spell{font-weight:650}.spell.ok{color:var(--accent)}.spell.bad,.leech{color:var(--error)}
@@ -3268,8 +3286,8 @@ SOFTWARE.
     .compact .settings-heading{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
     .compact .settings-version{display:block;padding:3px 8px;border-radius:6px;background:var(--tint);color:var(--ink);font:500 11px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;letter-spacing:0;white-space:nowrap}
     .compact .library .split{display:flex;flex-direction:column;min-height:220px}.compact .library-list{flex:1}.compact .library .list{max-height:none}
-    .compact .library-row>.item{position:relative;min-height:44px;padding:4px 60px 4px 8px}.compact .history-row>.item{padding-right:96px}
-    .compact .library-row>.item::after{content:'›';position:absolute;right:42px;top:50%;transform:translateY(-50%);font-size:22px;color:var(--muted)}.compact .history-row>.item::after{right:78px}
+    .compact .library-row>.item{position:relative;min-height:44px;padding:4px 60px 4px 8px}
+    .compact .library-row>.item::after{content:'›';position:absolute;right:42px;top:50%;transform:translateY(-50%);font-size:22px;color:var(--muted)}
     .compact .item .term{font-size:18px}.compact .item .meta{font-size:10px;line-height:1.3;margin-top:1px}
     .compact .row-actions .icon{min-width:32px;min-height:36px;padding:0}
     .compact .library-pagination{margin-top:6px;gap:6px}
@@ -4109,7 +4127,7 @@ SOFTWARE.
       put('event:' + event.id, event);
       settings = cleanSettings(get('settings', {}));
       if (settings.autoBook && !get('study:' + word)) put('study:' + word, createStudy(word, now));
-      if (!target) { selectedWord = word; selectedEvent = event; }
+      if (!target) selectedWord = word;
       notify();
       if (target) {
         internalResult(target, wordDetail(entry, event));
@@ -4607,7 +4625,29 @@ SOFTWARE.
     }
     return node;
   }
-  function wordDetail(entry, event = null, allowStar = true, node = el('article', 'detail')) {
+  function historyRecords(word) {
+    return ordered(all('event').filter(item => item.word === word));
+  }
+  function historyFootprint(word, onDelete, label) {
+    const records = historyRecords(word);
+    if (!records.length) return null;
+    const footprint = el('details', 'history-footprint');
+    footprint.append(el('summary', '', label || `查询足迹 · ${records.length} 次`));
+    for (const record of records) {
+      const row = el('div', 'history-entry');
+      const content = el('div', 'history-entry-content');
+      content.append(el('div', 'meta', date(record.at)));
+      if (record.context) content.append(el('p', 'history-context', record.context));
+      if (safeUrl(record.sourceUrl)) content.append(link(record.title || '打开原网页', record.sourceUrl));
+      else if (record.title) content.append(el('div', 'meta', record.title));
+      row.append(content);
+      if (onDelete) row.append(button('×', () => onDelete(record), 'icon danger history-delete',
+        `删除 ${word} 在 ${date(record.at)} 的这条查询记录`));
+      footprint.append(row);
+    }
+    return footprint;
+  }
+  function wordDetail(entry, event = null, allowStar = true, node = el('article', 'detail'), onHistoryDelete = null) {
     node.replaceChildren();
     const title = el('div', 'bar word-heading');
     const actions = el('div', 'actions');
@@ -4633,7 +4673,7 @@ SOFTWARE.
         const updated = preserveWordEnrichment(dictionary(response, entry.word, Date.now()));
         put('word:' + entry.word, updated);
         notify();
-        wordDetail(updated, event, allowStar, node);
+        wordDetail(updated, event, allowStar, node, onHistoryDelete);
       } catch (error) {
         refreshNotice.textContent = '更新释义失败：' + error.message;
         refreshNotice.hidden = false;
@@ -4645,6 +4685,17 @@ SOFTWARE.
     actions.append(refresh);
     title.append(el('h2', 'word', entry.word), actions);
     node.append(title, refreshNotice, phoneticBlock(entry));
+    if (onHistoryDelete) {
+      const footprint = historyFootprint(entry.word, onHistoryDelete);
+      if (footprint) node.append(footprint);
+    } else if (allowStar) {
+      const records = historyRecords(entry.word);
+      if (records.length > 1) {
+        const label = `查过 ${records.length} 次 · 最近 ${date(records[0].at)}`;
+        const footprint = historyFootprint(entry.word, null, label);
+        if (footprint) node.append(footprint);
+      }
+    }
     node.append(senses(entry));
     node.append(chineseDefinitions(entry));
     if (event?.context || event?.sourceUrl) {
@@ -4718,13 +4769,13 @@ SOFTWARE.
     if (!isBook) {
       const order = el('select');
       order.setAttribute('aria-label', '历史排序');
-      for (const [value, label] of [['new', '最近'], ['old', '最早']]) {
+      for (const [value, label] of [['new', '最近'], ['old', '最早'], ['count', '最多']]) {
         const option = el('option', '', label);
         option.value = value;
         order.append(option);
       }
-      order.value = oldest ? 'old' : 'new';
-      order.addEventListener('change', () => { oldest = order.value === 'old'; firstPage(); });
+      order.value = historyOrder;
+      order.addEventListener('change', () => { historyOrder = order.value; firstPage(); });
       toolbar.append(order);
     }
     const list = el('div', 'list');
@@ -4765,7 +4816,7 @@ SOFTWARE.
     split.append(left, layer);
     view.append(split);
     function selectedIndex() {
-      return matches.findIndex(item => isBook ? item.word === selectedWord : item.id === selectedEvent?.id);
+      return matches.findIndex(item => item.word === selectedWord);
     }
     function updateWordNavigation() {
       const index = selectedIndex();
@@ -4828,7 +4879,6 @@ SOFTWARE.
     function selectItem(item) {
       resetInternalLookup(); cancelInternalSelection(); stopAudio();
       selectedWord = item.word;
-      selectedEvent = isBook ? null : item;
       const scrollTop = list.scrollTop;
       drawList(); drawDetail();
       list.scrollTop = scrollTop;
@@ -4845,11 +4895,37 @@ SOFTWARE.
     }
     function drawDetail() {
       const entry = selectedWord && (!isBook || get('study:' + selectedWord)) ? get('word:' + selectedWord) : null;
-      detail.replaceChildren(entry ? wordDetail(entry, isBook ? null : selectedEvent, false) : el('div', 'empty', '选择一个单词，或在上方开始查询'));
+      detail.replaceChildren(entry
+        ? wordDetail(entry, null, false, undefined, isBook ? null : deleteHistoryRecord)
+        : el('div', 'empty', '选择一个单词，或在上方开始查询'));
+    }
+    function deleteHistoryRecord(record) {
+      const listTop = list.scrollTop;
+      const detailTop = detail.scrollTop;
+      const currentIndex = matches.findIndex(item => item.word === record.word);
+      const neighbor = matches[currentIndex + 1] || matches[currentIndex - 1];
+      remove('event:' + record.id);
+      if (selectedWord === record.word) {
+        if (!historyRecords(record.word).length) selectedWord = neighbor?.word || '';
+      }
+      notify();
+      drawList();
+      drawDetail();
+      list.scrollTop = listTop;
+      detail.scrollTop = detailTop;
+      if (sheetOpen) panel.focus({ preventScroll: true });
+      else {
+        const active = [...list.querySelectorAll('.item')].find(row => row.getAttribute('aria-current') === 'true');
+        (active || search).focus({ preventScroll: true });
+      }
     }
     function drawList() {
-      const records = isBook ? all('study').sort((a, b) => b.addedAt - a.addedAt || a.word.localeCompare(b.word)) : ordered(all('event'), oldest);
-      subheading.textContent = isBook ? `${records.length} 个词 · 收藏的词会进入复习` : `${records.length} 次查询 · 每次成功查询都留有记录`;
+      const history = isBook ? [] : all('event');
+      const records = isBook
+        ? all('study').sort((a, b) => b.addedAt - a.addedAt || a.word.localeCompare(b.word))
+        : groupHistory(history, historyOrder);
+      subheading.textContent = isBook ? `${records.length} 个词 · 收藏的词会进入复习`
+        : `${records.length} 个词 · ${history.length} 次查询`;
       list.replaceChildren();
       const filter = state.filter.trim().toLowerCase();
       matches = records.filter(item => item.word.includes(filter));
@@ -4865,38 +4941,22 @@ SOFTWARE.
           selectItem(item);
           showSheet();
         }, 'item');
-        const active = isBook ? selectedWord === item.word : selectedEvent?.id === item.id;
+        const active = selectedWord === item.word;
         row.classList.toggle('active', active);
         if (active) row.setAttribute('aria-current', 'true');
         if (compact) row.setAttribute('aria-haspopup', 'dialog');
-        row.append(el('div', 'term', item.word), el('div', 'meta', isBook ? bookMeta(item) : date(item.at)));
+        row.append(el('div', 'term', item.word), el('div', 'meta', isBook
+          ? bookMeta(item) : `${item.events.length} 次查询 · 最近 ${date(item.latestAt)}`));
         const starred = Boolean(get('study:' + item.word));
         const wrapper = el('div', isBook ? 'library-row' : 'library-row history-row');
         const actions = el('div', 'row-actions');
-        if (!isBook) {
-          actions.append(button('×', () => {
-            const scrollTop = list.scrollTop;
-            const detailTop = detail.scrollTop;
-            remove('event:' + item.id);
-            const deletingSelected = selectedEvent?.id === item.id;
-            if (deletingSelected) {
-              selectedEvent = neighbor || null;
-              selectedWord = selectedEvent?.word || '';
-            }
-            notify();
-            redrawAfterRemoval('.history-delete', position, start, scrollTop, deletingSelected, detailTop);
-          }, 'icon danger history-delete', `删除 ${item.word} 的这条查询记录`));
-        }
         const star = button(starred ? '★' : '☆', () => {
           const scrollTop = list.scrollTop;
           const detailTop = detail.scrollTop;
           if (!toggleStar(item.word, false)) { star.focus({ preventScroll: true }); return; }
           if (isBook) {
             const deletingSelected = selectedWord === item.word;
-            if (deletingSelected) {
-              selectedWord = neighbor?.word || '';
-              selectedEvent = null;
-            }
+            if (deletingSelected) selectedWord = neighbor?.word || '';
             redrawAfterRemoval('.list-star', position, start, scrollTop, deletingSelected, detailTop);
           } else {
             drawList();
@@ -5558,12 +5618,12 @@ SOFTWARE.
     cleanActions.append(button('清空查词历史', () => {
       if (!confirm('清空全部查词事件？词条缓存、生词本和复习进度会保留。建议先导出备份。')) return;
       for (const key of GM_listValues().filter(key => key.startsWith(PREFIX + 'event:'))) GM_deleteValue(key);
-      selectedEvent = null; notify(); render(); message('查词历史已清空');
+      notify(); render(); message('查词历史已清空');
     }, 'button danger'), button('删除全部 Lexi 数据', () => {
       if (prompt('此操作不可撤销，请先导出备份。输入“删除全部”以清除本机所有 Lexi 数据与同步配置（不删除云端文件）：') !== '删除全部') return;
       stopActivity();
       for (const key of GM_listValues().filter(key => key.startsWith(PREFIX))) GM_deleteValue(key);
-      settings = { ...DEFAULTS }; selectedWord = ''; selectedEvent = null; review.reset();
+      settings = { ...DEFAULTS }; selectedWord = ''; review.reset();
       launcherPosition = null; positionLauncher();
       scopeFilter = ''; scopePage = 0;
       syncMessage = '';

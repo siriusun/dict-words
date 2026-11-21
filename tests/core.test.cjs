@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const test = require('node:test');
 const fs = require('node:fs');
 const { createHash } = require('node:crypto');
-const { normalize, classifyQuery, schedule, scheduleAll, migrateStudy, createStudy, reviewInterval, csv, dictionary, validateBackup, mergeBackup, ordered, audioUrl, translationSource, translationChunks, youdaoTranslation, youdaoExamples, youdaoPhonetic, datamusePhonetic, youdaoWordForms,
+const { normalize, classifyQuery, schedule, scheduleAll, migrateStudy, createStudy, reviewInterval, csv, dictionary, validateBackup, mergeBackup, ordered, groupHistory, audioUrl, translationSource, translationChunks, youdaoTranslation, youdaoExamples, youdaoPhonetic, datamusePhonetic, youdaoWordForms,
   dayStart, nextDayStart, availableAt, planReview, createReviewSession, retentionStats, contextParts, isLeech,
   pageScope, siteState, validateSiteRules } = require('../lexi.user.js');
 const now = Date.UTC(2026, 10, 12);
@@ -417,6 +417,21 @@ test('history preserves repeated words in chronological order with deterministic
   assert.deepEqual(ordered(events, true).map(item => item.id), ['a', 'b', 'c']);
   assert.deepEqual(ordered(events).map(item => item.id), ['c', 'b', 'a']);
   assert.equal(events[0].id, 'b');
+});
+test('history groups repeated words, keeps each event, and sorts by recency, first lookup or count', () => {
+  const events = [
+    { word: 'alpha', id: 'a1', at: now },
+    { word: 'beta', id: 'b1', at: now + 2 },
+    { word: 'alpha', id: 'a2', at: now + 1 },
+    { word: 'beta', id: 'b2', at: now + 3 },
+    { word: 'beta', id: 'b3', at: now + 4 }
+  ];
+  const recent = groupHistory(events);
+  assert.deepEqual(recent.map(item => item.word), ['beta', 'alpha']);
+  assert.deepEqual(recent[0].events.map(item => item.id), ['b3', 'b2', 'b1']);
+  assert.deepEqual(groupHistory(events, 'old').map(item => item.word), ['alpha', 'beta']);
+  assert.deepEqual(groupHistory(events, 'count').map(item => item.word), ['beta', 'alpha']);
+  assert.equal(recent.reduce((count, item) => count + item.events.length, 0), events.length);
 });
 test('a refreshed definition never inherits a translation for a different definition', () => {
   const original = validateBackup(backup());
