@@ -42,20 +42,55 @@ export async function mobileLayoutMetrics(page) {
     const rect = selector => root.querySelector(selector).getBoundingClientRect().toJSON();
     const list = rect('.list');
     const view = rect('.view');
+    const input = root.querySelector('.search input');
+    const inputStyle = getComputedStyle(input);
+    const placeholderStyle = getComputedStyle(input, '::placeholder');
+    const canvas = document.createElement('canvas').getContext('2d');
+    canvas.font = `${placeholderStyle.fontStyle} ${placeholderStyle.fontWeight} ${placeholderStyle.fontSize} ${placeholderStyle.fontFamily}`;
     const viewport = window.visualViewport;
     return {
       viewport: { width: viewport.width, height: viewport.height, scale: viewport.scale },
       studio: rect('.studio'), top: rect('.top'), list, row: rect('.library-row'),
+      searchInput: rect('.search input'), searchButton: rect('.search .button'),
+      hint: {
+        available: input.clientWidth - parseFloat(inputStyle.paddingLeft) - parseFloat(inputStyle.paddingRight),
+        essential: canvas.measureText(input.placeholder.split('，')[0]).width,
+        full: canvas.measureText(input.placeholder).width
+      },
       visibleRows: [...root.querySelectorAll('.library-row')].filter(row => {
         const box = row.getBoundingClientRect();
         return box.top >= Math.max(list.top, view.top) && box.bottom <= Math.min(list.bottom, view.bottom);
       }).length,
       overflow: root.querySelector('.view').scrollWidth - root.querySelector('.view').clientWidth,
-      inputFont: parseFloat(getComputedStyle(root.querySelector('.search input')).fontSize),
-      focusedSearch: root.activeElement === root.querySelector('.search input'),
+      inputFont: parseFloat(inputStyle.fontSize),
+      placeholderFont: parseFloat(placeholderStyle.fontSize),
+      searchButtonFont: parseFloat(getComputedStyle(root.querySelector('.search .button')).fontSize),
+      focusedSearch: root.activeElement === input,
       requests: window.__lexiRequests
     };
   });
+}
+
+export function checkSearchTypography(result, mobile, width) {
+  const check = (condition, message) => {
+    if (!condition) throw new Error(message + ': ' + JSON.stringify(result));
+  };
+  if (mobile) {
+    check(result.inputFont >= 16 && !result.focusedSearch,
+      'Opening does not focus or shrink the mobile search input');
+    check(result.placeholderFont >= 12 && result.placeholderFont <= result.searchButtonFont,
+      'Mobile search hint is legible and visually balanced with its button');
+    check(result.hint.essential <= result.hint.available,
+      'The query type remains visible on narrow phones');
+    if (width >= 390) check(result.hint.full <= result.hint.available,
+      'The full search hint fits on wider phones');
+  } else {
+    check(result.searchInput.height >= 42 && result.searchInput.height === result.searchButton.height,
+      'Desktop search control geometry stays unchanged');
+    check(result.inputFont >= result.searchButtonFont && result.inputFont <= result.searchButtonFont + 1
+      && result.placeholderFont === result.inputFont,
+    'Desktop search text is visually balanced with its button');
+  }
 }
 
 export async function checkMobileLayout(page, baseUrl, source) {
@@ -83,6 +118,7 @@ export async function checkMobileLayout(page, baseUrl, source) {
     check(studio.top >= 0 && studio.bottom <= viewport.height + 1
       && studio.left >= 0 && studio.right <= viewport.width + 1 && result.overflow <= 1,
     'Panel and content fit the visible viewport', result);
+    checkSearchTypography(result, width < 1000, width);
     if (width < 1000) {
       const scale = viewport.scale;
       check(studio.left * scale >= 17 && (viewport.width - studio.right) * scale >= 17,
@@ -91,14 +127,12 @@ export async function checkMobileLayout(page, baseUrl, source) {
         && studio.height * scale <= height * .88, 'Panel is modestly taller, not fullscreen', result);
       check(result.row.height * scale >= 43 && result.row.height * scale <= 47,
         'History rows are compact but usable', result);
-      check(result.inputFont >= 16 && !result.focusedSearch,
-        'Opening does not focus or shrink the mobile search input', result);
       if (height >= 568) check(result.visibleRows >= (height >= 700 ? 6 : 4),
         'More complete history rows are visible', result);
       else check(result.visibleRows >= 1, 'Short viewports still expose a usable list row', result);
     } else {
-      check(studio.width === Math.min(1060, viewport.width - 48) && studio.height === 720 && result.inputFont === 18,
-        'Desktop geometry and input size stay unchanged', result);
+      check(studio.width === Math.min(1060, viewport.width - 48) && studio.height === 720,
+        'Desktop panel geometry stays unchanged', result);
     }
     await page.evaluate(async () => {
       window.__lexiShadow.querySelector('.library-row .item').click();

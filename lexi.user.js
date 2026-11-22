@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Lexi · 划词词典与复习
 // @namespace    lexi-local
-// @version      0.8.8
+// @version      0.8.9
 // @description  英文划词与句子翻译、触屏选区操作、发音、跨网站历史、生词复习与本地备份。
 // @match        http://*/*
 // @match        https://*/*
@@ -3197,7 +3197,7 @@ SOFTWARE.
   style.textContent += `
     .toast{pointer-events:none}
     input,select{border:0;outline:none;box-shadow:none}
-    .search input{font-size:18px;line-height:1.5;padding:8px 12px}
+    .search input{font-size:15px;line-height:27px;padding:8px 12px}
     .list{gap:2px;margin-top:8px;padding:2px}
     .item{padding:6px 10px;border:0;border-radius:9px}
     .item .term{font-size:21px;line-height:1.2;overflow-wrap:anywhere}
@@ -3269,7 +3269,7 @@ SOFTWARE.
     .compact .sidebar{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:2px;overflow:visible;padding:4px 6px;border-right:0;border-bottom:1px solid var(--line)}
     .compact .sidebar .logo,.compact .sidebar .muted,.compact .sidebar .footnote{display:none}
     .compact .tab{min-height:40px;padding:0 2px;text-align:center;font-size:12px}
-    .compact .top{padding:4px 8px;gap:4px}.compact .search{gap:4px}.compact .search input{padding:5px 8px;font-size:16px}
+    .compact .top{padding:4px 8px;gap:4px}.compact .search{gap:4px}.compact .search input{padding:5px 8px;font-size:16px;line-height:1.5}.compact .search input::placeholder{font-size:13px}
     .compact .button,.compact .icon{min-height:36px}.compact .button{padding:5px 10px;font-size:13px}.compact .icon{min-width:36px}
     .compact .selection-action{display:flex;align-items:center;gap:10px;width:min(340px,calc(var(--visible-width) - 24px));max-width:calc(var(--visible-width) - 24px);min-height:60px;padding:7px;border:1px solid var(--line);border-radius:18px;background:var(--surface);color:var(--ink);box-shadow:0 12px 30px #102a2030,0 2px 6px #102a2015;text-align:left;transform:scale(var(--ui-scale)) translateY(calc(0px - env(safe-area-inset-bottom)));transform-origin:top left}
     .compact .selection-action:hover{background:var(--surface);filter:none}
