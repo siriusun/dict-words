@@ -1022,6 +1022,7 @@ test('expanded examples refresh old caches and remain available in cache-only re
   }]) });
   await new Promise(setImmediate);
   assert.equal(shadow.querySelectorAll('.definition').length, 20);
+  assert.ok(findButton(shadow.querySelector('.detail-pane'), '删除'), 'refresh keeps the library delete action');
   assert.match(textOf(shadow.querySelector('.detail')), /Alpha sense example 20/);
   assert.equal(shadow.querySelectorAll('.example-en').length, 12);
   assert.equal(storage.get(prefix + 'word:alpha').meanings[0].definitions.length, 20);
@@ -1405,6 +1406,94 @@ test('grouped history deletes one event at a time without changing cache or stud
   assert.equal(shadow.activeElement, shadow.querySelector('.library-list').querySelector('input'));
 });
 
+test('history detail confirms deletion of a single event or all events for a word', async () => {
+  const { shadow, storage, events, click, prefix, context } = setup();
+  const confirmations = [];
+  context.confirm = message => { confirmations.push(message); return false; };
+  await click(shadow.querySelector('.item'));
+  const detail = shadow.querySelector('.detail-pane');
+  const actions = detail.querySelector('.actions');
+  assert.deepEqual(actions.querySelectorAll('button').map(node => node.textContent), ['更新释义', '删除']);
+  await click(detail.querySelector('.history-delete'));
+  await click(findButton(actions, '删除'));
+  assert.equal(confirmations.length, 2);
+  assert.match(confirmations[0], /这条查询记录/);
+  assert.match(confirmations[1], /全部查词记录/);
+  assert.ok(events.every(event => storage.has(prefix + 'event:' + event.id)));
+  assert.equal(detail.querySelector('.word').textContent, 'alpha');
+  const cache = storage.get(prefix + 'word:alpha');
+  const study = storage.get(prefix + 'study:alpha');
+  storage.set(prefix + 'recall:alpha', createStudy('alpha'));
+  const recall = storage.get(prefix + 'recall:alpha');
+  context.confirm = () => true;
+  await click(findButton(actions, '删除'));
+  assert.equal(storage.has(prefix + 'event:' + events[0].id), false);
+  assert.equal(storage.has(prefix + 'event:' + events[2].id), false);
+  assert.ok(storage.has(prefix + 'event:' + events[1].id));
+  assert.equal(storage.get(prefix + 'word:alpha'), cache);
+  assert.equal(storage.get(prefix + 'study:alpha'), study);
+  assert.equal(storage.get(prefix + 'recall:alpha'), recall);
+  assert.equal(detail.querySelector('.word').textContent, 'beta');
+});
+
+test('book detail deletion confirms and removes both review directions while preserving history', async () => {
+  const app = setup('/test/', 'youdao', { viewport: { width: 390, height: 714, scale: 1 } });
+  const { shadow, storage, events, click, prefix, context } = app;
+  storage.set(prefix + 'recall:alpha', createStudy('alpha'));
+  await click(findButton(shadow, '生词本'));
+  await click(shadow.querySelector('.item'));
+  const layer = shadow.querySelector('.library-detail');
+  const detail = shadow.querySelector('.detail-pane');
+  const actions = detail.querySelector('.actions');
+  assert.deepEqual(actions.querySelectorAll('button').map(node => node.textContent), ['更新释义', '删除']);
+  const cache = storage.get(prefix + 'word:alpha');
+  let prompt;
+  context.confirm = message => { prompt = message; return false; };
+  await click(findButton(actions, '删除'));
+  assert.match(prompt, /复习进度/);
+  assert.ok(storage.has(prefix + 'study:alpha'));
+  assert.ok(storage.has(prefix + 'recall:alpha'));
+  assert.equal(layer.hidden, false);
+  context.confirm = () => true;
+  await click(findButton(actions, '删除'));
+  assert.equal(storage.has(prefix + 'study:alpha'), false);
+  assert.equal(storage.has(prefix + 'recall:alpha'), false);
+  assert.ok(events.every(event => storage.has(prefix + 'event:' + event.id)));
+  assert.equal(storage.get(prefix + 'word:alpha'), cache);
+  assert.equal(detail.querySelector('.word'), null);
+  assert.equal(shadow.activeElement, shadow.querySelector('.library-sheet'));
+  await click(findButton(shadow.querySelector('.library-sheet-bar'), '关闭'));
+  assert.equal(layer.hidden, true);
+  assert.equal(shadow.activeElement, shadow.querySelector('.library-list').querySelector('input'));
+});
+
+test('partial history word deletion reports storage errors and refreshes the remaining events', async () => {
+  const { shadow, storage, events, click, prefix, context } = setup();
+  await click(shadow.querySelector('.item'));
+  const remove = context.GM_deleteValue;
+  let calls = 0;
+  context.GM_deleteValue = key => {
+    if (++calls === 2) throw new Error('Storage unavailable');
+    remove(key);
+  };
+  await click(findButton(shadow.querySelector('.detail-pane'), '删除'));
+  assert.equal(storage.has(prefix + 'event:' + events[2].id), false);
+  assert.ok(storage.has(prefix + 'event:' + events[0].id));
+  assert.equal(shadow.querySelector('.history-footprint').querySelector('summary').textContent, '查询足迹 · 1 次');
+  assert.equal(shadow.querySelector('.toast').textContent, 'Storage unavailable');
+});
+
+test('deleting a stale book detail cannot add the word back to the book', async () => {
+  const { shadow, storage, click, prefix } = setup();
+  await click(findButton(shadow, '生词本'));
+  await click(shadow.querySelector('.item'));
+  storage.delete(prefix + 'study:alpha');
+  await click(findButton(shadow.querySelector('.detail-pane'), '删除'));
+  assert.equal(storage.has(prefix + 'study:alpha'), false);
+  assert.equal(shadow.querySelector('.detail-pane').querySelector('.word'), null);
+  assert.match(shadow.querySelector('.toast').textContent, /已不在生词本/);
+});
+
 test('lookup cards and grouped rows show a word-specific query count and latest lookup', async () => {
   const app = setup('/test/', 'youdao', { open: false });
   selectWebsite(app, 'alpha');
@@ -1708,7 +1797,7 @@ test('history and vocabulary reach beyond 300 filtered matches and clamp after r
   await lastPage();
   assert.deepEqual(visible(), [words.at(-1)]);
   await click(shadow.querySelector('.item'));
-  await click(shadow.querySelector('.history-delete'));
+  await click(findButton(shadow.querySelector('.detail-pane'), '删除'));
   assert.match(status(), /6 \/ 6/);
   assert.equal(search().value, 'fixture');
   assert.equal(sort().value, 'old');
@@ -1720,7 +1809,7 @@ test('history and vocabulary reach beyond 300 filtered matches and clamp after r
   await lastPage();
   assert.deepEqual(visible(), [words[0]]);
   await click(shadow.querySelector('.item'));
-  await click(shadow.querySelector('.list-star'));
+  await click(findButton(shadow.querySelector('.detail-pane'), '删除'));
   assert.match(status(), /6 \/ 6/);
   assert.equal(search().value, 'fixture');
   assert.equal(visible().at(-1), words[1]);

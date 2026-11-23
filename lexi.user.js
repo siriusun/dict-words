@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Lexi · 划词词典与复习
 // @namespace    lexi-local
-// @version      0.8.9
+// @version      0.9.0
 // @description  英文划词与句子翻译、触屏选区操作、发音、跨网站历史、生词复习与本地备份。
 // @match        http://*/*
 // @match        https://*/*
@@ -4653,7 +4653,7 @@ SOFTWARE.
     }
     return footprint;
   }
-  function wordDetail(entry, event = null, allowStar = true, node = el('article', 'detail'), onHistoryDelete = null) {
+  function wordDetail(entry, event = null, allowStar = true, node = el('article', 'detail'), onHistoryDelete = null, onWordDelete = null) {
     node.replaceChildren();
     const title = el('div', 'bar word-heading');
     const actions = el('div', 'actions');
@@ -4679,7 +4679,7 @@ SOFTWARE.
         const updated = preserveWordEnrichment(dictionary(response, entry.word, Date.now()));
         put('word:' + entry.word, updated);
         notify();
-        wordDetail(updated, event, allowStar, node, onHistoryDelete);
+        wordDetail(updated, event, allowStar, node, onHistoryDelete, onWordDelete);
       } catch (error) {
         refreshNotice.textContent = '更新释义失败：' + error.message;
         refreshNotice.hidden = false;
@@ -4689,6 +4689,8 @@ SOFTWARE.
       }
     }, 'button', '重新获取英文释义及各含义的例句，保留收藏和复习进度');
     actions.append(refresh);
+    if (onWordDelete) actions.append(button('删除', onWordDelete, 'button danger',
+      `删除 ${entry.word}${onHistoryDelete ? ' 的全部查词记录' : ' 的生词本记录'}`));
     title.append(el('h2', 'word', entry.word), actions);
     node.append(title, refreshNotice, phoneticBlock(entry));
     if (onHistoryDelete) {
@@ -4902,23 +4904,55 @@ SOFTWARE.
     function drawDetail() {
       const entry = selectedWord && (!isBook || get('study:' + selectedWord)) ? get('word:' + selectedWord) : null;
       detail.replaceChildren(entry
-        ? wordDetail(entry, null, false, undefined, isBook ? null : deleteHistoryRecord)
+        ? wordDetail(entry, null, false, undefined, isBook ? null : deleteHistoryRecord, () => deleteWord(entry.word))
         : el('div', 'empty', '选择一个单词，或在上方开始查询'));
     }
     function deleteHistoryRecord(record) {
+      if (!confirm(`删除 ${record.word} 在 ${date(record.at)} 的这条查询记录？`)) return;
+      remove('event:' + record.id);
+      notify();
+      redrawDeletedWord(record.word);
+    }
+    function deleteWord(word) {
+      if (isBook) {
+        if (!get('study:' + word)) {
+          redrawDeletedWord(word);
+          throw new Error('该词已不在生词本，请重新选择');
+        }
+        if (!toggleStar(word, false)) return;
+      } else {
+        if (!confirm(`删除 ${word} 的全部查词记录？生词本、复习进度和词条缓存保留。`)) return;
+        const records = historyRecords(word);
+        let removed = 0;
+        try {
+          for (const record of records) {
+            remove('event:' + record.id);
+            removed++;
+          }
+        } finally {
+          if (removed) {
+            notify();
+            redrawDeletedWord(word);
+          }
+        }
+        return;
+      }
+      redrawDeletedWord(word);
+    }
+    function redrawDeletedWord(word) {
       const listTop = list.scrollTop;
       const detailTop = detail.scrollTop;
-      const currentIndex = matches.findIndex(item => item.word === record.word);
+      const currentIndex = matches.findIndex(item => item.word === word);
       const neighbor = matches[currentIndex + 1] || matches[currentIndex - 1];
-      remove('event:' + record.id);
-      if (selectedWord === record.word) {
-        if (!historyRecords(record.word).length) selectedWord = neighbor?.word || '';
+      if (selectedWord === word && (isBook ? !get('study:' + word) : !historyRecords(word).length)) {
+        selectedWord = neighbor?.word || '';
+        if (sheetOpen) sheetMoved = true;
       }
-      notify();
       drawList();
       drawDetail();
       list.scrollTop = listTop;
-      detail.scrollTop = detailTop;
+      if (selectedWord === word) detail.scrollTop = detailTop;
+      else detail.scrollTop = 0;
       if (sheetOpen) panel.focus({ preventScroll: true });
       else {
         const active = [...list.querySelectorAll('.item')].find(row => row.getAttribute('aria-current') === 'true');
