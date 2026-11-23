@@ -52,6 +52,8 @@ export async function mobileLayoutMetrics(page) {
       viewport: { width: viewport.width, height: viewport.height, scale: viewport.scale },
       studio: rect('.studio'), top: rect('.top'), list, row: rect('.library-row'),
       searchInput: rect('.search input'), searchButton: rect('.search .button'),
+      searchGroup: rect('.search'), closeButton: rect('.top .close-studio'),
+      groupDivider: getComputedStyle(root.querySelector('.search')).borderRightWidth,
       hint: {
         available: input.clientWidth - parseFloat(inputStyle.paddingLeft) - parseFloat(inputStyle.paddingRight),
         essential: canvas.measureText(input.placeholder.split('，')[0]).width,
@@ -75,6 +77,11 @@ export function checkSearchTypography(result, mobile, width) {
   const check = (condition, message) => {
     if (!condition) throw new Error(message + ': ' + JSON.stringify(result));
   };
+  check(result.groupDivider !== '0px' && result.searchButton.right < result.searchGroup.right
+    && result.searchGroup.right < result.closeButton.left,
+  'Search and close are visually separated without overlapping');
+  check(result.closeButton.width >= 36 && result.closeButton.height >= 36,
+    'Close retains a usable target');
   if (mobile) {
     check(result.inputFont >= 16 && !result.focusedSearch,
       'Opening does not focus or shrink the mobile search input');
