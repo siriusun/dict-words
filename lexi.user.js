@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Lexi · 划词词典与复习
 // @namespace    lexi-local
-// @version      0.9.2
+// @version      0.9.3
 // @description  英文划词与句子翻译、触屏选区操作、发音、跨网站历史、生词复习与本地备份。
 // @match        http://*/*
 // @match        https://*/*
@@ -3201,9 +3201,9 @@ SOFTWARE.
     .search-field:focus-within{background:var(--tint)}
     .search-field input,.search-field input:focus-visible{font-size:15px;line-height:27px;padding:8px 12px;background:transparent}
     .top .search{padding-right:14px;border-right:1px solid var(--line)}
-    .top .search-button{position:relative;padding:4px 16px 4px 36px;border-radius:9px;font-weight:650;box-shadow:0 2px 6px #102a201c}
-    .top .search-button::before{content:'';position:absolute;left:15px;top:50%;width:11px;height:11px;border:1.7px solid currentColor;border-radius:50%;transform:translateY(-60%)}
-    .top .search-button::after{content:'';position:absolute;left:26px;top:calc(50% + 4px);width:5px;height:1.7px;border-radius:2px;background:currentColor;transform:rotate(45deg);transform-origin:left center}
+    .top .search-button,.top .search-button:hover{position:relative;width:36px;height:36px;padding:0;border:0;background:transparent;color:var(--accent);box-shadow:none}
+    .top .search-button::before{content:'';position:absolute;left:10px;top:9px;width:14px;height:14px;border:2px solid currentColor;border-radius:50%}
+    .top .search-button::after{content:'';position:absolute;left:21px;top:21px;width:7px;height:2px;border-radius:2px;background:currentColor;transform:rotate(45deg);transform-origin:left center}
     .top .close-studio{width:40px;height:40px;padding:0;border-color:transparent;background:transparent;color:var(--muted);font-size:22px;line-height:1}
     .top .close-studio:hover{background:var(--tint);color:var(--ink)}
     .list{gap:2px;margin-top:8px;padding:2px}
@@ -3279,7 +3279,7 @@ SOFTWARE.
     .compact .tab{min-height:40px;padding:0 2px;text-align:center;font-size:12px}
     .compact .top{padding:4px 8px;gap:4px}.compact .search input{padding:7px 8px;font-size:16px;line-height:1.5}.compact .search input::placeholder{font-size:13px}
     .compact .button,.compact .icon{min-height:36px}.compact .button{padding:5px 10px;font-size:13px}.compact .icon{min-width:36px}
-    .compact .top .search{padding-right:5px}.compact .top .search-button::before,.compact .top .search-button::after{display:none}
+    .compact .top .search{padding-right:5px}.compact .top .search-button{padding:0}
     .compact .top .close-studio{width:36px;height:36px}
     .compact .selection-action{display:flex;align-items:center;gap:10px;width:min(340px,calc(var(--visible-width) - 24px));max-width:calc(var(--visible-width) - 24px);min-height:60px;padding:7px;border:1px solid var(--line);border-radius:18px;background:var(--surface);color:var(--ink);box-shadow:0 12px 30px #102a2030,0 2px 6px #102a2015;text-align:left;transform:scale(var(--ui-scale)) translateY(calc(0px - env(safe-area-inset-bottom)));transform-origin:top left}
     .compact .selection-action:hover{background:var(--surface);filter:none}
@@ -3372,7 +3372,7 @@ SOFTWARE.
   input.spellcheck = false;
   input.enterKeyHint = 'search';
   const searchField = el('div', 'search-field');
-  searchField.append(input, button('查询', () => lookup(input.value), 'button primary search-button'));
+  searchField.append(input, button('', () => lookup(input.value), 'button search-button', '查询'));
   form.append(searchField);
   form.addEventListener('submit', event => { event.preventDefault(); lookup(input.value).catch(showError); });
   top.append(form, button('×', closeStudio, 'icon close-studio', '关闭学习中心'));

@@ -44,6 +44,8 @@ export async function mobileLayoutMetrics(page) {
     const view = rect('.view');
     const input = root.querySelector('.search input');
     const inputStyle = getComputedStyle(input);
+    const searchButton = root.querySelector('.search-button');
+    const searchIcon = getComputedStyle(searchButton, '::before');
     const placeholderStyle = getComputedStyle(input, '::placeholder');
     const canvas = document.createElement('canvas').getContext('2d');
     canvas.font = `${placeholderStyle.fontStyle} ${placeholderStyle.fontWeight} ${placeholderStyle.fontSize} ${placeholderStyle.fontFamily}`;
@@ -56,6 +58,9 @@ export async function mobileLayoutMetrics(page) {
       groupDivider: getComputedStyle(root.querySelector('.search')).borderRightWidth,
       searchFieldBackground: getComputedStyle(root.querySelector('.search-field')).backgroundColor,
       searchInputBackground: inputStyle.backgroundColor,
+      searchButtonBackground: getComputedStyle(searchButton).backgroundColor,
+      searchButtonLabel: searchButton.getAttribute('aria-label'), searchButtonText: searchButton.textContent,
+      searchIconDisplay: searchIcon.display, searchIconStroke: parseFloat(searchIcon.borderTopWidth),
       hint: {
         available: input.clientWidth - parseFloat(inputStyle.paddingLeft) - parseFloat(inputStyle.paddingRight),
         essential: canvas.measureText(input.placeholder.split('，')[0]).width,
@@ -68,7 +73,6 @@ export async function mobileLayoutMetrics(page) {
       overflow: root.querySelector('.view').scrollWidth - root.querySelector('.view').clientWidth,
       inputFont: parseFloat(inputStyle.fontSize),
       placeholderFont: parseFloat(placeholderStyle.fontSize),
-      searchButtonFont: parseFloat(getComputedStyle(root.querySelector('.search .button')).fontSize),
       focusedSearch: root.activeElement === input,
       requests: window.__lexiRequests
     };
@@ -88,11 +92,14 @@ export function checkSearchTypography(result, mobile, width) {
   'Search button sits inside the input field background');
   check(result.closeButton.width >= 36 && result.closeButton.height >= 36,
     'Close retains a usable target');
+  check(result.searchButton.width >= 36 && result.searchButton.height >= 36
+    && result.searchButtonBackground === 'rgba(0, 0, 0, 0)' && result.searchButtonText === ''
+    && result.searchButtonLabel === '查询' && result.searchIconDisplay !== 'none' && result.searchIconStroke >= 2,
+  'Search remains an accessible, transparent icon with a usable target and clear stroke');
   if (mobile) {
     check(result.inputFont >= 16 && !result.focusedSearch,
       'Opening does not focus or shrink the mobile search input');
-    check(result.placeholderFont >= 12 && result.placeholderFont <= result.searchButtonFont,
-      'Mobile search hint is legible and visually balanced with its button');
+    check(result.placeholderFont >= 12, 'Mobile search hint is legible');
     check(result.hint.essential <= result.hint.available,
       'The query type remains visible on narrow phones');
     if (width >= 390) check(result.hint.full <= result.hint.available,
@@ -100,9 +107,7 @@ export function checkSearchTypography(result, mobile, width) {
   } else {
     check(result.searchInput.height >= 42 && result.searchInput.height > result.searchButton.height,
       'Desktop search field retains its height around the inset button');
-    check(result.inputFont >= result.searchButtonFont && result.inputFont <= result.searchButtonFont + 1
-      && result.placeholderFont === result.inputFont,
-    'Desktop search text is visually balanced with its button');
+    check(result.placeholderFont === result.inputFont, 'Desktop search hint matches the input text');
   }
 }
 

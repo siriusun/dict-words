@@ -2998,7 +2998,7 @@ test('automatic internal lookup ignores controls, invalid text, collapsed and ca
   const definition = shadow.querySelector('.definition');
   for (const [node, raw, collapsed] of [
     [definition, 'abc123', false], [definition, 'beta', true],
-    [findButton(shadow, '查询'), 'query', false], [shadow.querySelector('input'), 'beta', false],
+    [shadow.querySelector('.search-button'), 'query', false], [shadow.querySelector('input'), 'beta', false],
     [app.context.document.activeElement, 'beta', false]
   ]) {
     await selectInside(app, node, raw, collapsed);
@@ -3069,7 +3069,7 @@ test('clicking a control cancels pending selection lookup instead of rearming it
   const range = { startContainer: definition, endContainer: definition, collapsed: false, toString: () => 'beta' };
   setSelection(app, range);
   context.document.listeners.selectionchange.listener();
-  const control = findButton(shadow, '查询');
+  const control = shadow.querySelector('.search-button');
   shadow.listeners.pointerdown.listener({ button: 0, composedPath: () => [control] });
   shadow.listeners.pointerup.listener({ button: 0 });
   context.document.listeners.selectionchange.listener();
