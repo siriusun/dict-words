@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Lexi · 划词词典与复习
 // @namespace    lexi-local
-// @version      0.9.3
+// @version      0.9.4
 // @description  英文划词与句子翻译、触屏选区操作、发音、跨网站历史、生词复习与本地备份。
 // @match        http://*/*
 // @match        https://*/*
@@ -3202,8 +3202,8 @@ SOFTWARE.
     .search-field input,.search-field input:focus-visible{font-size:15px;line-height:27px;padding:8px 12px;background:transparent}
     .top .search{padding-right:14px;border-right:1px solid var(--line)}
     .top .search-button,.top .search-button:hover{position:relative;width:36px;height:36px;padding:0;border:0;background:transparent;color:var(--accent);box-shadow:none}
-    .top .search-button::before{content:'';position:absolute;left:10px;top:9px;width:14px;height:14px;border:2px solid currentColor;border-radius:50%}
-    .top .search-button::after{content:'';position:absolute;left:21px;top:21px;width:7px;height:2px;border-radius:2px;background:currentColor;transform:rotate(45deg);transform-origin:left center}
+    .top .search-button::before{content:'';position:absolute;box-sizing:border-box;left:9px;top:8px;width:16px;height:16px;border:2px solid currentColor;border-radius:50%}
+    .top .search-button::after{content:'';position:absolute;left:22px;top:21px;width:8px;height:2px;border-radius:2px;background:currentColor;transform:rotate(45deg);transform-origin:left center}
     .top .close-studio{width:40px;height:40px;padding:0;border-color:transparent;background:transparent;color:var(--muted);font-size:22px;line-height:1}
     .top .close-studio:hover{background:var(--tint);color:var(--ink)}
     .list{gap:2px;margin-top:8px;padding:2px}

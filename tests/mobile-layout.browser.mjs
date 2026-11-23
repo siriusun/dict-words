@@ -46,6 +46,14 @@ export async function mobileLayoutMetrics(page) {
     const inputStyle = getComputedStyle(input);
     const searchButton = root.querySelector('.search-button');
     const searchIcon = getComputedStyle(searchButton, '::before');
+    const searchHandle = getComputedStyle(searchButton, '::after');
+    const radius = (parseFloat(searchIcon.width) + (searchIcon.boxSizing === 'border-box'
+      ? 0 : 2 * parseFloat(searchIcon.borderLeftWidth))) / 2;
+    const centerX = parseFloat(searchIcon.left) + radius;
+    const centerY = parseFloat(searchIcon.top) + radius;
+    const handleX = parseFloat(searchHandle.left);
+    const handleY = parseFloat(searchHandle.top) + parseFloat(searchHandle.height) / 2;
+    const handleLength = parseFloat(searchHandle.width);
     const placeholderStyle = getComputedStyle(input, '::placeholder');
     const canvas = document.createElement('canvas').getContext('2d');
     canvas.font = `${placeholderStyle.fontStyle} ${placeholderStyle.fontWeight} ${placeholderStyle.fontSize} ${placeholderStyle.fontFamily}`;
@@ -61,6 +69,9 @@ export async function mobileLayoutMetrics(page) {
       searchButtonBackground: getComputedStyle(searchButton).backgroundColor,
       searchButtonLabel: searchButton.getAttribute('aria-label'), searchButtonText: searchButton.textContent,
       searchIconDisplay: searchIcon.display, searchIconStroke: parseFloat(searchIcon.borderTopWidth),
+      handleStartDistance: Math.hypot(handleX - centerX, handleY - centerY),
+      handleEndDistance: Math.hypot(handleX + handleLength / Math.SQRT2 - centerX,
+        handleY + handleLength / Math.SQRT2 - centerY), searchIconRadius: radius,
       hint: {
         available: input.clientWidth - parseFloat(inputStyle.paddingLeft) - parseFloat(inputStyle.paddingRight),
         essential: canvas.measureText(input.placeholder.split('，')[0]).width,
@@ -96,6 +107,9 @@ export function checkSearchTypography(result, mobile, width) {
     && result.searchButtonBackground === 'rgba(0, 0, 0, 0)' && result.searchButtonText === ''
     && result.searchButtonLabel === '查询' && result.searchIconDisplay !== 'none' && result.searchIconStroke >= 2,
   'Search remains an accessible, transparent icon with a usable target and clear stroke');
+  check(Math.abs(result.handleStartDistance - result.searchIconRadius) < 1.5
+    && result.handleEndDistance >= result.searchIconRadius + 5,
+  'Search handle joins the lens and extends clearly beyond it');
   if (mobile) {
     check(result.inputFont >= 16 && !result.focusedSearch,
       'Opening does not focus or shrink the mobile search input');
