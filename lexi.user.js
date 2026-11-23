@@ -3197,9 +3197,11 @@ SOFTWARE.
   style.textContent += `
     .toast{pointer-events:none}
     input,select{border:0;outline:none;box-shadow:none}
-    .search input{font-size:15px;line-height:27px;padding:8px 12px}
+    .search-field{display:flex;align-items:center;flex:1;min-width:0;padding-right:3px;border-radius:12px;background:var(--surface)}
+    .search-field:focus-within{background:var(--tint)}
+    .search-field input,.search-field input:focus-visible{font-size:15px;line-height:27px;padding:8px 12px;background:transparent}
     .top .search{padding-right:14px;border-right:1px solid var(--line)}
-    .top .search-button{position:relative;padding-left:36px;padding-right:16px;border-radius:12px;font-weight:650;box-shadow:0 3px 8px #102a201c}
+    .top .search-button{position:relative;padding:4px 16px 4px 36px;border-radius:9px;font-weight:650;box-shadow:0 2px 6px #102a201c}
     .top .search-button::before{content:'';position:absolute;left:15px;top:50%;width:11px;height:11px;border:1.7px solid currentColor;border-radius:50%;transform:translateY(-60%)}
     .top .search-button::after{content:'';position:absolute;left:26px;top:calc(50% + 4px);width:5px;height:1.7px;border-radius:2px;background:currentColor;transform:rotate(45deg);transform-origin:left center}
     .top .close-studio{width:40px;height:40px;padding:0;border-color:transparent;background:transparent;color:var(--muted);font-size:22px;line-height:1}
@@ -3275,7 +3277,7 @@ SOFTWARE.
     .compact .sidebar{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:2px;overflow:visible;padding:4px 6px;border-right:0;border-bottom:1px solid var(--line)}
     .compact .sidebar .logo,.compact .sidebar .muted,.compact .sidebar .footnote{display:none}
     .compact .tab{min-height:40px;padding:0 2px;text-align:center;font-size:12px}
-    .compact .top{padding:4px 8px;gap:4px}.compact .search{gap:4px}.compact .search input{padding:5px 8px;font-size:16px;line-height:1.5}.compact .search input::placeholder{font-size:13px}
+    .compact .top{padding:4px 8px;gap:4px}.compact .search input{padding:7px 8px;font-size:16px;line-height:1.5}.compact .search input::placeholder{font-size:13px}
     .compact .button,.compact .icon{min-height:36px}.compact .button{padding:5px 10px;font-size:13px}.compact .icon{min-width:36px}
     .compact .top .search{padding-right:5px}.compact .top .search-button::before,.compact .top .search-button::after{display:none}
     .compact .top .close-studio{width:36px;height:36px}
@@ -3369,7 +3371,9 @@ SOFTWARE.
   input.autocapitalize = 'none';
   input.spellcheck = false;
   input.enterKeyHint = 'search';
-  form.append(input, button('查询', () => lookup(input.value), 'button primary search-button'));
+  const searchField = el('div', 'search-field');
+  searchField.append(input, button('查询', () => lookup(input.value), 'button primary search-button'));
+  form.append(searchField);
   form.addEventListener('submit', event => { event.preventDefault(); lookup(input.value).catch(showError); });
   top.append(form, button('×', closeStudio, 'icon close-studio', '关闭学习中心'));
   const view = el('div', 'view');

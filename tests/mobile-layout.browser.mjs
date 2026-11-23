@@ -51,9 +51,11 @@ export async function mobileLayoutMetrics(page) {
     return {
       viewport: { width: viewport.width, height: viewport.height, scale: viewport.scale },
       studio: rect('.studio'), top: rect('.top'), list, row: rect('.library-row'),
-      searchInput: rect('.search input'), searchButton: rect('.search .button'),
+      searchInput: rect('.search input'), searchButton: rect('.search .button'), searchField: rect('.search-field'),
       searchGroup: rect('.search'), closeButton: rect('.top .close-studio'),
       groupDivider: getComputedStyle(root.querySelector('.search')).borderRightWidth,
+      searchFieldBackground: getComputedStyle(root.querySelector('.search-field')).backgroundColor,
+      searchInputBackground: inputStyle.backgroundColor,
       hint: {
         available: input.clientWidth - parseFloat(inputStyle.paddingLeft) - parseFloat(inputStyle.paddingRight),
         essential: canvas.measureText(input.placeholder.split('，')[0]).width,
@@ -80,6 +82,10 @@ export function checkSearchTypography(result, mobile, width) {
   check(result.groupDivider !== '0px' && result.searchButton.right < result.searchGroup.right
     && result.searchGroup.right < result.closeButton.left,
   'Search and close are visually separated without overlapping');
+  check(result.searchFieldBackground !== 'rgba(0, 0, 0, 0)' && result.searchInputBackground === 'rgba(0, 0, 0, 0)'
+    && result.searchButton.left >= result.searchField.left && result.searchButton.right < result.searchField.right
+    && result.searchButton.top > result.searchField.top && result.searchButton.bottom < result.searchField.bottom,
+  'Search button sits inside the input field background');
   check(result.closeButton.width >= 36 && result.closeButton.height >= 36,
     'Close retains a usable target');
   if (mobile) {
@@ -92,8 +98,8 @@ export function checkSearchTypography(result, mobile, width) {
     if (width >= 390) check(result.hint.full <= result.hint.available,
       'The full search hint fits on wider phones');
   } else {
-    check(result.searchInput.height >= 42 && result.searchInput.height === result.searchButton.height,
-      'Desktop search control geometry stays unchanged');
+    check(result.searchInput.height >= 42 && result.searchInput.height > result.searchButton.height,
+      'Desktop search field retains its height around the inset button');
     check(result.inputFont >= result.searchButtonFont && result.inputFont <= result.searchButtonFont + 1
       && result.placeholderFont === result.inputFont,
     'Desktop search text is visually balanced with its button');
