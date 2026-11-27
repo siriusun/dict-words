@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Lexi · 划词词典与复习
 // @namespace    lexi-local
-// @version      0.9.6
+// @version      0.9.7
 // @description  英文划词与句子翻译、触屏选区操作、发音、跨网站历史、生词复习与本地备份。
 // @match        http://*/*
 // @match        https://*/*
@@ -3141,6 +3141,7 @@ SOFTWARE.
   let selectionPointerDown = false;
   let lastSelectionPointerType = '';
   let pendingSelection = null;
+  let pendingWordChoice = null;
   let selectionActionRefreshTimer;
   let selectionTimer;
   let lastSelection = '';
@@ -3188,6 +3189,11 @@ SOFTWARE.
     .launcher.dragging{cursor:grabbing}
     .launcher.selection-active{visibility:hidden;pointer-events:none}
     .selection-action{pointer-events:auto;position:fixed;z-index:4;min-height:44px;max-width:min(220px,calc(100vw - 24px));touch-action:manipulation;user-select:none;white-space:nowrap;box-shadow:0 5px 20px #102a2030}
+    .word-choice{pointer-events:auto;position:fixed;z-index:5;width:min(320px,calc(100vw - 24px));padding:16px;background:var(--surface);border:1px solid var(--line);border-radius:18px;box-shadow:0 12px 36px #102a2030,0 2px 6px #102a2015}
+    .word-choice-heading{display:flex;align-items:center;gap:10px;margin-bottom:12px}.word-choice-icon{display:grid;place-items:center;flex:0 0 34px;height:34px;border-radius:11px;background:var(--tint);color:var(--accent);font:italic 22px Georgia,serif}
+    .word-choice-title{margin:0;font-size:14px;font-weight:700;line-height:1.3}.word-choice-subtitle{margin:2px 0 0;font-size:12px;color:var(--ink);opacity:.75;line-height:1.3}
+    .word-choice .button{display:flex;align-items:center;justify-content:space-between;gap:12px;width:100%;min-height:54px;padding:8px 12px;text-align:left;white-space:normal;overflow-wrap:anywhere}.word-choice .button+.button{margin-top:8px}
+    .word-choice-label{display:block;font-size:12px;line-height:1.3}.word-choice-value{display:block;font:600 17px/1.35 Georgia,"Times New Roman",serif}.word-choice-arrow{font-size:18px;flex-shrink:0}
     .selection-emblem,.selection-summary,.selection-arrow{display:none}
     .popover{pointer-events:auto;position:fixed;width:min(380px,calc(100vw - 24px));max-height:70vh;overflow:auto;background:var(--surface);border:1px solid var(--line);border-radius:18px;box-shadow:0 16px 65px #102a2026;padding:22px}
     .popover-footer{margin-top:20px;padding-top:16px;border-top:1px solid var(--line)}.popover-footer .button{display:block;width:100%;min-height:44px}
@@ -3309,6 +3315,7 @@ SOFTWARE.
     .compact .top .search{padding-right:5px}.compact .top .search-button{padding:0}
     .compact .top .close-studio{width:36px;height:36px}
     .compact .selection-action{display:flex;align-items:center;gap:10px;width:min(340px,calc(var(--visible-width) - 24px));max-width:calc(var(--visible-width) - 24px);min-height:60px;padding:7px;border:1px solid var(--line);border-radius:18px;background:var(--surface);color:var(--ink);box-shadow:0 12px 30px #102a2030,0 2px 6px #102a2015;text-align:left;transform:scale(var(--ui-scale)) translateY(calc(0px - env(safe-area-inset-bottom)));transform-origin:top left}
+    .compact .word-choice{width:min(340px,calc(var(--visible-width) - 24px));transform:scale(var(--ui-scale)) translateY(calc(0px - env(safe-area-inset-bottom)));transform-origin:top left}
     .compact .selection-action:hover{background:var(--surface);filter:none}
     .compact .selection-emblem{display:grid;place-items:center;flex:0 0 38px;height:38px;border-radius:12px;background:var(--tint);color:var(--accent);font:italic 24px/1 Georgia,serif}
     .compact .selection-summary{display:flex;flex:1;min-width:0;flex-direction:column;gap:3px;line-height:1.2}
@@ -3428,6 +3435,32 @@ SOFTWARE.
   selectionAction.hidden = true;
   selectionAction.addEventListener('pointerdown', event => event.preventDefault());
   selectionAction.addEventListener('mousedown', event => event.preventDefault());
+  const wordChoice = el('div', 'word-choice');
+  wordChoice.setAttribute('role', 'group');
+  wordChoice.setAttribute('aria-label', '选择查词范围');
+  const selectedWordChoice = button('', () => runWordChoice(false));
+  const wholeWordChoice = button('', () => runWordChoice(true), 'button primary');
+  const choiceHeading = el('div', 'word-choice-heading');
+  const choiceIcon = el('span', 'word-choice-icon', 'L');
+  choiceIcon.setAttribute('aria-hidden', 'true');
+  const choiceHeadingText = el('div');
+  choiceHeadingText.append(el('p', 'word-choice-title', '选择查词范围'), el('p', 'word-choice-subtitle', '选中的内容是单词的一部分'));
+  choiceHeading.append(choiceIcon, choiceHeadingText);
+  const selectedChoiceText = el('span');
+  const selectedChoiceValue = el('span', 'word-choice-value');
+  selectedChoiceText.append(el('span', 'word-choice-label', '查选中部分'), selectedChoiceValue);
+  const wholeChoiceText = el('span');
+  const wholeChoiceValue = el('span', 'word-choice-value');
+  wholeChoiceText.append(el('span', 'word-choice-label', '查完整单词'), wholeChoiceValue);
+  for (const [choice, content] of [[selectedWordChoice, selectedChoiceText], [wholeWordChoice, wholeChoiceText]]) {
+    const arrow = el('span', 'word-choice-arrow', '→');
+    arrow.setAttribute('aria-hidden', 'true');
+    choice.append(content, arrow);
+  }
+  wordChoice.append(choiceHeading, selectedWordChoice, wholeWordChoice);
+  wordChoice.hidden = true;
+  wordChoice.addEventListener('pointerdown', event => event.preventDefault());
+  wordChoice.addEventListener('mousedown', event => event.preventDefault());
   const readingStyle = el('style');
   const readingHighlightName = 'lexi-reading-origin';
   let readingMarker = null;
@@ -3437,7 +3470,7 @@ SOFTWARE.
   main.append(top, view);
   studio.append(sidebar, main);
   overlay.append(studio);
-  app.append(readingMarks, launcher, readingReturn, popover, overlay, selectionAction, toast);
+  app.append(readingMarks, launcher, readingReturn, popover, overlay, selectionAction, wordChoice, toast);
   shadow.append(style, app);
   const visualViewport = window.visualViewport;
   const touchViewport = window.matchMedia?.('(pointer: coarse)');
@@ -3756,7 +3789,8 @@ SOFTWARE.
   shadow.addEventListener('keydown', event => {
     if (event.key === 'Escape') {
       event.preventDefault(); event.stopPropagation();
-      if (internalSelectionTimer) cancelInternalSelection();
+      if (pendingWordChoice) clearSelectionAction();
+      else if (internalSelectionTimer) cancelInternalSelection();
       else if (internalLookup) returnInternalLookup();
       else if (librarySheet?.open) librarySheet.close();
       else if (!overlay.hidden && closeReviewGradeGuide()) return;
@@ -3769,7 +3803,7 @@ SOFTWARE.
       if (handled) { event.preventDefault(); event.stopPropagation(); return; }
     }
     if (event.key !== 'Tab' || overlay.hidden) return;
-    const focusScope = librarySheet?.open ? librarySheet.panel : studio;
+    const focusScope = pendingWordChoice ? wordChoice : librarySheet?.open ? librarySheet.panel : studio;
     const focusable = [...focusScope.querySelectorAll('button,a,input,select,[tabindex="0"]')].filter(node => !node.disabled && node.getClientRects().length);
     const first = focusable[0], last = focusable.at(-1);
     if (!focusable.includes(shadow.activeElement)) { event.preventDefault(); (event.shiftKey ? last : first)?.focus(); }
@@ -3778,7 +3812,8 @@ SOFTWARE.
   });
   document.addEventListener('keydown', event => {
     if (event.key === 'Escape') {
-      if (!popover.hidden) closePopover();
+      if (pendingWordChoice) clearSelectionAction();
+      else if (!popover.hidden) closePopover();
       else clearSelectionAction();
     }
   });
@@ -3873,6 +3908,8 @@ SOFTWARE.
     clearTimeout(selectionActionRefreshTimer);
     selectionActionRefreshTimer = undefined;
     pendingSelection = null;
+    pendingWordChoice = null;
+    wordChoice.hidden = true;
     selectionAction.hidden = true;
     selectionPreview.textContent = '';
     selectionAction.removeAttribute('aria-label');
@@ -3880,8 +3917,8 @@ SOFTWARE.
     launcher.inert = false;
     launcher.removeAttribute('aria-hidden');
   }
-  function positionSelectionAction(range) {
-    selectionAction.hidden = false;
+  function positionSelectionAction(range, action = selectionAction) {
+    action.hidden = false;
     launcher.classList.toggle('selection-active', compact);
     launcher.inert = compact;
     if (compact) launcher.setAttribute('aria-hidden', 'true');
@@ -3891,21 +3928,109 @@ SOFTWARE.
     };
     const unit = Math.min(1, viewport.scale);
     const gap = 8 / unit;
-    const { width, height } = selectionAction.getBoundingClientRect();
+    const { width, height } = action.getBoundingClientRect();
     const minLeft = viewport.left + gap;
     const minTop = viewport.top + gap;
     const maxLeft = Math.max(minLeft, viewport.left + viewport.width - width - gap);
     const maxTop = Math.max(minTop, viewport.top + viewport.height - height - gap);
     if (compact) {
-      selectionAction.style.left = Math.max(minLeft, Math.min(maxLeft, viewport.left + (viewport.width - width) / 2)) + 'px';
-      selectionAction.style.top = Math.max(minTop, maxTop) + 'px';
+      action.style.left = Math.max(minLeft, Math.min(maxLeft, viewport.left + (viewport.width - width) / 2)) + 'px';
+      action.style.top = Math.max(minTop, maxTop) + 'px';
       return;
     }
     const bounds = range.getBoundingClientRect();
     const above = bounds.top - height - gap;
     const top = above >= minTop ? above : bounds.bottom + gap;
-    selectionAction.style.left = Math.max(minLeft, Math.min(maxLeft, bounds.left)) + 'px';
-    selectionAction.style.top = Math.max(minTop, Math.min(maxTop, top)) + 'px';
+    action.style.left = Math.max(minLeft, Math.min(maxLeft, bounds.left)) + 'px';
+    action.style.top = Math.max(minTop, Math.min(maxTop, top)) + 'px';
+  }
+  function expandedWordRange(range) {
+    if (range.startContainer.nodeType !== 3 || range.endContainer.nodeType !== 3
+      || !/^[a-z'’‘-]+$/i.test(range.toString())) return null;
+    const block = node => {
+      let element = node.parentElement;
+      while (element && getComputedStyle(element).display === 'inline') element = element.parentElement;
+      return element;
+    };
+    const root = block(range.startContainer);
+    if (!root || root !== block(range.endContainer)) return null;
+    const parts = [];
+    function collect(node) {
+      if (node.nodeType === 3) { parts.push(node); return; }
+      if (!(node instanceof Element)) return;
+      if (node !== root && (getComputedStyle(node).display !== 'inline'
+        || node.matches('br,input,textarea,select,button,[contenteditable]:not([contenteditable="false"])'))) {
+        parts.push(null);
+        return;
+      }
+      for (const child of node.childNodes) collect(child);
+    }
+    collect(root);
+    const startIndex = parts.indexOf(range.startContainer);
+    const endIndex = parts.indexOf(range.endContainer);
+    if (startIndex < 0 || endIndex < startIndex || parts.slice(startIndex, endIndex + 1).includes(null)) return null;
+    let first = startIndex, last = endIndex;
+    while (first > 0 && parts[first - 1]) first--;
+    while (last + 1 < parts.length && parts[last + 1]) last++;
+    const nodes = parts.slice(first, last + 1);
+    const offsets = [];
+    let combined = '';
+    for (const node of nodes) { offsets.push(combined.length); combined += node.data; }
+    let start = offsets[startIndex - first] + range.startOffset;
+    let end = offsets[endIndex - first] + range.endOffset;
+    const wordCharacter = char => Boolean(char && /[a-z'’‘-]/i.test(char));
+    while (start > 0 && wordCharacter(combined[start - 1])) start--;
+    while (end < combined.length && wordCharacter(combined[end])) end++;
+    while (start < end && /['’‘]/.test(combined[start])) start++;
+    while (end > start && /['’‘]/.test(combined[end - 1])) end--;
+    if (/[a-z0-9_]/i.test(combined[start - 1] || '') || /[a-z0-9_]/i.test(combined[end] || '')) return null;
+    const value = normalize(combined.slice(start, end));
+    if (!value || value === normalize(range.toString())) return null;
+    const expanded = document.createRange();
+    const point = offset => {
+      let index = nodes.length - 1;
+      while (index > 0 && offsets[index] > offset) index--;
+      return [nodes[index], offset - offsets[index]];
+    };
+    expanded.setStart(...point(start));
+    expanded.setEnd(...point(end));
+    return { range: expanded, value };
+  }
+  function offerWordChoice(selected, clearNative) {
+    if (selected.query.type !== 'word') return false;
+    const whole = expandedWordRange(selected.range);
+    if (!whole) return false;
+    clearSelectionAction();
+    pendingWordChoice = { selected: { ...selected, range: selected.range.cloneRange() }, whole, clearNative };
+    selectedChoiceValue.textContent = selected.query.value;
+    wholeChoiceValue.textContent = whole.value;
+    positionSelectionAction(selected.range, wordChoice);
+    return true;
+  }
+  function runWordChoice(useWhole) {
+    const pending = pendingWordChoice;
+    if (!pending) return;
+    const selected = pending.selected;
+    if (!selected.range.startContainer.isConnected || !selected.range.endContainer.isConnected
+      || normalize(selected.range.toString()) !== selected.query.value
+      || normalize(pending.whole.range.toString()) !== pending.whole.value) {
+      clearSelectionAction();
+      message('选区已失效，请重新选择');
+      return;
+    }
+    if (useWhole) {
+      selected.range = pending.whole.range;
+      selected.query = { type: 'word', value: pending.whole.value };
+    }
+    clearSelectionAction();
+    if (pending.clearNative) selected.selection.removeAllRanges();
+    if (selected.target) {
+      beginInternalLookup(selected.query.value, selected.target);
+      return;
+    }
+    lastSelection = selected.query.value; lastSelectionAt = Date.now(); lastSelectionTransient = false;
+    captureReadingMarker(selected.range, false);
+    lookup(selected.query.value, selected.range.getBoundingClientRect(), selectedContext(selected)).catch(showError);
   }
   function readingElement(node) {
     const element = node instanceof Element ? node : node?.parentElement;
@@ -3950,7 +4075,7 @@ SOFTWARE.
     return selectedInternalQuery() || selectedWebsiteQuery();
   }
   function updateSelectionAction() {
-    if (selectionPointerDown || !usesSelectionAction()) return;
+    if (selectionPointerDown || pendingWordChoice || !usesSelectionAction()) return;
     const selected = currentSelectionQuery();
     if (!selected) { clearSelectionAction(); return; }
     if (selected.target && selected.query.type === 'word' &&
@@ -3968,6 +4093,10 @@ SOFTWARE.
     positionSelectionAction(selected.range);
   }
   function scheduleSelectionActionUpdate() {
+    if (pendingWordChoice) {
+      positionSelectionAction(pendingWordChoice.selected.range, wordChoice);
+      return;
+    }
     if (selectionAction.hidden || selectionPointerDown) return;
     clearTimeout(selectionActionRefreshTimer);
     selectionActionRefreshTimer = setTimeout(() => {
@@ -3991,6 +4120,7 @@ SOFTWARE.
     const selected = currentSelectionQuery();
     clearSelectionAction();
     if (!selected) { message('选区已失效，请重新选择'); return; }
+    if (offerWordChoice(selected, true)) return;
     if (selected.query.type === 'sentence' && selected.query.value.length > MAX_SENTENCE_LENGTH) {
       message(`英文翻译最多支持 ${MAX_SENTENCE_LENGTH} 个字符，请缩短后重试`);
       return;
@@ -4010,6 +4140,7 @@ SOFTWARE.
     cancelInternalSelection();
     const selected = selectedInternalQuery();
     if (!selected) return;
+    if (offerWordChoice(selected, true)) return;
     selected.selection.removeAllRanges();
     if (selected.query.type === 'sentence' && selected.query.value.length > MAX_SENTENCE_LENGTH) {
       message(`英文翻译最多支持 ${MAX_SENTENCE_LENGTH} 个字符，请缩短后重试`);
@@ -4019,7 +4150,7 @@ SOFTWARE.
   }
   function scheduleInternalSelection() {
     cancelInternalSelection();
-    if (internalPointerDown) return;
+    if (internalPointerDown || pendingWordChoice) return;
     try {
       if (usesSelectionAction()) {
         updateSelectionAction();
@@ -4040,15 +4171,22 @@ SOFTWARE.
   shadow.addEventListener('pointerdown', event => {
     rememberSelectionPointer(event);
     cancelInternalSelection();
+    if (pendingWordChoice && !event.composedPath().includes(wordChoice)) clearSelectionAction();
     const reading = readingElement(event.composedPath()[0]);
     internalPointerDown = event.button === 0 && Boolean(reading);
-    if (event.button === 0 && !reading && !event.composedPath().includes(selectionAction)) {
+    if (event.button === 0 && !reading && !event.composedPath().includes(selectionAction) && !event.composedPath().includes(wordChoice)) {
       selectedInternalQuery()?.selection.removeAllRanges();
     }
   });
   shadow.addEventListener('scroll', cancelInternalSelection, true);
   shadow.addEventListener('selectionchange', scheduleInternalSelection);
   document.addEventListener('selectionchange', () => {
+    if (pendingWordChoice) {
+      const current = currentSelectionQuery();
+      const original = pendingWordChoice.selected.range;
+      if (!current || current.range.startContainer !== original.startContainer || current.range.startOffset !== original.startOffset
+        || current.range.endContainer !== original.endContainer || current.range.endOffset !== original.endOffset) clearSelectionAction();
+    }
     scheduleInternalSelection();
     scheduleSelectionActionUpdate();
   });
@@ -5786,6 +5924,7 @@ SOFTWARE.
         return;
       }
       const range = selection.getRangeAt(0);
+      if (offerWordChoice({ selection, range, query, target: null, anchor }, false)) return;
       if (query.value === lastSelection && Date.now() - lastSelectionAt < 1200) {
         captureReadingMarker(range, query.type === 'sentence');
         if (popover.hidden) releaseReadingMarker();
@@ -5824,11 +5963,15 @@ SOFTWARE.
   }
   visualViewport?.addEventListener('resize', onVisualViewportChange);
   visualViewport?.addEventListener('scroll', onVisualViewportChange);
-  document.addEventListener('scroll', updateReadingMarker, true);
+  document.addEventListener('scroll', () => {
+    updateReadingMarker();
+    if (pendingWordChoice) scheduleSelectionActionUpdate();
+  }, true);
   document.addEventListener('pointerdown', event => {
     selectionPointerDown = true;
     rememberSelectionPointer(event);
     if (!event.composedPath().includes(host)) {
+      clearSelectionAction();
       internalPointerDown = false;
       cancelInternalSelection();
       if (!popover.hidden) closePopover();
