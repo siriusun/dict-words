@@ -1072,7 +1072,9 @@ test('expanded examples refresh old caches and remain available in cache-only re
   await respondExamples(requests[0], pairs);
   assert.equal(shadow.querySelectorAll('.example-en').length, 12);
   assert.equal(textOf(shadow.querySelectorAll('.example-en').at(-1)), pairs.at(-1).sentence);
-  await click(findButton(shadow, '更新释义'));
+  await click(shadow.querySelector('.detail-refresh'));
+  assert.equal(shadow.querySelector('.detail-refresh').disabled, true);
+  assert.equal(shadow.querySelector('.detail-refresh').getAttribute('aria-label'), '正在更新释义');
   const definitions = Array.from({ length: 20 }, (_, index) => ({
     definition: `Alpha meaning ${index + 1}.`, example: `Alpha sense example ${index + 1}.`
   }));
@@ -1087,7 +1089,7 @@ test('expanded examples refresh old caches and remain available in cache-only re
   assert.equal(storage.get(prefix + 'word:alpha').meanings[0].definitions.length, 20);
   assert.equal(storage.get(prefix + 'word:alpha').translation, undefined, 'obsolete translation is not reused');
   const refreshCount = requests.length;
-  await click(findButton(shadow, '更新释义'));
+  await click(shadow.querySelector('.detail-refresh'));
   requests[refreshCount].onload({ status: 200, responseText: JSON.stringify([{
     meanings: [{ partOfSpeech: 'noun', definitions: definitions.map(def => ({
       ...def, example: def.example + ' Updated.'
@@ -1114,11 +1116,12 @@ test('failed refreshes keep cached examples and definitions and offer retries', 
   context.GM_xmlhttpRequest = request => { requests.push(request); return { abort() {} }; };
   await click(shadow.querySelector('.item'));
   const cached = JSON.stringify(storage.get(prefix + 'word:alpha'));
-  await click(findButton(shadow, '更新释义'));
+  await click(shadow.querySelector('.detail-refresh'));
   requests[0].onerror();
   await new Promise(setImmediate);
   assert.match(textOf(shadow.querySelector('.detail')), /更新释义失败/);
-  assert.equal(findButton(shadow, '更新释义').disabled, false);
+  assert.equal(shadow.querySelector('.detail-refresh').disabled, false);
+  assert.equal(shadow.querySelector('.detail-refresh').getAttribute('aria-label'), '更新释义');
   await click(findButton(shadow, '更新用法例句'));
   requests[1].onerror();
   await new Promise(setImmediate);
@@ -1472,7 +1475,7 @@ test('history detail confirms deletion of a single event or all events for a wor
   await click(shadow.querySelector('.item'));
   const detail = shadow.querySelector('.detail-pane');
   const actions = detail.querySelector('.actions');
-  assert.deepEqual(actions.querySelectorAll('button').map(node => node.textContent), ['更新释义', '删除']);
+  assert.deepEqual(actions.querySelectorAll('button').map(node => node.textContent), ['↻', '删除']);
   await click(detail.querySelector('.history-delete'));
   await click(findButton(actions, '删除'));
   assert.equal(confirmations.length, 2);
@@ -1504,7 +1507,7 @@ test('book detail deletion confirms and removes both review directions while pre
   const layer = shadow.querySelector('.library-detail');
   const detail = shadow.querySelector('.detail-pane');
   const actions = detail.querySelector('.actions');
-  assert.deepEqual(actions.querySelectorAll('button').map(node => node.textContent), ['更新释义', '删除']);
+  assert.deepEqual(actions.querySelectorAll('button').map(node => node.textContent), ['↻', '删除']);
   const cache = storage.get(prefix + 'word:alpha');
   let prompt;
   context.confirm = message => { prompt = message; return false; };

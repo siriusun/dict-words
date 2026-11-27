@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Lexi · 划词词典与复习
 // @namespace    lexi-local
-// @version      0.9.7
+// @version      0.9.8
 // @description  英文划词与句子翻译、触屏选区操作、发音、跨网站历史、生词复习与本地备份。
 // @match        http://*/*
 // @match        https://*/*
@@ -3263,8 +3263,9 @@ SOFTWARE.
     .detail-star:focus-visible,.list-star:focus-visible,.history-delete:focus-visible{outline-offset:0}
     .detail-star,.list-star{color:var(--muted);font-size:17px}.detail-star.starred,.list-star.starred{color:var(--accent)}
     .detail-star:hover,.list-star:hover{color:var(--accent);background:color-mix(in srgb,var(--accent) 12%,transparent)}
-    .word-heading{margin:8px 0 6px}.word-heading .word{margin:0;min-width:0}
+    .word-heading{margin:8px 0 6px}.word-heading .word{flex:1;min-width:0;margin:0}.word-heading .actions{flex:0 0 auto;flex-wrap:nowrap;gap:2px}
     .detail-star{display:flex;align-items:center;justify-content:center;width:44px;height:44px;padding:0;font-size:32px}
+    .detail-refresh{display:grid;place-items:center;width:44px;height:44px;padding:0;font-size:22px;line-height:1}
     .history-delete{opacity:0;pointer-events:none}
     .history-delete:hover{background:color-mix(in srgb,var(--error) 12%,transparent)}
     @media(hover:none){.history-delete{opacity:1;pointer-events:auto}}
@@ -4844,10 +4845,12 @@ SOFTWARE.
     }
     const refreshNotice = el('p', 'notice');
     refreshNotice.hidden = true;
-    const refresh = button('更新释义', async () => {
+    const refreshHint = '重新获取英文释义及各含义的例句，保留收藏和复习进度';
+    const refresh = button('↻', async () => {
       refresh.disabled = true;
       refreshNotice.hidden = true;
-      refresh.textContent = '正在更新…';
+      refresh.title = '正在更新释义…';
+      refresh.setAttribute('aria-label', '正在更新释义');
       try {
         const epoch = activityEpoch;
         const response = await request('https://api.dictionaryapi.dev/api/v2/entries/en/' + encodeURIComponent(entry.word));
@@ -4862,9 +4865,11 @@ SOFTWARE.
         refreshNotice.hidden = false;
       } finally {
         refresh.disabled = false;
-        refresh.textContent = '更新释义';
+        refresh.title = refreshHint;
+        refresh.setAttribute('aria-label', '更新释义');
       }
-    }, 'button', '重新获取英文释义及各含义的例句，保留收藏和复习进度');
+    }, 'icon detail-refresh', refreshHint);
+    refresh.setAttribute('aria-label', '更新释义');
     actions.append(refresh);
     if (onWordDelete) actions.append(button('删除', onWordDelete, 'button danger',
       `删除 ${entry.word}${onHistoryDelete ? ' 的全部查词记录' : ' 的生词本记录'}`));

@@ -63,8 +63,16 @@ async page => {
     await page.waitForFunction(() => window.__lexiShadow.querySelector('.popover .word')?.textContent === 'curiosity');
     const popup = await page.evaluate(() => {
       const node = window.__lexiShadow.querySelector('.popover');
+      const word = node.querySelector('.word');
+      const range = document.createRange();
+      range.selectNodeContents(word);
+      const actions = [...node.querySelectorAll('.word-heading .actions button')].map(button => ({
+        ...button.getBoundingClientRect().toJSON(), label: button.getAttribute('aria-label')
+      }));
       return { ...node.getBoundingClientRect().toJSON(), scale: visualViewport.scale,
-        scrollable: node.scrollHeight > node.clientHeight, requests: window.__lexiRequests };
+        scrollable: node.scrollHeight > node.clientHeight, requests: window.__lexiRequests,
+        wordLines: range.getClientRects().length, word: word.getBoundingClientRect().toJSON(), actions,
+        overflow: node.scrollWidth - node.clientWidth };
     });
     const result = { width, height, scaled, studio, popup };
     results.push(result);
@@ -79,6 +87,12 @@ async page => {
       throw new Error('Mobile lookup and studio must share the height: ' + JSON.stringify(result));
     }
     if (!popup.scrollable || popup.requests.length) throw new Error('Lookup must scroll locally: ' + JSON.stringify(result));
+    if (!scaled && width >= 320 && height >= 568 && (popup.wordLines !== 1 || popup.overflow > 1
+      || popup.actions.length !== 2 || popup.actions[1].label !== '更新释义'
+      || popup.actions.some(action => action.width < 44 || action.height < 44
+        || action.left < popup.word.right - 1 || action.right > popup.right))) {
+      throw new Error('Lookup heading must fit the word and accessible actions without overflow: ' + JSON.stringify(result));
+    }
     const shortHeight = await page.evaluate(() => {
       const root = window.__lexiShadow;
       root.querySelector('.popover .example').textContent = 'A short example.';
