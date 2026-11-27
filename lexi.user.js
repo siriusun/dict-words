@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Lexi · 划词词典与复习
 // @namespace    lexi-local
-// @version      0.9.5
+// @version      0.9.6
 // @description  英文划词与句子翻译、触屏选区操作、发音、跨网站历史、生词复习与本地备份。
 // @match        http://*/*
 // @match        https://*/*
@@ -2242,6 +2242,7 @@ SOFTWARE.
   const DAY_START_HOUR = 4;
   const ROUND_SIZE = 20;
   const LEECH_LAPSES = 8;
+  const STABLE_INTERVAL_DAYS = 21;
   function dayStart(now) {
     const day = new Date(now);
     if (day.getHours() < DAY_START_HOUR) day.setDate(day.getDate() - 1);
@@ -2434,6 +2435,25 @@ SOFTWARE.
       }
     }
     return { total, passed };
+  }
+  function studyProgress(book) {
+    const progress = { learned: 0, fresh: 0, learning: 0, review: 0, stable: 0, difficult: 0 };
+    for (const record of book) {
+      const card = memoryCard(record);
+      if (card.state === memory.State.New) {
+        progress.fresh++;
+        continue;
+      }
+      progress.learned++;
+      if (card.state === memory.State.Review) {
+        progress.review++;
+        if (card.scheduled_days >= STABLE_INTERVAL_DAYS) progress.stable++;
+      } else {
+        progress.learning++;
+      }
+      if (record.lastGrade === 'hard' || record.lastGrade === 'again') progress.difficult++;
+    }
+    return progress;
   }
   const wordPattern = (word, flags) => new RegExp(`(^|[^a-z'’-])(${word.replace(/'/g, "['’]")})(?![a-z'’-])`, flags);
   function contextParts(raw, word) {
@@ -3243,6 +3263,10 @@ SOFTWARE.
     .history-delete:hover{background:color-mix(in srgb,var(--error) 12%,transparent)}
     @media(hover:none){.history-delete{opacity:1;pointer-events:auto}}
     .stats{flex-wrap:wrap}.stat{min-width:110px}
+    .progress-stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:10px}
+    .progress-stat{padding:10px 12px;background:var(--paper);border:1px solid var(--line);border-radius:10px}
+    .progress-stat strong{display:block;font:26px Georgia,serif;color:var(--accent)}
+    .progress-stat span{font-size:12px}
     .context-line{margin:14px auto 4px;max-width:480px;color:var(--muted);font:15px/1.7 Georgia,"Times New Roman",serif;overflow-wrap:anywhere}
     .context-line mark{background:color-mix(in srgb,var(--accent) 18%,transparent);color:var(--ink);border-radius:4px;padding:0 3px}
     .context-line .cloze{color:var(--accent);font-weight:650;letter-spacing:1px}
@@ -5180,6 +5204,19 @@ SOFTWARE.
     }
     if (limited) landing.append(el('p', 'notice', `今日新词上限 ${settings.newPerDay} 个已用完，还有 ${plan.fresh.length} 个新词，凌晨 4:00 后继续。可在设置中调整上限。`));
     view.append(stats, landing);
+    const progress = studyProgress(book);
+    const progressSection = el('section', 'section review-progress');
+    const progressStats = el('div', 'progress-stats');
+    for (const [value, label] of [[progress.learned, '已学习'], [progress.fresh, '未学习'],
+      [progress.learning, '学习／重学中'], [progress.review, '长期复习中'],
+      [progress.stable, '较稳固'], [progress.difficult, '上次困难／忘记']]) {
+      const stat = el('div', 'progress-stat');
+      stat.append(el('strong', '', String(value)), el('span', 'muted', label));
+      progressStats.append(stat);
+    }
+    progressSection.append(el('h3', '', '词汇进度'), progressStats,
+      el('p', 'notice', '按收藏词的正向卡统计，每词计一次。已学习包括学习／重学中和长期复习中；较稳固是长期复习中上次安排间隔至少 21 天的词，即使已到期也计入，并非永久掌握。上次困难／忘记按最近一次反馈统计，可与其他项重叠。'));
+    view.append(progressSection);
     if (book.length) {
       const insight = el('section', 'section review-insight');
       const retention = retentionStats([...book, ...recalls], now);

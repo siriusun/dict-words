@@ -3263,6 +3263,55 @@ test('daily new-word limit caps rounds and explains when today\'s new words are 
   assert.equal(findButton(shadow, '开始复习'), undefined);
 });
 
+test('overview counts word progress from forward cards, including legacy records and interval boundaries', async () => {
+  const app = setup();
+  const { shadow, storage, prefix, context, click } = app;
+  const now = context.Date.now();
+  const newCard = word => createStudy(word, now);
+  const learning = schedule(newCard('learning'), 'hard', now);
+  const review = schedule(newCard('review'), 'easy', now);
+  const relearning = schedule(review, 'again', review.dueAt);
+  storage.delete(prefix + 'study:alpha');
+  for (const record of [
+    newCard('fresh'), learning, { ...relearning, word: 'relearning' },
+    { ...review, word: 'short', fsrs: { ...review.fsrs, scheduled_days: 20 } },
+    { ...review, word: 'stable', fsrs: { ...review.fsrs, scheduled_days: 21 } },
+    { word: 'legacy', addedAt: now - 40 * 86400000, updatedAt: now - 30 * 86400000,
+      dueAt: now - 9 * 86400000, stage: 3, reviews: 3, lastReviewedAt: now - 30 * 86400000, lastGrade: 'hard' }
+  ]) storage.set(prefix + 'study:' + record.word, record);
+  storage.set(prefix + 'recall:stable', schedule(newCard('stable'), 'again', now));
+  await click(shadow.querySelectorAll('.tab')[2]);
+  const progress = () => Object.fromEntries(shadow.querySelectorAll('.progress-stat').map(node =>
+    [node.querySelector('span').textContent, node.querySelector('strong').textContent]));
+  const expected = { '已学习': '5', '未学习': '1', '学习／重学中': '2', '长期复习中': '3',
+    '较稳固': '2', '上次困难／忘记': '3' };
+  assert.deepEqual(progress(), expected);
+  assert.match(textOf(shadow.querySelector('.review-progress')), /间隔至少 21 天.*并非永久掌握/);
+  useSettings(app, { reverse: true });
+  assert.deepEqual(progress(), expected);
+  useSettings(app, { reverse: false });
+  assert.deepEqual(progress(), expected);
+});
+
+test('overview progress handles empty collections and updates after grading and undo', async () => {
+  const app = setup();
+  const { shadow, storage, prefix, context, click } = app;
+  storage.delete(prefix + 'study:alpha');
+  await click(shadow.querySelectorAll('.tab')[2]);
+  const values = () => shadow.querySelectorAll('.progress-stat').map(node => node.querySelector('strong').textContent);
+  assert.deepEqual(values(), ['0', '0', '0', '0', '0', '0']);
+  storage.set(prefix + 'study:alpha', createStudy('alpha', context.Date.now()));
+  await click(shadow.querySelectorAll('.tab')[2]);
+  assert.deepEqual(values(), ['0', '1', '0', '0', '0', '0']);
+  await click(findButton(shadow, '开始复习'));
+  await answerWith(app, '轻松');
+  await click(findButton(shadow, '撤销上一次'));
+  assert.equal(storage.get(prefix + 'study:alpha').fsrs.state, 0);
+  await answerWith(app, '困难');
+  await click(findButton(shadow, '返回复习概览'));
+  assert.deepEqual(values(), ['1', '0', '1', '0', '0', '1']);
+});
+
 test('overview reports true recent retention and flags leeches on the overview and the card', async () => {
   const app = setup();
   const { shadow, storage, prefix, click } = app;
