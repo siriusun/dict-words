@@ -3261,6 +3261,8 @@ SOFTWARE.
     .sync-field{display:block;max-width:420px;margin:12px 0}
     .sync-field input{display:block;min-height:44px;margin-top:4px;border:1px solid var(--line);background:var(--paper)}
     .sync-field input:focus-visible{border-color:var(--accent);background:var(--tint)}
+    .review-heading{display:flex;align-items:center;justify-content:space-between;gap:12px}
+    .review-sync{min-height:40px;padding:5px 10px;font-size:12px;color:var(--muted)}
     .lookup-back{min-width:0;max-width:100%;overflow:hidden;text-overflow:ellipsis}.lookup-bar{margin-bottom:16px;gap:8px}
     .scope-menu{position:relative}.scope-menu summary{list-style:none;cursor:pointer}.scope-menu summary::-webkit-details-marker{display:none}
     .scope-actions{position:absolute;right:0;top:100%;z-index:1;width:190px;padding:8px;display:flex;flex-direction:column;gap:5px;background:var(--surface);border:1px solid var(--line);border-radius:12px;box-shadow:0 6px 20px #102a2025}
@@ -3279,6 +3281,7 @@ SOFTWARE.
     .compact .tab{min-height:40px;padding:0 2px;text-align:center;font-size:12px}
     .compact .top{padding:4px 8px;gap:4px}.compact .search input{padding:7px 8px;font-size:16px;line-height:1.5}.compact .search input::placeholder{font-size:13px}
     .compact .button,.compact .icon{min-height:36px}.compact .button{padding:5px 10px;font-size:13px}.compact .icon{min-width:36px}
+    .compact .review-sync{min-height:44px;font-size:12px}
     .compact .top .search{padding-right:5px}.compact .top .search-button{padding:0}
     .compact .top .close-studio{width:36px;height:36px}
     .compact .selection-action{display:flex;align-items:center;gap:10px;width:min(340px,calc(var(--visible-width) - 24px));max-width:calc(var(--visible-width) - 24px);min-height:60px;padding:7px;border:1px solid var(--line);border-radius:18px;background:var(--surface);color:var(--ink);box-shadow:0 12px 30px #102a2030,0 2px 6px #102a2015;text-align:left;transform:scale(var(--ui-scale)) translateY(calc(0px - env(safe-area-inset-bottom)));transform-origin:top left}
@@ -4740,6 +4743,8 @@ SOFTWARE.
     librarySheet?.dispose();
     librarySheet = null;
     refreshLibrary = null;
+    refreshSyncStatus = null;
+    refreshReviewSyncStatus = null;
     clearTimeout(reviewTimer);
     for (const [key, node] of Object.entries(navButtons)) {
       node.classList.toggle('active', key === screen);
@@ -5129,8 +5134,23 @@ SOFTWARE.
   }
   function renderReview() {
     const now = Date.now();
-    view.append(el('h1', 'heading', '让单词留下来'), el('p', 'subheading', '短时复习，长期积累'));
     const entry = review.current();
+    const heading = el('div', 'review-heading');
+    heading.append(el('h1', 'heading', '让单词留下来'));
+    if (!entry && !review.waitingUntil) {
+      const shortcut = button('', () => {
+        const saved = get('nutstore-sync', null);
+        if (!saved) { screen = 'settings'; render(); return; }
+        return startSync(saved);
+      }, 'button review-sync');
+      refreshReviewSyncStatus = () => {
+        shortcut.textContent = syncBusy ? '同步中…' : get('nutstore-sync', null) ? '同步数据' : '设置同步';
+        shortcut.disabled = syncBusy;
+      };
+      refreshReviewSyncStatus();
+      heading.append(shortcut);
+    }
+    view.append(heading, el('p', 'subheading', '短时复习，长期积累'));
     if (entry) renderCard(entry);
     else if (review.waitingUntil) renderReviewWait(now, review.waitingUntil);
     else if (review.active) renderRoundDone(now);
@@ -5467,6 +5487,28 @@ SOFTWARE.
   let syncBusy = false;
   let syncMessage = '';
   let refreshSyncStatus;
+  let refreshReviewSyncStatus;
+  async function startSync(saved) {
+    if (syncBusy) return;
+    syncBusy = true;
+    syncMessage = '正在连接坚果云并合并数据…';
+    refreshSyncStatus?.();
+    refreshReviewSyncStatus?.();
+    try {
+      const result = await syncWithNutstore(saved);
+      syncMessage = result.message;
+      if (result.changed && !overlay.hidden && !internalLookup && screen !== 'settings' &&
+          !(screen === 'review' && review.presented)) render();
+      message(result.message);
+    } catch (error) {
+      syncMessage = error.message || '同步失败，请重试';
+      showError(error);
+    } finally {
+      syncBusy = false;
+      refreshSyncStatus?.();
+      refreshReviewSyncStatus?.();
+    }
+  }
   function renderNutstore() {
     const section = el('section', 'section');
     const config = get('nutstore-sync', null);
@@ -5507,24 +5549,7 @@ SOFTWARE.
       const saved = get('nutstore-sync', null);
       if (!saved) throw new Error('请先保存坚果云同步配置');
       if (account.value.trim() !== saved.account || folder.value.trim() !== saved.folder) throw new Error('请先保存修改后的同步配置');
-      syncBusy = true;
-      syncMessage = '正在连接坚果云并合并数据…';
-      refreshSyncStatus();
-      try {
-        const result = await syncWithNutstore(saved);
-        syncMessage = result.message;
-        if (result.changed) {
-          review.reset();
-          if (!overlay.hidden && screen !== 'settings') render();
-        }
-        message(result.message);
-      } catch (error) {
-        syncMessage = error.message || '同步失败，请重试';
-        showError(error);
-      } finally {
-        syncBusy = false;
-        refreshSyncStatus();
-      }
+      await startSync(saved);
     }, 'button primary');
     const clear = button('清除同步配置', () => {
       if (syncBusy) return;
@@ -5544,7 +5569,7 @@ SOFTWARE.
     const actions = el('div', 'actions');
     actions.append(save, sync, clear);
     section.append(el('h3', '', '坚果云同步'),
-      el('p', 'notice', '仅点击「立即同步」时联网。先在坚果云创建一个私有一级文件夹（例如 Lexi），在每台设备上使用同一账号和文件夹。'),
+      el('p', 'notice', '仅手动点击同步时联网，也可从复习概览或本轮完成页同步。先在坚果云创建一个私有一级文件夹（例如 Lexi），在每台设备上使用同一账号和文件夹。'),
       link('如何生成第三方应用密码 ↗', SYNC_HELP), field('坚果云账号', account), field('同步文件夹', folder),
       el('p', 'notice', '点「保存同步配置」后，在弹窗里输入第三方应用密码（不是坚果云登录密码）。'),
       actions, status,

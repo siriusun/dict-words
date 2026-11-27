@@ -734,6 +734,65 @@ function nutstoreFixture(entries = []) {
   return { files, connect };
 }
 
+test('review sync shortcut directs unconfigured users to settings without a request', async () => {
+  const app = setup();
+  await app.click(findButton(app.shadow, '复习'));
+  await app.click(findButton(app.shadow, '设置同步'));
+  assert.ok(findButton(app.shadow, '保存同步配置'));
+});
+
+test('review completion sync uploads the saved grade and reports errors', async () => {
+  const app = await setupNutstore();
+  const { files, connect } = nutstoreFixture();
+  connect(app, 1);
+  await openReview(app);
+  assert.equal(findButton(app.shadow, '同步数据'), undefined, 'the shortcut does not occupy the card');
+  await app.click(findButton(app.shadow, '记得'));
+  assert.ok(textOf(app.shadow.querySelector('.review')).includes('本轮已完成'));
+  await app.click(findButton(app.shadow, '同步数据'));
+  for (let i = 0; i < 30 && findButton(app.shadow, '同步中'); i++) await new Promise(setImmediate);
+  assert.ok(findButton(app.shadow, '同步数据'), 'sync has settled');
+  const snapshot = JSON.parse([...files.values()][0]);
+  assert.equal(snapshot.book[0].lastGrade, 'good');
+  assert.match(app.shadow.querySelector('.toast').textContent, /同步完成/);
+  files.set('lexi-sync.json', 'invalid');
+  await app.click(findButton(app.shadow, '同步数据'));
+  for (let i = 0; i < 30 && findButton(app.shadow, '同步中'); i++) await new Promise(setImmediate);
+  assert.ok(findButton(app.shadow, '同步数据'), 'failed sync has settled');
+  assert.match(app.shadow.querySelector('.toast').textContent, /不是有效的 Lexi JSON/);
+});
+
+test('review shortcut shares the sync lock and does not interrupt a card started during sync', async () => {
+  const app = await setupNutstore();
+  const remote = JSON.stringify({ schemaVersion: 3,
+    words: [{ ...app.storage.get(app.prefix + 'word:beta'), word: 'gamma' }], history: [], book: [], recall: [] });
+  const { connect } = nutstoreFixture([['lexi-sync.json', remote]]);
+  let release;
+  connect(app, 1, (request, _name, respond) => {
+    if (request.method !== 'GET' || release) return false;
+    release = respond;
+    return true;
+  });
+  await app.click(findButton(app.shadow, '复习'));
+  await app.click(findButton(app.shadow, '同步数据'));
+  assert.equal(findButton(app.shadow, '同步中').disabled, true);
+  await app.click(findButton(app.shadow, '设置'));
+  assert.equal(findButton(app.shadow, '立即同步').disabled, true);
+  await app.click(findButton(app.shadow, '立即同步'));
+  assert.equal(app.requests.length, 1);
+  await app.click(findButton(app.shadow, '复习'));
+  await app.click(findButton(app.shadow, '开始复习'));
+  await app.click(findButton(app.shadow, '显示释义'));
+  const answer = app.shadow.querySelector('.review-answer');
+  release();
+  for (let i = 0; i < 30 && !app.storage.has(app.prefix + 'word:gamma'); i++) await new Promise(setImmediate);
+  await new Promise(setImmediate);
+  assert.equal(app.storage.has(app.prefix + 'word:gamma'), true);
+  assert.equal(app.shadow.querySelector('.review-answer'), answer);
+  await app.click(findButton(app.shadow, '记得'));
+  assert.equal(app.storage.get(app.prefix + 'study:alpha').lastGrade, 'good');
+});
+
 test('Nutstore round-trips phone and desktop data without any ETag or reconfiguration', async () => {
   const phone = await setupNutstore();
   const desktop = await setupNutstore();
